@@ -1,0 +1,18 @@
+import { eventUrl } from './api';
+import { useAppStore } from './store';
+import type { MissionEvent } from './types';
+
+export function subscribeMissionEvents(missionId: string) {
+  const source = new EventSource(eventUrl(missionId), { withCredentials: true });
+  const apply = (raw: MessageEvent<string>) => {
+    try {
+      useAppStore.getState().applyEvent(JSON.parse(raw.data) as MissionEvent);
+    } catch {
+      useAppStore.getState().applyEvent({ type: raw.type, missionId });
+    }
+  };
+  ['message', 'cost_event', 'sandbox_burn', 'work_card_allocated', 'work_card_updated', 'mission_spend_updated'].forEach((name) => {
+    source.addEventListener(name, apply as EventListener);
+  });
+  return () => source.close();
+}

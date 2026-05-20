@@ -29,6 +29,26 @@ async function resolveSandbox(ctx: ToolContext, target: "mission" | "private"): 
   return e2b.startShared(ctx.missionId);
 }
 
+async function storageObjectText(obj: unknown): Promise<string> {
+  const wrapped = obj as Record<string, unknown> | null;
+  const maybeText = wrapped?.text;
+  if (typeof maybeText === "function") return maybeText.call(obj);
+  if (typeof maybeText === "string") return maybeText;
+  const maybeArrayBuffer = wrapped?.arrayBuffer;
+  if (typeof maybeArrayBuffer === "function") return new TextDecoder().decode(await maybeArrayBuffer.call(obj));
+  for (const key of ["body", "content", "data", "value"]) {
+    const value = wrapped?.[key];
+    if (typeof value === "string") return value;
+    if (value instanceof Uint8Array) return new TextDecoder().decode(value);
+    if (value && typeof value === "object") {
+      const nestedText = (value as Record<string, unknown>).text;
+      if (typeof nestedText === "function") return nestedText.call(value);
+      if (typeof nestedText === "string") return nestedText;
+    }
+  }
+  return String(obj ?? "");
+}
+
 async function withUsageAndSpend<T>(name: string, ctx: ToolContext, handler: () => Promise<T>) {
   const started = Date.now();
   try {
@@ -98,7 +118,7 @@ export function missionryToolKit(ctx: ToolContext) {
         withUsageAndSpend("read_artifact", ctx, async () => {
           const key = `missions/${ctx.missionId}/artifacts/${input.artifactId}/${input.filename}`;
           const object = await storage.from(buckets.missionryWorkspaces).get(key);
-          return { key, content: object ? await object.text() : null };
+          return { key, content: object ? await storageObjectText(object) : null };
         }),
     }),
     write_artifact: tool({
@@ -147,16 +167,18 @@ export function missionryToolKit(ctx: ToolContext) {
       execute: (input) =>
         withUsageAndSpend("commit_self_update", ctx, async () => {
           const key = `agents/${ctx.agentId}/${input.file}`;
+          const before = await storage.from(buckets.missionryWorkspaces).get(key);
+          const previousBody = before ? await storageObjectText(before) : "";
           await storage.from(buckets.missionryWorkspaces).put(key, input.content);
           const auditEventId = await recordAudit({
             missionId: ctx.missionId,
             subjectType: "agent",
             subjectId: ctx.agentId,
             actor: { type: "agent", id: ctx.agentId },
-            action: "agent_self_update_recorded",
+            action: "self_update",
             clientActionId: ctx.clientActionId,
             diffSummary: input.reason,
-            payloadRef: { r2Key: key },
+            payloadRef: { r2Key: key, previousBody } as { r2Key: string; sha256?: string },
             reversible: true,
             rollbackAvailable: true,
           });

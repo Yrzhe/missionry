@@ -48,8 +48,8 @@ export async function seedDemo(requestedMissionId?: string) {
   await upsertInstance(missionId, instanceB, agentB, "member", "Pixel", timestamp);
   await reservePrivateSandboxSlot(missionId, instanceA);
   await reservePrivateSandboxSlot(missionId, instanceB);
-  await createDemoWorkCard(missionId, "wc_shared", instanceA, "mission", "Shared Tier 1 command and file");
-  await createDemoWorkCard(missionId, "wc_private", instanceA, "private", "Private Tier 2 escalation");
+  await createDemoWorkCard(missionId, `wc_shared_${missionId}`, instanceA, "mission", "Shared Tier 1 command and file");
+  await createDemoWorkCard(missionId, `wc_private_${missionId}`, instanceA, "private", "Private Tier 2 escalation");
   return { missionId, agents: [agentA, agentB], instances: [instanceA, instanceB] };
 }
 
@@ -86,7 +86,7 @@ async function upsertAgent(agentId: string, slug: string, name: string, timestam
     displayName: name,
     avatarJson: JSON.stringify({ avatarSource: "random", avatarSeed: agentId }),
     globalIdentityJson: JSON.stringify({ displayName: name, role: "demo agent", version: "v1" }),
-    equippedSkillIdsJson: JSON.stringify(["demo-sandbox"]),
+    equippedSkillIdsJson: JSON.stringify(agentId === "agt_forge" ? ["demo-sandbox", "prd-template-v2"] : ["demo-sandbox"]),
     r2Prefix: `agents/${agentId}/`,
     auditHeadId: null,
     createdAt: timestamp,

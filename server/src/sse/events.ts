@@ -1,6 +1,6 @@
 import { db } from "edgespark";
 import { eq, desc } from "drizzle-orm";
-import { missionSpend } from "../defs/db_schema";
+import { auditEvents, missionSpend } from "../defs/db_schema";
 import { recordAudit, recordCost, type AuditRecord, type CostRecord } from "../state/missionState";
 
 export type MissionSseEvent = {
@@ -48,13 +48,19 @@ export async function emitCostEvent(event: CostRecord): Promise<MissionSseEvent>
 }
 
 export async function recentMissionEvents(missionId: string): Promise<MissionSseEvent[]> {
-  const rows = await db
+  const spendRows = await db
     .select()
     .from(missionSpend)
     .where(eq(missionSpend.missionId, missionId))
     .orderBy(desc(missionSpend.createdAt))
     .limit(20);
-  return rows.reverse().map((row: typeof missionSpend.$inferSelect) => ({
+  const auditRows = await db
+    .select()
+    .from(auditEvents)
+    .where(eq(auditEvents.missionId, missionId))
+    .orderBy(desc(auditEvents.createdAt))
+    .limit(20);
+  const spendEvents = spendRows.map((row: typeof missionSpend.$inferSelect) => ({
     type: row.eventType,
     missionId,
     occurredAt: row.createdAt,
@@ -70,4 +76,28 @@ export async function recentMissionEvents(missionId: string): Promise<MissionSse
       sandboxSeconds: row.sandboxSeconds ?? undefined,
     },
   }));
+  const auditSseEvents = auditRows.map((row: typeof auditEvents.$inferSelect) => ({
+    type:
+      row.action === "message_sent"
+        ? "direct_thread_message_sent"
+        : row.action === "work_card_completed"
+          ? "work_card_completed"
+          : row.action === "direct_thread_created"
+            ? "direct_thread_ready"
+            : row.action,
+    missionId,
+    auditEventId: row.eventId,
+    occurredAt: row.createdAt,
+    payload: {
+      subjectType: row.subjectType,
+      subjectId: row.subjectId,
+      actor: JSON.parse(row.actorJson),
+      clientActionId: row.clientActionId ?? undefined,
+      diffSummary: row.diffSummary,
+      payloadRef: row.payloadRefJson ? JSON.parse(row.payloadRefJson) : undefined,
+    },
+  }));
+  return [...spendEvents, ...auditSseEvents]
+    .sort((a, b) => a.occurredAt.localeCompare(b.occurredAt))
+    .slice(-30);
 }

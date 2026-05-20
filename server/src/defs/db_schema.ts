@@ -64,6 +64,27 @@ export const workCards = sqliteTable("work_cards", {
   updatedAt: text("updated_at").notNull(),
 });
 
+export const directThreads = sqliteTable("direct_threads", {
+  id: text("id").primaryKey(),
+  missionId: text("mission_id").notNull(),
+  agentInstanceId: text("agent_instance_id").notNull(),
+  userId: text("user_id").notNull(),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+});
+
+export const directThreadMessages = sqliteTable("direct_thread_messages", {
+  id: text("id").primaryKey(),
+  threadId: text("thread_id").notNull(),
+  missionId: text("mission_id").notNull(),
+  agentInstanceId: text("agent_instance_id").notNull(),
+  senderType: text("sender_type").notNull(),
+  senderId: text("sender_id").notNull(),
+  body: text("body").notNull(),
+  auditEventId: text("audit_event_id").notNull(),
+  createdAt: text("created_at").notNull(),
+});
+
 export const sandboxRuntime = sqliteTable("sandbox_runtime", {
   sandboxId: text("sandbox_id").primaryKey(),
   missionId: text("mission_id").notNull(),
@@ -164,6 +185,8 @@ export const createIndexesSql = [
   "create index if not exists idx_agent_instances_mission on agent_instances(mission_id)",
   "create index if not exists idx_work_cards_mission on work_cards(mission_id)",
   "create index if not exists idx_work_cards_agent_status on work_cards(assignee_instance_id, status, created_at)",
+  "create index if not exists idx_direct_threads_mission_instance on direct_threads(mission_id, agent_instance_id)",
+  "create index if not exists idx_direct_thread_messages_thread on direct_thread_messages(thread_id, created_at)",
   "create index if not exists idx_sandbox_runtime_idle on sandbox_runtime(state, last_activity_at)",
   "create index if not exists idx_sandbox_runtime_mission on sandbox_runtime(mission_id)",
   "create index if not exists idx_audit_events_mission on audit_events(mission_id, created_at)",

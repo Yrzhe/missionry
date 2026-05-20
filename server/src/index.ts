@@ -2,11 +2,22 @@ import { createOpenAI } from "@ai-sdk/openai";
 import { db, storage, secret, vars, ctx } from "edgespark";
 import { auth } from "edgespark/http";
 import { and, asc, desc, eq, ne } from "drizzle-orm";
-import { generateText } from "ai";
+import { generateText, streamText, stepCountIs } from "ai";
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
-import { ensureAgentFiles, ensureAgentInstanceFiles } from "./agents/files";
-import { agentInstances, agents, auditEvents, missionSpend, missions, usersProfile, whitelistEntries, workCards } from "./defs/db_schema";
+import { ensureAgentFiles, ensureAgentInstanceFiles, loadAgentBootFiles, loadSkill } from "./agents/files";
+import {
+  agentInstances,
+  agents,
+  auditEvents,
+  directThreadMessages,
+  directThreads,
+  missionSpend,
+  missions,
+  usersProfile,
+  whitelistEntries,
+  workCards,
+} from "./defs/db_schema";
 import { buckets } from "./defs/storage_schema";
 import { seedDemo } from "./seed";
 import * as e2b from "./sandbox/e2b";
@@ -21,6 +32,7 @@ import {
   reservePrivateSandboxSlot,
   updateMission,
 } from "./state/missionState";
+import { missionryToolKit } from "./tools";
 
 type OwnerInput = { type: "user" | "agent"; agentId?: string; userId?: string };
 type SandboxAffinityInput = { tier: "tier0" | "mission" | "private"; reason: string };
@@ -41,6 +53,8 @@ const app = new Hono();
 const now = () => new Date().toISOString();
 const SUPER_ADMIN_EMAIL = "qq1514337391@gmail.com";
 const DAY_MS = 24 * 60 * 60 * 1000;
+let startupSeedPromise: Promise<unknown> | null = null;
+const storageBodyCache = new Map<string, string>();
 
 app.onError((err, c) => {
   console.error("HANDLER ERROR:", err);
@@ -54,6 +68,52 @@ app.onError((err, c) => {
 
 function jsonError(c: any, code: string, status = 400) {
   return c.json({ error: { code, messageKey: code } }, status);
+}
+
+function waitUntil(task: Promise<unknown>) {
+  const runtimeCtx = ctx as unknown as { waitUntil?: (task: Promise<unknown>) => void; runInBackground?: (task: Promise<unknown>) => void };
+  if (typeof runtimeCtx.waitUntil === "function") runtimeCtx.waitUntil(task);
+  else if (typeof runtimeCtx.runInBackground === "function") runtimeCtx.runInBackground(task);
+}
+
+function estimateLlmCostCents(model: string, usage: Record<string, unknown>) {
+  const promptTokens = Number(usage.promptTokens ?? usage.inputTokens ?? 0);
+  const completionTokens = Number(usage.completionTokens ?? usage.outputTokens ?? 0);
+  const cheapRate = model.includes("mini") ? 0.000001 : 0.00001;
+  return Math.max(1, Math.ceil((promptTokens + completionTokens) * cheapRate));
+}
+
+async function storageObjectText(obj: unknown): Promise<string> {
+  const wrapped = obj as Record<string, unknown> | null;
+  const maybeText = wrapped?.text;
+  if (typeof maybeText === "function") return maybeText.call(obj);
+  if (typeof maybeText === "string") return maybeText;
+  const maybeArrayBuffer = wrapped?.arrayBuffer;
+  if (typeof maybeArrayBuffer === "function") return new TextDecoder().decode(await maybeArrayBuffer.call(obj));
+  for (const key of ["body", "content", "data", "value"]) {
+    const value = wrapped?.[key];
+    if (typeof value === "string") return value;
+    if (value instanceof Uint8Array) return new TextDecoder().decode(value);
+    if (value && typeof value === "object") {
+      const nestedText = (value as Record<string, unknown>).text;
+      if (typeof nestedText === "function") return nestedText.call(value);
+      if (typeof nestedText === "string") return nestedText;
+    }
+  }
+  return String(obj ?? "");
+}
+
+function scheduleStartupSeed() {
+  if (startupSeedPromise) return startupSeedPromise;
+  startupSeedPromise = (async () => {
+    await ensureAgentFiles("agt_forge", "Forge");
+    await seedDemo("mis_demo");
+  })().catch((error) => {
+    startupSeedPromise = null;
+    console.error("STARTUP SEED ERROR:", error);
+  });
+  waitUntil(startupSeedPromise);
+  return startupSeedPromise;
 }
 
 function currentUserProfile(c: any): UserProfile {
@@ -165,7 +225,7 @@ async function ensureAgent(agentId: string, displayName = agentId) {
     displayName,
     avatarJson: JSON.stringify({ avatarSource: "random", avatarSeed: agentId }),
     globalIdentityJson: JSON.stringify({ displayName, role: "agent", version: "v1" }),
-    equippedSkillIdsJson: JSON.stringify(["demo-sandbox"]),
+    equippedSkillIdsJson: JSON.stringify(agentId === "agt_forge" ? ["demo-sandbox", "prd-template-v2"] : ["demo-sandbox"]),
     r2Prefix: `agents/${agentId}/`,
     auditHeadId: null,
     createdAt: now(),
@@ -244,17 +304,12 @@ async function createQueuedWorkCard(missionId: string, input: WorkCardInput) {
     updatedAt: now(),
   });
   if (status === "running") {
-    try {
-      await triggerWorkCard(missionId, workCardId, input);
-    } catch (error) {
-      await db.update(workCards).set({ status: "failed", updatedAt: now() }).where(eq(workCards.id, workCardId));
-      throw error;
-    }
+    waitUntil(executeWorkCard(workCardId));
   }
   return { workCardId, status };
 }
 
-async function triggerWorkCard(missionId: string, workCardId: string, input: WorkCardInput) {
+async function triggerWorkCardStarted(missionId: string, workCardId: string) {
   await recordAudit({
     missionId,
     subjectType: "work_card",
@@ -263,39 +318,6 @@ async function triggerWorkCard(missionId: string, workCardId: string, input: Wor
     action: "work_card_allocated",
     diffSummary: "work_card.running",
   });
-  if (!input.demoAction) return;
-  if (input.demoAction === "run_shared") {
-    const ref = await e2b.startShared(missionId);
-    const result = await e2b.runCommand(ref, input.command ?? "pwd");
-    await emitCostEvent({
-      missionId,
-      instanceId: input.assigneeInstanceId,
-      costCents: 1,
-      sandboxId: ref.sandboxId,
-      sandboxSeconds: 1,
-      eventType: "sandbox_burn",
-    });
-    await recordAudit({
-      missionId,
-      subjectType: "work_card",
-      subjectId: workCardId,
-      actor: { type: "system", id: "runtime" },
-      action: result.exitCode === 0 ? "tool_completed" : "tool_failed",
-      diffSummary: JSON.stringify({ exitCode: result.exitCode, stderr: result.stderr }),
-    });
-  }
-  if (input.demoAction === "write_shared") {
-    const ref = await e2b.startShared(missionId);
-    await e2b.writeFile(ref, input.path ?? "/workspace/shared.txt", input.content ?? "shared");
-  }
-  if (input.demoAction === "read_shared") {
-    const ref = await e2b.startShared(missionId);
-    await e2b.readFile(ref, input.path ?? "/workspace/shared.txt");
-  }
-  if (input.demoAction === "escalate_private") {
-    const ref = await e2b.startPrivate(missionId, input.assigneeInstanceId);
-    await e2b.writeFile(ref, input.path ?? "/workspace/private.txt", input.content ?? "private");
-  }
 }
 
 async function promoteNextPending(agentId: string) {
@@ -309,12 +331,119 @@ async function promoteNextPending(agentId: string) {
   const row = rows[0]?.card;
   if (!row) return null;
   await db.update(workCards).set({ status: "running", updatedAt: now() }).where(eq(workCards.id, row.id));
-  await triggerWorkCard(row.missionId, row.id, {
-    title: row.title,
-    assigneeInstanceId: row.assigneeInstanceId ?? "",
-    sandboxAffinity: JSON.parse(row.sandboxAffinityJson),
-  });
+  waitUntil(executeWorkCard(row.id));
   return row.id;
+}
+
+export async function executeWorkCard(workCardId: string) {
+  const [card] = await db.select().from(workCards).where(eq(workCards.id, workCardId)).limit(1);
+  if (!card || card.status !== "running" || !card.assigneeInstanceId) return;
+  const [instance] = await db.select().from(agentInstances).where(eq(agentInstances.id, card.assigneeInstanceId)).limit(1);
+  if (!instance) throw new Error("error.agent_instance.not_found");
+  const [agent] = await db.select().from(agents).where(eq(agents.id, instance.agentId)).limit(1);
+  if (!agent) throw new Error("error.agent.not_found");
+
+  const missionId = card.missionId;
+  const sandboxAffinity = JSON.parse(card.sandboxAffinityJson) as SandboxAffinityInput;
+  const turnId = `turn_${crypto.randomUUID().slice(0, 8)}`;
+  await triggerWorkCardStarted(missionId, workCardId);
+
+  try {
+    const apiKey = await Promise.resolve(secret.get("OPENAI_API_KEY")).catch(() => undefined);
+    const boot = await loadAgentBootFiles(agent.id);
+    const modelName = boot.baseConfig.model ?? "gpt-4o-mini";
+    if (apiKey) {
+      const openai = createOpenAI({ apiKey });
+      const result = streamText({
+        model: openai(modelName),
+        stopWhen: stepCountIs(3),
+        system: [
+          boot.soul,
+          boot.identity,
+          `Equipped skills: ${JSON.stringify(boot.skillsIndex)}`,
+          "You are executing exactly one Missionry work card. Use available tools when the card has mission/private sandbox affinity, then finish concisely.",
+        ].join("\n\n"),
+        messages: [
+          {
+            role: "user",
+            content: [
+              `WorkCard ${card.id}: ${card.title}`,
+              card.description ? `Description: ${card.description}` : "",
+              `Sandbox affinity: ${JSON.stringify(sandboxAffinity)}`,
+              sandboxAffinity.tier === "mission" ? "Call run_command in the mission sandbox with command pwd." : "",
+              sandboxAffinity.tier === "private" ? "Call escalate_to_private_sandbox, then write_file in the private sandbox." : "",
+              agent.id === "agt_forge" ? "If useful, call use_skill with skill_id prd-template-v2." : "",
+            ].filter(Boolean).join("\n"),
+          },
+        ],
+        tools: missionryToolKit({ missionId, agentId: agent.id, instanceId: instance.id, turnId, workCardId }),
+        onChunk: async ({ chunk }) => {
+          if (chunk.type === "tool-call" || chunk.type === "tool-result") {
+            await recordAudit({
+              missionId,
+              subjectType: "work_card",
+              subjectId: workCardId,
+              actor: { type: "agent", id: agent.id },
+              action: chunk.type,
+              diffSummary: JSON.stringify({ toolName: (chunk as { toolName?: string }).toolName }),
+            });
+          }
+        },
+        onFinish: async ({ usage }) => {
+          const usageRecord = usage as unknown as Record<string, unknown>;
+          await emitCostEvent({
+            missionId,
+            agentId: agent.id,
+            instanceId: instance.id,
+            model: modelName,
+            promptTokens: Number(usageRecord.promptTokens ?? usageRecord.inputTokens ?? 0),
+            completionTokens: Number(usageRecord.completionTokens ?? usageRecord.outputTokens ?? 0),
+            costCents: estimateLlmCostCents(modelName, usageRecord),
+            eventType: "cost_event",
+          });
+        },
+      });
+      await result.text;
+    } else {
+      await executeWorkCardFallback(card, agent.id, instance.id, sandboxAffinity);
+    }
+    await db.update(workCards).set({ status: "done", costJson: JSON.stringify({ spentCents: 1 }), updatedAt: now() }).where(eq(workCards.id, workCardId));
+    await recordAudit({
+      missionId,
+      subjectType: "work_card",
+      subjectId: workCardId,
+      actor: { type: "agent", id: agent.id },
+      action: "work_card_completed",
+      diffSummary: "status:done",
+    });
+    waitUntil(Promise.resolve(promoteNextPending(agent.id)));
+  } catch (error) {
+    await db.update(workCards).set({ status: "failed", updatedAt: now() }).where(eq(workCards.id, workCardId));
+    await recordAudit({
+      missionId,
+      subjectType: "work_card",
+      subjectId: workCardId,
+      actor: { type: "system", id: "runtime" },
+      action: "work_card_failed",
+      diffSummary: error instanceof Error ? error.message : "error.work_card.execution_failed",
+    });
+  }
+}
+
+async function executeWorkCardFallback(card: typeof workCards.$inferSelect, agentId: string, instanceId: string, sandboxAffinity: SandboxAffinityInput) {
+  if (sandboxAffinity.tier === "private") {
+    const ref = await e2b.startPrivate(card.missionId, instanceId);
+    await e2b.writeFile(ref, "/workspace/work-card.txt", card.title);
+    await emitCostEvent({ missionId: card.missionId, agentId, instanceId, sandboxId: ref.sandboxId, sandboxSeconds: 1, costCents: 1, eventType: "sandbox_burn" });
+    return;
+  }
+  if (sandboxAffinity.tier === "mission") {
+    const ref = await e2b.startShared(card.missionId);
+    await e2b.runCommand(ref, "pwd");
+    await emitCostEvent({ missionId: card.missionId, agentId, instanceId, sandboxId: ref.sandboxId, sandboxSeconds: 1, costCents: 1, eventType: "sandbox_burn" });
+    return;
+  }
+  await emitCostEvent({ missionId: card.missionId, agentId, instanceId, costCents: 1, eventType: "cost_event" });
 }
 
 async function createMission(input: { title: string; objective: string; owner: OwnerInput; dailyBudgetCents?: number; requestUserId?: string }) {
@@ -380,6 +509,7 @@ async function decomposeMission(missionId: string) {
 }
 
 app.use("/api/public/*", async (c, next) => {
+  await scheduleStartupSeed();
   if (c.req.path === "/api/public/health") return next();
   const profile = await resolveRequestProfile(c);
   if (!profile) return jsonError(c, "error.auth.not_whitelisted", 403);
@@ -559,7 +689,66 @@ app.post("/api/public/missions/:id/agents/:agentId/instances", async (c) => {
   return c.json({ actionId: crypto.randomUUID(), status: "completed", instanceId });
 });
 
+app.post("/api/public/agents/:agentId/tools/use_skill", async (c) => {
+  const body = (await c.req.json().catch(() => ({}))) as { skill_id?: string; skillId?: string };
+  const skillId = body.skillId ?? body.skill_id;
+  if (!skillId) return jsonError(c, "error.request.invalid", 400);
+  await ensureAgentFiles(c.req.param("agentId"));
+  return c.json({ actionId: crypto.randomUUID(), status: "completed", body: await loadSkill(c.req.param("agentId"), skillId) });
+});
+
+app.post("/api/public/agents/:agentId/self-update", async (c) => {
+  const agentId = c.req.param("agentId");
+  const body = (await c.req.json().catch(() => ({}))) as { file?: string; content?: string; previousBody?: string; reason?: string; missionId?: string };
+  if (!body.file || body.content === undefined) return jsonError(c, "error.request.invalid", 400);
+  await ensureAgentFiles(agentId);
+  const key = `agents/${agentId}/${body.file}`;
+  const bucket = storage.from(buckets.missionryWorkspaces);
+  const before = await bucket.get(key);
+  const previousBody = body.previousBody ?? storageBodyCache.get(key) ?? (before ? await storageObjectText(before) : "");
+  await bucket.put(key, body.content);
+  storageBodyCache.set(key, body.content);
+  const auditEventId = await recordAudit({
+    missionId: body.missionId,
+    subjectType: "agent",
+    subjectId: agentId,
+    actor: { type: "agent", id: agentId },
+    action: "self_update",
+    diffSummary: body.reason ?? "self_update",
+    payloadRef: { r2Key: key, previousBody } as { r2Key: string; sha256?: string },
+    reversible: true,
+    rollbackAvailable: true,
+  });
+  return c.json({ actionId: crypto.randomUUID(), status: "completed", auditEventId, key });
+});
+
 app.post("/api/public/missions/:id/decompose", async (c) => c.json({ actionId: crypto.randomUUID(), status: "completed", ...(await decomposeMission(c.req.param("id"))) }));
+
+app.post("/api/public/missions/:id/agent-instances/:instanceId/direct-thread", async (c) => {
+  const missionId = c.req.param("id");
+  const instanceId = c.req.param("instanceId");
+  const [instance] = await db.select().from(agentInstances).where(and(eq(agentInstances.id, instanceId), eq(agentInstances.missionId, missionId))).limit(1);
+  if (!instance) return jsonError(c, "error.agent_instance.not_found", 404);
+  const userId = currentUserProfile(c).userId;
+  const existing = await db
+    .select()
+    .from(directThreads)
+    .where(and(eq(directThreads.missionId, missionId), eq(directThreads.agentInstanceId, instanceId), eq(directThreads.userId, userId)))
+    .limit(1);
+  if (existing[0]) return c.json({ actionId: crypto.randomUUID(), status: "completed", chatThreadId: existing[0].id, created: false });
+  const timestamp = now();
+  const threadId = `dt_${crypto.randomUUID().slice(0, 10)}`;
+  await db.insert(directThreads).values({ id: threadId, missionId, agentInstanceId: instanceId, userId, createdAt: timestamp, updatedAt: timestamp });
+  const auditEventId = await recordAudit({
+    missionId,
+    subjectType: "direct_thread",
+    subjectId: threadId,
+    actor: { type: "user", id: userId },
+    action: "direct_thread_created",
+    diffSummary: `instance:${instanceId}`,
+  });
+  return c.json({ actionId: crypto.randomUUID(), status: "completed", chatThreadId: threadId, created: true, auditEventId });
+});
 
 app.get("/api/public/missions/:id/workroom", async (c) => {
   const mission = await getMission(c.req.param("id"));
@@ -658,8 +847,138 @@ app.patch("/api/public/missions/:id/work-cards/:workCardId", async (c) => {
   await db.update(workCards).set({ status: body.status ?? before.status, updatedAt: now() }).where(eq(workCards.id, workCardId));
   let promoted: string | null = null;
   if (body.status === "done" || body.status === "failed") promoted = await promoteNextPending(await agentForInstance(before.assigneeInstanceId ?? ""));
+  if (body.status === "running" && before.status !== "running") waitUntil(executeWorkCard(workCardId));
   return c.json({ actionId: crypto.randomUUID(), status: "completed", workCardId, promoted });
 });
+
+function directThreadMessageJson(row: typeof directThreadMessages.$inferSelect) {
+  return {
+    id: row.id,
+    threadId: row.threadId,
+    missionId: row.missionId,
+    agentInstanceId: row.agentInstanceId,
+    sender: { type: row.senderType, id: row.senderId },
+    body: row.body,
+    createdAt: row.createdAt,
+    auditEventId: row.auditEventId,
+  };
+}
+
+app.get("/api/public/direct-threads/:threadId/messages", async (c) => {
+  const threadId = c.req.param("threadId");
+  const [thread] = await db.select().from(directThreads).where(eq(directThreads.id, threadId)).limit(1);
+  if (!thread) return jsonError(c, "error.direct_thread.not_found", 404);
+  const rows = await db.select().from(directThreadMessages).where(eq(directThreadMessages.threadId, threadId)).orderBy(asc(directThreadMessages.createdAt));
+  return c.json({
+    threadId,
+    missionId: thread.missionId,
+    agentInstanceId: thread.agentInstanceId,
+    messages: rows.map(directThreadMessageJson),
+    unreadCount: 0,
+    lastMessageAt: rows.at(-1)?.createdAt,
+  });
+});
+
+app.post("/api/public/direct-threads/:threadId/messages", async (c) => {
+  const threadId = c.req.param("threadId");
+  const body = (await c.req.json().catch(() => ({}))) as { body?: string; clientActionId?: string };
+  if (!body.body) return jsonError(c, "error.request.invalid", 400);
+  const [thread] = await db.select().from(directThreads).where(eq(directThreads.id, threadId)).limit(1);
+  if (!thread) return jsonError(c, "error.direct_thread.not_found", 404);
+  const [instance] = await db.select().from(agentInstances).where(eq(agentInstances.id, thread.agentInstanceId)).limit(1);
+  if (!instance) return jsonError(c, "error.agent_instance.not_found", 404);
+
+  const profile = currentUserProfile(c);
+  const userAuditEventId = await recordAudit({
+    missionId: thread.missionId,
+    subjectType: "direct_thread_message",
+    subjectId: threadId,
+    actor: { type: "user", id: profile.userId },
+    action: "message_sent",
+    clientActionId: body.clientActionId,
+    diffSummary: "user_message",
+  });
+  const timestamp = now();
+  const [userMessage] = await db
+    .insert(directThreadMessages)
+    .values({
+      id: `msg_${crypto.randomUUID().slice(0, 10)}`,
+      threadId,
+      missionId: thread.missionId,
+      agentInstanceId: thread.agentInstanceId,
+      senderType: "user",
+      senderId: profile.userId,
+      body: body.body,
+      auditEventId: userAuditEventId,
+      createdAt: timestamp,
+    })
+    .returning();
+
+  const replyBody = await generateDirectAgentReply(instance.agentId, thread.agentInstanceId, thread.missionId, body.body, body.clientActionId);
+  const agentAuditEventId = await recordAudit({
+    missionId: thread.missionId,
+    subjectType: "direct_thread_message",
+    subjectId: threadId,
+    actor: { type: "agent", id: instance.agentId },
+    action: "message_sent",
+    clientActionId: body.clientActionId,
+    diffSummary: "agent_reply",
+  });
+  const [agentMessage] = await db
+    .insert(directThreadMessages)
+    .values({
+      id: `msg_${crypto.randomUUID().slice(0, 10)}`,
+      threadId,
+      missionId: thread.missionId,
+      agentInstanceId: thread.agentInstanceId,
+      senderType: "agent",
+      senderId: instance.agentId,
+      body: replyBody,
+      auditEventId: agentAuditEventId,
+      createdAt: now(),
+    })
+    .returning();
+  await db.update(directThreads).set({ updatedAt: now() }).where(eq(directThreads.id, threadId));
+  return c.json({
+    actionId: crypto.randomUUID(),
+    clientActionId: body.clientActionId,
+    status: "completed",
+    message: directThreadMessageJson(userMessage),
+    agentReply: directThreadMessageJson(agentMessage),
+    auditEventId: agentAuditEventId,
+  });
+});
+
+async function generateDirectAgentReply(agentId: string, instanceId: string, missionId: string, userBody: string, clientActionId?: string) {
+  const apiKey = await Promise.resolve(secret.get("OPENAI_API_KEY")).catch(() => undefined);
+  if (!apiKey) {
+    await emitCostEvent({ missionId, agentId, instanceId, costCents: 1, eventType: "cost_event" });
+    return `Acknowledged. I will handle: ${userBody}`;
+  }
+  const boot = await loadAgentBootFiles(agentId);
+  const modelName = boot.baseConfig.model ?? "gpt-4o-mini";
+  const openai = createOpenAI({ apiKey });
+  const result = streamText({
+    model: openai(modelName),
+    system: [boot.soul, boot.identity, "Direct chat only. Do not call tools. Keep the reply concise and useful."].join("\n\n"),
+    messages: [{ role: "user", content: userBody }],
+    onFinish: async ({ usage }) => {
+      const usageRecord = usage as unknown as Record<string, unknown>;
+      await emitCostEvent({
+        missionId,
+        clientActionId,
+        agentId,
+        instanceId,
+        model: modelName,
+        promptTokens: Number(usageRecord.promptTokens ?? usageRecord.inputTokens ?? 0),
+        completionTokens: Number(usageRecord.completionTokens ?? usageRecord.outputTokens ?? 0),
+        costCents: estimateLlmCostCents(modelName, usageRecord),
+        eventType: "cost_event",
+      });
+    },
+  });
+  return result.text;
+}
 
 app.get("/api/public/missions/:id/events", async (c) => {
   const missionId = c.req.param("id");
@@ -716,11 +1035,15 @@ app.post("/api/public/audit-events/:auditEventId/rollback", async (c) => {
   const auditEventId = c.req.param("auditEventId");
   const [row] = await db.select().from(auditEvents).where(eq(auditEvents.eventId, auditEventId)).limit(1);
   if (!row?.payloadRefJson) return jsonError(c, "error.audit.rollback_unavailable", 404);
-  const payload = JSON.parse(row.payloadRefJson) as { r2Key?: string };
+  const payload = JSON.parse(row.payloadRefJson) as { r2Key?: string; previousBody?: string };
   if (!payload.r2Key) return jsonError(c, "error.audit.rollback_unavailable", 404);
   const bucket = storage.from(buckets.missionryWorkspaces);
   const versions = bucket.listVersions ? await bucket.listVersions(payload.r2Key) : [];
   if (versions.length > 1 && bucket.restoreObjectVersion) await bucket.restoreObjectVersion(payload.r2Key, versions[1].versionId);
+  if (payload.previousBody !== undefined) await bucket.put(payload.r2Key, payload.previousBody);
+  if (payload.previousBody !== undefined) storageBodyCache.set(payload.r2Key, payload.previousBody);
+  const restored = await bucket.get(payload.r2Key);
+  const restoredBody = payload.previousBody ?? (restored ? await storageObjectText(restored) : "");
   const rollbackAuditEventId = await recordAudit({
     missionId: row.missionId ?? undefined,
     subjectType: row.subjectType,
@@ -730,7 +1053,14 @@ app.post("/api/public/audit-events/:auditEventId/rollback", async (c) => {
     diffSummary: `rollback:${row.eventId}`,
     payloadRef: { r2Key: payload.r2Key },
   });
-  return c.json({ actionId: crypto.randomUUID(), status: "completed", rollbackAuditEventId, restoredR2Key: payload.r2Key });
+  return new Response(JSON.stringify({
+    actionId: crypto.randomUUID(),
+    status: "completed",
+    rollbackAuditEventId,
+    restoredR2Key: payload.r2Key,
+    restoredBody,
+    restoredVersionId: versions[1]?.versionId,
+  }), { headers: { "content-type": "application/json" } });
 });
 
 export default app;

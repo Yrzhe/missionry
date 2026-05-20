@@ -15,6 +15,8 @@ export const drizzleSchema = {
   agents: schema.agents,
   agentInstances: schema.agentInstances,
   workCards: schema.workCards,
+  directThreads: schema.directThreads,
+  directThreadMessages: schema.directThreadMessages,
   sandboxRuntime: schema.sandboxRuntime,
   auditEvents: schema.auditEvents,
   budgetSettings: schema.budgetSettings,

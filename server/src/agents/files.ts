@@ -6,11 +6,29 @@ export type AgentBootFiles = {
   identity: string;
   baseConfig: { model?: string; tools?: string[]; defaultSandboxTier?: string };
   skillsIndex: Array<{ id: string; name: string; description: string; r2Path: string }>;
+  equippedSkillIds: string[];
 };
 
 async function getText(key: string): Promise<string | null> {
   const obj = await storage.from(buckets.missionryWorkspaces).get(key);
-  return obj ? obj.text() : null;
+  if (!obj) return null;
+  const wrapped = obj as unknown as Record<string, unknown>;
+  const maybeText = wrapped.text;
+  if (typeof maybeText === "function") return maybeText.call(obj);
+  if (typeof maybeText === "string") return maybeText;
+  const maybeArrayBuffer = wrapped.arrayBuffer;
+  if (typeof maybeArrayBuffer === "function") return new TextDecoder().decode(await maybeArrayBuffer.call(obj));
+  for (const key of ["body", "content", "data", "value"]) {
+    const value = wrapped[key];
+    if (typeof value === "string") return value;
+    if (value instanceof Uint8Array) return new TextDecoder().decode(value);
+    if (value && typeof value === "object") {
+      const nestedText = (value as Record<string, unknown>).text;
+      if (typeof nestedText === "function") return nestedText.call(value);
+      if (typeof nestedText === "string") return nestedText;
+    }
+  }
+  return String(obj);
 }
 
 async function putIfMissing(key: string, value: string) {
@@ -27,6 +45,27 @@ export async function ensureAgentFiles(agentId: string, displayName = agentId) {
     `agents/${agentId}/skills/demo-sandbox/SKILL.md`,
     "---\nname: demo-sandbox\ndescription: Use for Missionry sandbox demo tasks.\n---\nRun only the requested demo tool.",
   );
+  if (agentId === "agt_forge") {
+    await putIfMissing(
+      "agents/agt_forge/skills/prd-template-v2/SKILL.md",
+      [
+        "---",
+        "name: prd-template-v2",
+        "description: Draft dense Missionry product requirement documents with objective, users, scope, API contract, acceptance checks, and rollout risks.",
+        "---",
+        "# PRD Template v2",
+        "",
+        "Use this structure when a Mission needs a product requirements draft:",
+        "",
+        "1. Objective",
+        "2. Users and jobs",
+        "3. Functional scope",
+        "4. API/data contract",
+        "5. Acceptance checks",
+        "6. Rollout risks",
+      ].join("\n"),
+    );
+  }
 }
 
 export async function ensureAgentInstanceFiles(missionId: string, instanceId: string) {
@@ -42,18 +81,22 @@ export async function loadAgentBootFiles(agentId: string): Promise<AgentBootFile
   const identity = (await getText(`agents/${agentId}/identity.md`)) ?? "";
   const base = (await getText(`agents/${agentId}/base-config.yaml`)) ?? "";
   const model = base.match(/model:\s*(.+)/)?.[1]?.trim();
-  const skill = await getText(`agents/${agentId}/skills/demo-sandbox/SKILL.md`);
-  const skillsIndex = skill
-    ? [
-        {
-          id: "demo-sandbox",
-          name: skill.match(/name:\s*(.+)/)?.[1]?.trim() ?? "demo-sandbox",
+  const skillIds = agentId === "agt_forge" ? ["demo-sandbox", "prd-template-v2"] : ["demo-sandbox"];
+  const skillsIndex = (
+    await Promise.all(
+      skillIds.map(async (id) => {
+        const skill = await getText(`agents/${agentId}/skills/${id}/SKILL.md`);
+        if (!skill) return null;
+        return {
+          id,
+          name: skill.match(/name:\s*(.+)/)?.[1]?.trim() ?? id,
           description: skill.match(/description:\s*(.+)/)?.[1]?.trim() ?? "",
-          r2Path: `agents/${agentId}/skills/demo-sandbox/SKILL.md`,
-        },
-      ]
-    : [];
-  return { soul, identity, baseConfig: { model, tools: ["run_command"] }, skillsIndex };
+          r2Path: `agents/${agentId}/skills/${id}/SKILL.md`,
+        };
+      }),
+    )
+  ).filter((skill): skill is { id: string; name: string; description: string; r2Path: string } => Boolean(skill));
+  return { soul, identity, baseConfig: { model, tools: ["run_command", "use_skill"] }, skillsIndex, equippedSkillIds: skillsIndex.map((skill) => skill.id) };
 }
 
 export async function loadSkill(agentId: string, skillId: string): Promise<string> {
