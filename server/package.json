@@ -1,0 +1,26 @@
+{
+  "name": "missionry-server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "edgespark dev",
+    "typecheck": "tsc --noEmit",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "edgespark db migrate",
+    "storage:apply": "edgespark storage apply"
+  },
+  "dependencies": {
+    "@ai-sdk/openai": "latest",
+    "@e2b/sdk": "latest",
+    "ai": "latest",
+    "drizzle-orm": "latest",
+    "hono": "latest",
+    "zod": "latest"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "latest",
+    "drizzle-kit": "latest",
+    "typescript": "latest"
+  }
+}

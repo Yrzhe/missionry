@@ -1,0 +1,200 @@
+// Mock data for the multi-agent task workspace prototype
+
+const AGENTS = {
+  lead: {
+    id: 'lead', name: 'Atlas', role: 'Lead Agent', emoji: '🧭',
+    gradient: 'linear-gradient(135deg, #2d3a5f, #5a7290)',
+    desc: 'Decomposes missions, dispatches work cards, summarizes results.',
+    lifecycle: 'permanent', missionsCompleted: 47, rating: 4.7, avgCost: 0.42, failureRate: 0.06,
+    capabilities: ['Task decomposition', 'Dispatch', 'Summarization', 'Conflict resolution'],
+    skills: ['decompose-mission', 'critic-loop', 'budget-aware-routing'],
+    tools: ['create_work_card', 'request_approval', 'aggregate_artifacts'],
+    memory: ['User prefers short PRDs', 'Always confirm scope before running'],
+  },
+  research: {
+    id: 'research', name: 'Marlow', role: 'Researcher', emoji: '🔭',
+    gradient: 'linear-gradient(135deg, #3f6577, #6a9bb1)',
+    desc: 'Surveys related products, papers, and prior art. Returns structured briefs.',
+    lifecycle: 'permanent', missionsCompleted: 132, rating: 4.6, avgCost: 0.31, failureRate: 0.04,
+    capabilities: ['Web research', 'Comparative analysis', 'Citation', 'Source ranking'],
+    skills: ['competitive-scan', 'source-rank', 'extract-claims'],
+    tools: ['web_search', 'web_fetch', 'pdf_read'],
+    memory: ['Always include pricing and integrations in scans'],
+  },
+  strategist: {
+    id: 'strategist', name: 'Iris', role: 'Product Strategist', emoji: '🧩',
+    gradient: 'linear-gradient(135deg, #8a4a3a, #c47e60)',
+    desc: 'Frames positioning, differentiation, and core hypotheses.',
+    lifecycle: 'permanent', missionsCompleted: 58, rating: 4.8, avgCost: 0.38, failureRate: 0.05,
+    capabilities: ['Positioning', 'Differentiation', 'Jobs-to-be-done'],
+    skills: ['positioning-frame', 'jtbd-canvas'],
+    tools: ['read_artifact', 'write_artifact'],
+    memory: ['User prefers core-object-first framing over feature lists'],
+  },
+  ux: {
+    id: 'ux', name: 'Cedar', role: 'UX Architect', emoji: '🪟',
+    gradient: 'linear-gradient(135deg, #6b4a6f, #a888ac)',
+    desc: 'Designs information architecture, page flows, and demo blueprints.',
+    lifecycle: 'ephemeral', missionsCompleted: 0, rating: null, avgCost: null, failureRate: null,
+    capabilities: ['Information architecture', 'Flow design', 'Component naming'],
+    skills: ['ia-blueprint', 'flow-storyboard'],
+    tools: ['read_artifact', 'write_artifact'],
+    memory: [],
+  },
+  critic: {
+    id: 'critic', name: 'Vex', role: 'Critic', emoji: '🪞',
+    gradient: 'linear-gradient(135deg, #5e7a5a, #9bb494)',
+    desc: 'Audits proposals for risk, scope creep, and unsubstantiated claims. (Adapted for multi-agent product review.)',
+    lifecycle: 'permanent', missionsCompleted: 89, rating: 4.5, avgCost: 0.22, failureRate: 0.08,
+    capabilities: ['Risk audit', 'Logical consistency', 'Scope discipline'],
+    skills: ['risk-matrix', 'scope-guard'],
+    tools: ['read_artifact', 'comment_artifact'],
+    memory: ['Flag chat-as-task-room confusion in product reviews'],
+  },
+  writer: {
+    id: 'writer', name: 'Quill', role: 'PRD Writer', emoji: '✒️',
+    gradient: 'linear-gradient(135deg, #b8701f, #e6a85f)',
+    desc: 'Synthesizes inputs into structured PRDs and specs.',
+    lifecycle: 'permanent', missionsCompleted: 71, rating: 4.6, avgCost: 0.28, failureRate: 0.03,
+    capabilities: ['Document synthesis', 'Section structuring', 'Voice matching'],
+    skills: ['prd-template-v2', 'voice-match'],
+    tools: ['read_artifact', 'write_artifact', 'compare_versions'],
+    memory: ['User likes "users → problem → solution" structure'],
+  },
+  metrics: {
+    id: 'metrics', name: 'Tally', role: 'Metrics Designer', emoji: '📐',
+    gradient: 'linear-gradient(135deg, #3a6b5d, #6da89a)',
+    desc: 'Defines north-star and diagnostic metrics for product hypotheses. (Created for this mission.)',
+    lifecycle: 'ephemeral', missionsCompleted: 0, rating: null, avgCost: null, failureRate: null,
+    capabilities: ['Metric tree design', 'Leading vs lagging', 'Anti-metric detection'],
+    skills: ['metric-tree', 'anti-metric-check'],
+    tools: ['read_artifact', 'write_artifact'],
+    memory: [],
+  },
+};
+
+const MISSIONS = [
+  {
+    id: 'm-1', title: 'Design a multi-agent collaboration product',
+    objective: 'Define product positioning, core flows, agent team formation, agent growth, and demo plan for a new multi-agent workspace.',
+    status: 'running', updated: '2 min ago',
+    agentIds: ['lead','research','strategist','ux','critic','writer','metrics'],
+    activeCard: 'Synthesize PRD draft',
+    artifacts: 4, pending: 1, cost: 2.84, budget: 8.00,
+    progress: 0.62,
+  },
+  {
+    id: 'm-2', title: 'Competitive scan — three AI coding tools',
+    objective: 'Compare positioning, pricing, and integrations of Cursor-likes; output a differentiation memo.',
+    status: 'completed', updated: 'yesterday',
+    agentIds: ['lead','research','strategist','critic'],
+    activeCard: null, artifacts: 3, pending: 0, cost: 1.42, budget: 4.00,
+    progress: 1.0,
+  },
+  {
+    id: 'm-3', title: 'Root-cause analysis on prod 5xx spike',
+    objective: 'Triage error logs from last 24h, identify root cause, propose fix and rollback plan.',
+    status: 'waiting_user_approval', updated: '14 min ago',
+    agentIds: ['lead','research','critic'],
+    activeCard: 'Approve fix proposal',
+    artifacts: 2, pending: 2, cost: 0.78, budget: 3.00,
+    progress: 0.85,
+  },
+  {
+    id: 'm-4', title: 'Synthesize 50 user feedback items into opportunities',
+    objective: 'Cluster and rank feedback from last 30 days; output top 5 product opportunities with evidence.',
+    status: 'planning', updated: '1 hour ago',
+    agentIds: ['lead','research','strategist'],
+    activeCard: null, artifacts: 0, pending: 0, cost: 0.04, budget: 2.00,
+    progress: 0.10,
+  },
+  {
+    id: 'm-5', title: 'Onboarding redesign — copy + flow',
+    objective: 'Rewrite onboarding copy and propose a 4-step flow.',
+    status: 'draft', updated: '3 days ago',
+    agentIds: [], activeCard: null, artifacts: 0, pending: 0, cost: 0, budget: null, progress: 0,
+  },
+  {
+    id: 'm-6', title: 'Q3 OKR review summary',
+    objective: 'Summarize OKR progress; flag at-risk items.',
+    status: 'archived', updated: 'last week',
+    agentIds: ['lead','writer'], activeCard: null, artifacts: 1, pending: 0, cost: 0.31, budget: 1.00, progress: 1.0,
+  },
+];
+
+const TEAM_PROPOSAL = {
+  missionId: 'm-1',
+  estimatedCost: 3.20,
+  estimatedTime: '12-18 min',
+  members: [
+    { agentId: 'lead', source: 'reuse', responsibility: 'Decompose the mission, generate work cards, route between agents, request approvals.', reason: 'Strong match — 47 prior product-design missions, 4.7★.', matchScore: 0.94, budget: 0.80 },
+    { agentId: 'research', source: 'reuse', responsibility: 'Survey adjacent products (chat-with-agents, workflow builders, Agent markets). Cite distinguishing patterns.', reason: 'Top performer on competitive scans (132 missions). Already knows your "include pricing" rule.', matchScore: 0.91, budget: 0.55 },
+    { agentId: 'strategist', source: 'reuse', responsibility: 'Frame positioning and core differentiation. Articulate the "Mission, not chat" stance.', reason: 'Has memory: "user prefers core-object-first framing".', matchScore: 0.88, budget: 0.50 },
+    { agentId: 'ux', source: 'create', responsibility: 'Design information architecture and a click-through demo flow for the new product.', reason: 'No matching agent in library. Spinning up an ephemeral UX Architect for this mission.', matchScore: null, budget: 0.55 },
+    { agentId: 'critic', source: 'adapt', responsibility: 'Review for scope creep, "chat ≠ task room" confusion, runaway agent growth, and budget risk.', reason: 'Reusing your generalist Critic with a multi-agent product overlay (adds 1 failure pattern: "chat-as-task-room").', matchScore: 0.79, budget: 0.30 },
+    { agentId: 'writer', source: 'reuse', responsibility: 'Synthesize all inputs into a single PRD artifact. Apply your preferred structure.', reason: 'Knows your voice. Re-using v2 PRD template.', matchScore: 0.86, budget: 0.40 },
+    { agentId: 'metrics', source: 'create', responsibility: 'Propose north-star and diagnostic metrics. Flag anti-metrics (e.g. message count).', reason: 'No metrics-design agent exists yet. Spinning up an ephemeral specialist.', matchScore: null, budget: 0.10 },
+  ],
+  risks: [
+    { level: 'medium', text: 'Demo scope is wide. Recommend constraining to 7 page surfaces.' },
+    { level: 'low', text: 'Two new ephemeral agents (UX Architect, Metrics Designer) will run without prior performance history.' },
+    { level: 'low', text: 'Critic will flag scope drift but cannot block — final accept stays with you.' },
+  ],
+};
+
+const WORK_CARDS = [
+  { id: 'wc-1', title: 'Survey adjacent products', agentId: 'research', status: 'done', deps: [], cost: 0.42, budget: 0.55, time: '00:03:14', deliverable: 'Competitive brief — 8 products' },
+  { id: 'wc-2', title: 'Frame positioning & core differentiation', agentId: 'strategist', status: 'done', deps: ['wc-1'], cost: 0.39, budget: 0.50, time: '00:02:48', deliverable: 'Positioning canvas' },
+  { id: 'wc-3', title: 'Design IA + page flows', agentId: 'ux', status: 'done', deps: ['wc-2'], cost: 0.51, budget: 0.55, time: '00:04:02', deliverable: 'IA blueprint + 7 page specs' },
+  { id: 'wc-4', title: 'Define metric tree', agentId: 'metrics', status: 'done', deps: ['wc-2'], cost: 0.09, budget: 0.10, time: '00:01:11', deliverable: 'North star + diagnostics' },
+  { id: 'wc-5', title: 'Synthesize PRD draft', agentId: 'writer', status: 'running', deps: ['wc-2','wc-3','wc-4'], cost: 0.21, budget: 0.40, time: '00:02:10', deliverable: 'PRD v0.1', progress: 0.6 },
+  { id: 'wc-6', title: 'Risk + scope review', agentId: 'critic', status: 'queued', deps: ['wc-5'], cost: 0, budget: 0.30, time: null, deliverable: 'Risk memo' },
+  { id: 'wc-7', title: 'Final summary & user handoff', agentId: 'lead', status: 'queued', deps: ['wc-6'], cost: 0, budget: 0.80, time: null, deliverable: 'Mission summary' },
+];
+
+const ARTIFACTS = [
+  { id: 'a-1', title: 'Competitive brief — 8 adjacent products', type: 'document', agentId: 'research', cardId: 'wc-1', version: 1, status: 'accepted', updated: '11 min ago' },
+  { id: 'a-2', title: 'Positioning canvas: Mission, not Chat', type: 'document', agentId: 'strategist', cardId: 'wc-2', version: 2, status: 'accepted', updated: '8 min ago' },
+  { id: 'a-3', title: 'IA blueprint + 7 page specs', type: 'document', agentId: 'ux', cardId: 'wc-3', version: 1, status: 'needs_review', updated: '4 min ago' },
+  { id: 'a-4', title: 'Metric tree — north star + diagnostics', type: 'table', agentId: 'metrics', cardId: 'wc-4', version: 1, status: 'accepted', updated: '3 min ago' },
+  { id: 'a-5', title: 'PRD v0.1 — Multi-Agent Task Workspace', type: 'document', agentId: 'writer', cardId: 'wc-5', version: 1, status: 'draft', updated: 'now', streaming: true },
+];
+
+const TRACE = [
+  { t: '00:00', type: 'mission_started', text: 'Mission started by you.' },
+  { t: '00:00', type: 'task_created', agentId: 'lead', text: 'Atlas created 7 work cards from objective.' },
+  { t: '00:01', type: 'task_started', agentId: 'research', text: 'Marlow began work on "Survey adjacent products".' },
+  { t: '00:02', type: 'tool_call', agentId: 'research', text: 'web_search · "multi-agent workflow products 2026"' },
+  { t: '00:03', type: 'tool_call', agentId: 'research', text: 'web_fetch · 8 product pages' },
+  { t: '00:04', type: 'artifact_created', agentId: 'research', text: 'Created artifact: Competitive brief — 8 adjacent products' },
+  { t: '00:04', type: 'task_completed', agentId: 'research', text: '"Survey adjacent products" → done · $0.42' },
+  { t: '00:04', type: 'handoff', agentId: 'lead', text: 'Atlas → Iris: handoff with competitive brief.' },
+  { t: '00:05', type: 'task_started', agentId: 'strategist', text: 'Iris began work on "Frame positioning".' },
+  { t: '00:07', type: 'message', agentId: 'strategist', text: 'Drafted positioning around "Mission ≠ chat room". Asking Cedar for IA implications.' },
+  { t: '00:08', type: 'artifact_created', agentId: 'strategist', text: 'Created artifact: Positioning canvas v1' },
+  { t: '00:08', type: 'task_completed', agentId: 'strategist', text: '"Frame positioning" → done · $0.39' },
+  { t: '00:09', type: 'parallel_started', text: 'Cedar and Tally started in parallel.' },
+  { t: '00:09', type: 'task_started', agentId: 'ux', text: 'Cedar began work on "Design IA + page flows".' },
+  { t: '00:09', type: 'task_started', agentId: 'metrics', text: 'Tally began work on "Define metric tree".' },
+  { t: '00:10', type: 'message', agentId: 'metrics', text: 'Suggesting Accepted Mission Artifacts as north star. Flagging "message count" as anti-metric.' },
+  { t: '00:11', type: 'artifact_created', agentId: 'metrics', text: 'Created artifact: Metric tree v1' },
+  { t: '00:11', type: 'task_completed', agentId: 'metrics', text: '"Define metric tree" → done · $0.09' },
+  { t: '00:13', type: 'artifact_created', agentId: 'ux', text: 'Created artifact: IA blueprint + 7 page specs' },
+  { t: '00:13', type: 'task_completed', agentId: 'ux', text: '"Design IA + page flows" → done · $0.51' },
+  { t: '00:13', type: 'task_started', agentId: 'writer', text: 'Quill began work on "Synthesize PRD draft".' },
+  { t: '00:14', type: 'message', agentId: 'writer', text: 'Reading positioning, IA, and metrics. Applying your preferred structure (users → problem → solution).' },
+  { t: '00:15', type: 'streaming', agentId: 'writer', text: 'Writing PRD section 3: "Core concepts"…', live: true },
+];
+
+const GROWTH_PROPOSALS = [
+  { id: 'g-1', type: 'team_template', title: 'Save this team as "Product Design Team"', description: 'This 7-agent composition (Lead + Research + Strategist + UX + Metrics + Critic + Writer) completed the mission within budget. Save it as a reusable template.', evidence: ['Mission m-1 completed in 14m', 'All 7 work cards passed review', '$2.84 of $8.00 budget'], risk: 'low', scope: 'team', status: 'pending' },
+  { id: 'g-2', type: 'identity', title: 'Promote Cedar (UX Architect) to Candidate', description: 'Cedar was created ephemerally for this mission and produced an accepted IA artifact. Promote to Candidate so it can be considered for future missions.', evidence: ['Artifact a-3 accepted with no revisions', 'Match score post-mission: 0.92'], risk: 'low', scope: 'agent', status: 'pending' },
+  { id: 'g-3', type: 'identity', title: 'Promote Tally (Metrics Designer) to Candidate', description: 'New ephemeral agent. Output was accepted. Worth keeping around.', evidence: ['Artifact a-4 accepted', 'Flagged 2 anti-metrics user agreed with'], risk: 'low', scope: 'agent', status: 'pending' },
+  { id: 'g-4', type: 'skill', title: 'Save "multi-agent product design" as a Skill', description: 'The sequence Research → Positioning → IA → Metrics → PRD → Critic worked well. Capture as a reusable skill the Lead can dispatch.', evidence: ['Pattern reused 3 times this quarter (proxy)', 'Budget consistently under estimate'], risk: 'low', scope: 'team', status: 'pending' },
+  { id: 'g-5', type: 'memory', title: 'Memory for Iris: "User wants core-object-first framing"', description: 'Iris already had this memory; this mission reinforced it. Bump confidence.', evidence: ['User accepted positioning v2 without edits'], risk: 'low', scope: 'agent', status: 'pending' },
+  { id: 'g-6', type: 'failure_pattern', title: 'Add "chat-as-task-room" check to Critic', description: 'Critic should always flag designs where the chat surface is treated as the primary task object.', evidence: ['Critic flagged this 2x in this mission, you accepted both'], risk: 'low', scope: 'agent', status: 'pending' },
+  { id: 'g-7', type: 'output_style', title: 'Quill: prefer "users → problem → solution" structure', description: 'Make this the default PRD section order for this user.', evidence: ['User accepted structure in m-1, m-2'], risk: 'medium', scope: 'user', status: 'pending' },
+  { id: 'g-8', type: 'tool_policy', title: 'Marlow: always include pricing in competitive scans', description: 'Already a memory; promote to a tool-call policy so it cannot be skipped.', evidence: ['User reinforced 4x'], risk: 'low', scope: 'agent', status: 'pending' },
+];
+
+Object.assign(window, { AGENTS, MISSIONS, TEAM_PROPOSAL, WORK_CARDS, ARTIFACTS, TRACE, GROWTH_PROPOSALS });
