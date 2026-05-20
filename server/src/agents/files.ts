@@ -1,5 +1,6 @@
 import { storage } from "edgespark";
 import { buckets } from "../defs/storage_schema";
+import { assertSafeId } from "../lib/safe-paths";
 
 export type AgentBootFiles = {
   soul: string;
@@ -38,6 +39,7 @@ async function putIfMissing(key: string, value: string) {
 }
 
 export async function ensureAgentFiles(agentId: string, displayName = agentId) {
+  agentId = assertSafeId(agentId, "agent_id");
   await putIfMissing(`agents/${agentId}/soul.md`, `---\nmodel: gpt-4o-mini\n---\nYou are ${displayName}, a Missionry demo agent.`);
   await putIfMissing(`agents/${agentId}/identity.md`, `# ${displayName}\n\nPhase 1 demo agent.`);
   await putIfMissing(`agents/${agentId}/base-config.yaml`, "model: gpt-4o-mini\ndefaultSandboxTier: tier0\n");
@@ -69,6 +71,8 @@ export async function ensureAgentFiles(agentId: string, displayName = agentId) {
 }
 
 export async function ensureAgentInstanceFiles(missionId: string, instanceId: string) {
+  missionId = assertSafeId(missionId, "mission_id");
+  instanceId = assertSafeId(instanceId, "instance_id");
   const prefix = `missions/${missionId}/agent-instances/${instanceId}`;
   await putIfMissing(`${prefix}/memory/demo.md`, "# Demo memory\n\nMission-scoped; do not share across missions.");
   await putIfMissing(`${prefix}/config-overrides.yaml`, "overrides: {}\n");
@@ -76,6 +80,7 @@ export async function ensureAgentInstanceFiles(missionId: string, instanceId: st
 }
 
 export async function loadAgentBootFiles(agentId: string): Promise<AgentBootFiles> {
+  agentId = assertSafeId(agentId, "agent_id");
   await ensureAgentFiles(agentId);
   const soul = (await getText(`agents/${agentId}/soul.md`)) ?? "";
   const identity = (await getText(`agents/${agentId}/identity.md`)) ?? "";
@@ -100,6 +105,8 @@ export async function loadAgentBootFiles(agentId: string): Promise<AgentBootFile
 }
 
 export async function loadSkill(agentId: string, skillId: string): Promise<string> {
+  agentId = assertSafeId(agentId, "agent_id");
+  skillId = assertSafeId(skillId, "skill_id");
   const body = await getText(`agents/${agentId}/skills/${skillId}/SKILL.md`);
   if (!body) throw new Error("error.skill.not_found");
   return body;

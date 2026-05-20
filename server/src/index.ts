@@ -19,6 +19,7 @@ import {
   workCards,
 } from "./defs/db_schema";
 import { buckets } from "./defs/storage_schema";
+import { assertSafeId, assertSafeRelativePath } from "./lib/safe-paths";
 import { seedDemo } from "./seed";
 import * as e2b from "./sandbox/e2b";
 import { emitCostEvent, recentMissionEvents } from "./sse/events";
@@ -56,14 +57,29 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 let startupSeedPromise: Promise<unknown> | null = null;
 const storageBodyCache = new Map<string, string>();
 
+function runtimeEnv() {
+  return (vars.get("EDGESPARK_ENV") || vars.get("NODE_ENV") || "development").toLowerCase();
+}
+
+function isProdLike() {
+  return ["production", "prod"].includes(runtimeEnv());
+}
+
+function assertSafeStartupConfig() {
+  if (isDevAdminOverride() && runtimeEnv() !== "development") {
+    throw new Error("error.runtime.dev_admin_forbidden");
+  }
+}
+
 app.onError((err, c) => {
   console.error("HANDLER ERROR:", err);
   const message = String(err instanceof Error ? err.message : err);
   if (message.startsWith("error.")) {
-    const status = message === "error.user.daily_cap_hit" ? 402 : 400;
+    const status = message === "error.user.daily_cap_hit" ? 402 : message === "error.mission.access_denied" ? 403 : message === "error.reap.token_not_configured" ? 503 : 400;
     return c.json({ error: { code: message, messageKey: message } }, status as never);
   }
-  return c.json({ error: { code: "error.internal", messageKey: "error.internal" }, detail: message }, 500);
+  if (isProdLike()) return c.json({ error: "internal", code: "error.internal" }, 500);
+  return c.json({ error: { code: "error.internal", messageKey: "error.internal" }, detail: message, stack: err instanceof Error ? err.stack : undefined }, 500);
 });
 
 function jsonError(c: any, code: string, status = 400) {
@@ -124,7 +140,22 @@ function isDevAdminOverride() {
   return vars.get("EDGESPARK_DEV_AS_ADMIN") === "true";
 }
 
-async function resolveSessionUser() {
+const processEnv = (globalThis as unknown as { process?: { env?: Record<string, string | undefined> } }).process?.env;
+if (processEnv?.EDGESPARK_DEV_AS_ADMIN === "true" && (processEnv.EDGESPARK_ENV || processEnv.NODE_ENV || "development").toLowerCase() !== "development") {
+  throw new Error("error.runtime.dev_admin_forbidden");
+}
+
+function devHeaderSession(c: any) {
+  if (runtimeEnv() !== "development") return null;
+  const userId = c.req.header("x-missionry-dev-user-id");
+  const email = c.req.header("x-missionry-dev-email");
+  if (!userId || !email) return null;
+  return { userId: assertSafeId(userId, "user_id"), email: email.trim().toLowerCase() };
+}
+
+async function resolveSessionUser(c?: any) {
+  const devSession = c ? devHeaderSession(c) : null;
+  if (devSession) return devSession;
   // EdgeSpark dev curl smoke has no browser login, so EDGESPARK_DEV_AS_ADMIN
   // intentionally treats the request as the hardcoded super-admin.
   if (isDevAdminOverride()) return { userId: "dev_super_admin", email: SUPER_ADMIN_EMAIL };
@@ -138,11 +169,11 @@ async function resolveSessionUser() {
 }
 
 async function resolveRole(email: string) {
-  const normalized = email.toLowerCase();
+  const normalized = email.trim().toLowerCase();
   if (normalized === SUPER_ADMIN_EMAIL) return "admin";
   const entries = await db.select().from(whitelistEntries).where(eq(whitelistEntries.enabled, 1));
   const allowed = entries.some((entry: typeof whitelistEntries.$inferSelect) => {
-    const value = entry.value.toLowerCase();
+    const value = entry.value.trim().toLowerCase();
     return entry.type === "email" ? normalized === value : normalized.endsWith(value);
   });
   return allowed ? "user" : null;
@@ -180,7 +211,7 @@ async function upsertUserProfile(userId: string, email: string, role: "admin" | 
 }
 
 async function resolveRequestProfile(c: any) {
-  const session = await resolveSessionUser();
+  const session = await resolveSessionUser(c);
   if (!session) return null;
   const role = await resolveRole(session.email);
   if (!role) return null;
@@ -191,6 +222,39 @@ function requireAdmin(c: any) {
   const profile = currentUserProfile(c);
   if (profile.role !== "admin") return jsonError(c, "error.auth.admin_required", 403);
   return null;
+}
+
+async function userHasMissionAccess(profile: UserProfile, missionId: string) {
+  missionId = assertSafeId(missionId, "mission_id");
+  if (profile.role === "admin") return true;
+  const [mission] = await db.select().from(missions).where(eq(missions.id, missionId)).limit(1);
+  if (!mission) throw new Error("error.mission.not_found");
+  if (mission.ownerUserId === profile.userId) return true;
+  const rows = await db
+    .select({ id: agentInstances.id })
+    .from(agentInstances)
+    .innerJoin(directThreads, eq(directThreads.agentInstanceId, agentInstances.id))
+    .where(and(eq(agentInstances.missionId, missionId), eq(directThreads.userId, profile.userId)))
+    .limit(1);
+  return rows.length > 0;
+}
+
+async function assertMissionAccess(c: any, missionId = c.req.param("id")) {
+  missionId = assertSafeId(missionId, "mission_id");
+  const profile = currentUserProfile(c);
+  if (!(await userHasMissionAccess(profile, missionId))) return jsonError(c, "error.mission.access_denied", 403);
+  return null;
+}
+
+async function assertThreadAccess(c: any, threadId: string) {
+  threadId = assertSafeId(threadId, "thread_id");
+  const [thread] = await db.select().from(directThreads).where(eq(directThreads.id, threadId)).limit(1);
+  if (!thread) return { error: jsonError(c, "error.direct_thread.not_found", 404) as Response };
+  const profile = currentUserProfile(c);
+  if (profile.role !== "admin" && thread.userId !== profile.userId && !(await userHasMissionAccess(profile, thread.missionId))) {
+    return { error: jsonError(c, "error.mission.access_denied", 403) as Response };
+  }
+  return { thread };
 }
 
 function rowMission(row: typeof missions.$inferSelect) {
@@ -216,6 +280,7 @@ function workCardJson(row: typeof workCards.$inferSelect) {
 }
 
 async function ensureAgent(agentId: string, displayName = agentId) {
+  agentId = assertSafeId(agentId, "agent_id");
   await ensureAgentFiles(agentId, displayName);
   const [existing] = await db.select().from(agents).where(eq(agents.id, agentId)).limit(1);
   if (existing) return;
@@ -234,6 +299,8 @@ async function ensureAgent(agentId: string, displayName = agentId) {
 }
 
 async function attachInstance(missionId: string, agentId: string, role = "member") {
+  missionId = assertSafeId(missionId, "mission_id");
+  agentId = assertSafeId(agentId, "agent_id");
   await ensureAgent(agentId, agentId.replace(/^agt_/, ""));
   const [existing] = await db
     .select()
@@ -266,12 +333,15 @@ async function attachInstance(missionId: string, agentId: string, role = "member
 }
 
 async function agentForInstance(instanceId: string) {
+  instanceId = assertSafeId(instanceId, "instance_id");
   const [row] = await db.select().from(agentInstances).where(eq(agentInstances.id, instanceId)).limit(1);
   if (!row) throw new Error("error.agent_instance.not_found");
   return row.agentId;
 }
 
 async function hasRunningCard(agentId: string, excludeCardId?: string) {
+  agentId = assertSafeId(agentId, "agent_id");
+  if (excludeCardId) excludeCardId = assertSafeId(excludeCardId, "work_card_id");
   const clauses = [eq(agentInstances.agentId, agentId), eq(workCards.status, "running")];
   if (excludeCardId) clauses.push(ne(workCards.id, excludeCardId));
   const rows = await db
@@ -284,6 +354,8 @@ async function hasRunningCard(agentId: string, excludeCardId?: string) {
 }
 
 async function createQueuedWorkCard(missionId: string, input: WorkCardInput) {
+  missionId = assertSafeId(missionId, "mission_id");
+  input.assigneeInstanceId = assertSafeId(input.assigneeInstanceId, "instance_id");
   const agentId = await agentForInstance(input.assigneeInstanceId);
   const status = input.activate === false || (await hasRunningCard(agentId)) ? "pending" : "running";
   const workCardId = `wc_${crypto.randomUUID().slice(0, 8)}`;
@@ -310,6 +382,8 @@ async function createQueuedWorkCard(missionId: string, input: WorkCardInput) {
 }
 
 async function triggerWorkCardStarted(missionId: string, workCardId: string) {
+  missionId = assertSafeId(missionId, "mission_id");
+  workCardId = assertSafeId(workCardId, "work_card_id");
   await recordAudit({
     missionId,
     subjectType: "work_card",
@@ -321,6 +395,7 @@ async function triggerWorkCardStarted(missionId: string, workCardId: string) {
 }
 
 async function promoteNextPending(agentId: string) {
+  agentId = assertSafeId(agentId, "agent_id");
   const rows = await db
     .select({ card: workCards })
     .from(workCards)
@@ -336,6 +411,7 @@ async function promoteNextPending(agentId: string) {
 }
 
 export async function executeWorkCard(workCardId: string) {
+  workCardId = assertSafeId(workCardId, "work_card_id");
   const [card] = await db.select().from(workCards).where(eq(workCards.id, workCardId)).limit(1);
   if (!card || card.status !== "running" || !card.assigneeInstanceId) return;
   const [instance] = await db.select().from(agentInstances).where(eq(agentInstances.id, card.assigneeInstanceId)).limit(1);
@@ -479,6 +555,7 @@ async function createMission(input: { title: string; objective: string; owner: O
 }
 
 async function decomposeMission(missionId: string) {
+  missionId = assertSafeId(missionId, "mission_id");
   const mission = await getMission(missionId);
   if (mission.ownerType !== "agent" || !mission.ownerInstanceId || !mission.ownerAgentId) return { created: [] as Array<{ workCardId: string; status: string }> };
   const apiKey = await Promise.resolve(secret.get("OPENAI_API_KEY")).catch(() => undefined);
@@ -509,8 +586,10 @@ async function decomposeMission(missionId: string) {
 }
 
 app.use("/api/public/*", async (c, next) => {
+  assertSafeStartupConfig();
   await scheduleStartupSeed();
   if (c.req.path === "/api/public/health") return next();
+  if (c.req.path === "/api/public/internal/reap") return next();
   const profile = await resolveRequestProfile(c);
   if (!profile) return jsonError(c, "error.auth.not_whitelisted", 403);
   (c as any).set("userProfile", profile);
@@ -596,14 +675,16 @@ app.post("/api/public/admin/whitelist", async (c) => {
   const denied = requireAdmin(c);
   if (denied) return denied;
   const body = (await c.req.json().catch(() => ({}))) as { type?: "email" | "suffix"; value?: string };
-  if (!body.type || !body.value || !["email", "suffix"].includes(body.type)) return jsonError(c, "error.request.invalid", 400);
+  const value = body.value?.trim().toLowerCase();
+  if (!body.type || !value || !["email", "suffix"].includes(body.type)) return jsonError(c, "error.request.invalid", 400);
+  if (body.type === "suffix" && !/^[@.][a-z0-9.-]+$/i.test(value)) return jsonError(c, "error.whitelist.suffix_invalid", 400);
   const timestamp = now();
   const [entry] = await db
     .insert(whitelistEntries)
     .values({
       id: `wl_${crypto.randomUUID().slice(0, 10)}`,
       type: body.type,
-      value: body.value.toLowerCase(),
+      value,
       enabled: 1,
       createdBy: currentUserProfile(c).userId,
       createdAt: timestamp,
@@ -619,8 +700,13 @@ app.patch("/api/public/admin/whitelist/:id", async (c) => {
   const body = (await c.req.json().catch(() => ({}))) as { enabled?: boolean | number; value?: string; type?: "email" | "suffix" };
   const patch: Record<string, unknown> = { updatedAt: now() };
   if (body.enabled !== undefined) patch.enabled = body.enabled ? 1 : 0;
-  if (body.value) patch.value = body.value.toLowerCase();
   if (body.type) patch.type = body.type;
+  if (body.value) {
+    const value = body.value.trim().toLowerCase();
+    const type = body.type ?? (await db.select().from(whitelistEntries).where(eq(whitelistEntries.id, c.req.param("id"))).limit(1))[0]?.type;
+    if (type === "suffix" && !/^[@.][a-z0-9.-]+$/i.test(value)) return jsonError(c, "error.whitelist.suffix_invalid", 400);
+    patch.value = value;
+  }
   const [entry] = await db.update(whitelistEntries).set(patch).where(eq(whitelistEntries.id, c.req.param("id"))).returning();
   if (!entry) return jsonError(c, "error.whitelist.not_found", 404);
   return c.json({ actionId: crypto.randomUUID(), status: "completed", entry });
@@ -634,8 +720,9 @@ app.delete("/api/public/admin/whitelist/:id", async (c) => {
 });
 
 app.get("/api/public/missions", async (c) => {
-  const agentId = c.req.query("agentId");
-  const ownerAgentId = c.req.query("ownerAgentId");
+  const profile = currentUserProfile(c);
+  const agentId = c.req.query("agentId") ? assertSafeId(c.req.query("agentId"), "agent_id") : undefined;
+  const ownerAgentId = c.req.query("ownerAgentId") ? assertSafeId(c.req.query("ownerAgentId"), "agent_id") : undefined;
   const rows = agentId
     ? await db
         .select({ mission: missions })
@@ -646,18 +733,25 @@ app.get("/api/public/missions", async (c) => {
     : ownerAgentId
       ? await db.select().from(missions).where(eq(missions.ownerAgentId, ownerAgentId)).orderBy(desc(missions.updatedAt))
       : await db.select().from(missions).orderBy(desc(missions.updatedAt));
-  const items = rows.map((row: any) => row.mission ? rowMission(row.mission) : rowMission(row));
+  const allItems = rows.map((row: any) => row.mission ? rowMission(row.mission) : rowMission(row));
+  const items = profile.role === "admin" ? allItems : [];
+  if (profile.role !== "admin") {
+    for (const item of allItems) {
+      if (await userHasMissionAccess(profile, item.id)) items.push(item);
+    }
+  }
   return c.json({ items });
 });
 
 app.post("/api/public/missions/demo", async (c) => {
   const body = (await c.req.json().catch(() => ({}))) as { missionId?: string };
-  return c.json({ actionId: crypto.randomUUID(), status: "completed", ...(await seedDemo(body.missionId)) });
+  return c.json({ actionId: crypto.randomUUID(), status: "completed", ...(await seedDemo(body.missionId ? assertSafeId(body.missionId, "mission_id") : undefined)) });
 });
 
 app.post("/api/public/missions", async (c) => {
   if (c.req.query("seed") === "true") return c.json({ actionId: crypto.randomUUID(), status: "completed", ...(await seedDemo()) });
-  const body = (await c.req.json()) as { title?: string; objective?: string; owner?: OwnerInput; dailyBudgetCents?: number };
+  const body = (await c.req.json()) as { missionId?: string; title?: string; objective?: string; owner?: OwnerInput; dailyBudgetCents?: number };
+  if (body.missionId) assertSafeId(body.missionId, "mission_id");
   if (!body.title || !body.objective || !body.owner) return jsonError(c, "error.request.invalid", 400);
   const mission = await createMission({
     title: body.title,
@@ -670,11 +764,17 @@ app.post("/api/public/missions", async (c) => {
   return c.json({ actionId: crypto.randomUUID(), status: "completed", ...mission });
 });
 
-app.get("/api/public/missions/:id", async (c) => c.json(await getMission(c.req.param("id"))));
+app.get("/api/public/missions/:id", async (c) => {
+  const denied = await assertMissionAccess(c);
+  if (denied) return denied;
+  return c.json(await getMission(assertSafeId(c.req.param("id"), "mission_id")));
+});
 
 app.patch("/api/public/missions/:id", async (c) => {
+  const denied = await assertMissionAccess(c);
+  if (denied) return denied;
   const body = (await c.req.json().catch(() => ({}))) as { title?: string; objective?: string; status?: string; dailyBudgetCents?: number };
-  const mission = await updateMission(c.req.param("id"), (current) => ({
+  const mission = await updateMission(assertSafeId(c.req.param("id"), "mission_id"), (current) => ({
     ...current,
     title: body.title ?? current.title,
     objective: body.objective ?? current.objective,
@@ -685,31 +785,40 @@ app.patch("/api/public/missions/:id", async (c) => {
 });
 
 app.post("/api/public/missions/:id/agents/:agentId/instances", async (c) => {
-  const instanceId = await attachInstance(c.req.param("id"), c.req.param("agentId"));
+  const denied = await assertMissionAccess(c);
+  if (denied) return denied;
+  const instanceId = await attachInstance(assertSafeId(c.req.param("id"), "mission_id"), assertSafeId(c.req.param("agentId"), "agent_id"));
   return c.json({ actionId: crypto.randomUUID(), status: "completed", instanceId });
 });
 
 app.post("/api/public/agents/:agentId/tools/use_skill", async (c) => {
+  const agentId = assertSafeId(c.req.param("agentId"), "agent_id");
   const body = (await c.req.json().catch(() => ({}))) as { skill_id?: string; skillId?: string };
   const skillId = body.skillId ?? body.skill_id;
   if (!skillId) return jsonError(c, "error.request.invalid", 400);
-  await ensureAgentFiles(c.req.param("agentId"));
-  return c.json({ actionId: crypto.randomUUID(), status: "completed", body: await loadSkill(c.req.param("agentId"), skillId) });
+  await ensureAgentFiles(agentId);
+  return c.json({ actionId: crypto.randomUUID(), status: "completed", body: await loadSkill(agentId, assertSafeId(skillId, "skill_id")) });
 });
 
 app.post("/api/public/agents/:agentId/self-update", async (c) => {
-  const agentId = c.req.param("agentId");
+  const agentId = assertSafeId(c.req.param("agentId"), "agent_id");
   const body = (await c.req.json().catch(() => ({}))) as { file?: string; content?: string; previousBody?: string; reason?: string; missionId?: string };
   if (!body.file || body.content === undefined) return jsonError(c, "error.request.invalid", 400);
+  const file = assertSafeRelativePath(body.file);
+  const missionId = body.missionId ? assertSafeId(body.missionId, "mission_id") : undefined;
+  if (missionId) {
+    const denied = await assertMissionAccess(c, missionId);
+    if (denied) return denied;
+  }
   await ensureAgentFiles(agentId);
-  const key = `agents/${agentId}/${body.file}`;
+  const key = `agents/${agentId}/${file}`;
   const bucket = storage.from(buckets.missionryWorkspaces);
   const before = await bucket.get(key);
   const previousBody = body.previousBody ?? storageBodyCache.get(key) ?? (before ? await storageObjectText(before) : "");
   await bucket.put(key, body.content);
   storageBodyCache.set(key, body.content);
   const auditEventId = await recordAudit({
-    missionId: body.missionId,
+    missionId,
     subjectType: "agent",
     subjectId: agentId,
     actor: { type: "agent", id: agentId },
@@ -722,11 +831,17 @@ app.post("/api/public/agents/:agentId/self-update", async (c) => {
   return c.json({ actionId: crypto.randomUUID(), status: "completed", auditEventId, key });
 });
 
-app.post("/api/public/missions/:id/decompose", async (c) => c.json({ actionId: crypto.randomUUID(), status: "completed", ...(await decomposeMission(c.req.param("id"))) }));
+app.post("/api/public/missions/:id/decompose", async (c) => {
+  const denied = await assertMissionAccess(c);
+  if (denied) return denied;
+  return c.json({ actionId: crypto.randomUUID(), status: "completed", ...(await decomposeMission(assertSafeId(c.req.param("id"), "mission_id"))) });
+});
 
 app.post("/api/public/missions/:id/agent-instances/:instanceId/direct-thread", async (c) => {
-  const missionId = c.req.param("id");
-  const instanceId = c.req.param("instanceId");
+  const denied = await assertMissionAccess(c);
+  if (denied) return denied;
+  const missionId = assertSafeId(c.req.param("id"), "mission_id");
+  const instanceId = assertSafeId(c.req.param("instanceId"), "instance_id");
   const [instance] = await db.select().from(agentInstances).where(and(eq(agentInstances.id, instanceId), eq(agentInstances.missionId, missionId))).limit(1);
   if (!instance) return jsonError(c, "error.agent_instance.not_found", 404);
   const userId = currentUserProfile(c).userId;
@@ -751,7 +866,9 @@ app.post("/api/public/missions/:id/agent-instances/:instanceId/direct-thread", a
 });
 
 app.get("/api/public/missions/:id/workroom", async (c) => {
-  const mission = await getMission(c.req.param("id"));
+  const denied = await assertMissionAccess(c);
+  if (denied) return denied;
+  const mission = await getMission(assertSafeId(c.req.param("id"), "mission_id"));
   const instanceRows = await db
     .select({ instance: agentInstances, agent: agents })
     .from(agentInstances)
@@ -823,12 +940,17 @@ app.get("/api/public/missions/:id/workroom", async (c) => {
 });
 
 app.post("/api/public/missions/:id/work-cards", async (c) => {
+  const denied = await assertMissionAccess(c);
+  if (denied) return denied;
   const body = (await c.req.json().catch(() => ({}))) as Partial<WorkCardInput>;
   if (!body.assigneeInstanceId) return jsonError(c, "error.work_card.assignee_required");
-  const created = await createQueuedWorkCard(c.req.param("id"), {
+  const missionId = assertSafeId(c.req.param("id"), "mission_id");
+  const assigneeInstanceId = assertSafeId(body.assigneeInstanceId, "instance_id");
+  await e2b.assertInstanceInMission(missionId, assigneeInstanceId);
+  const created = await createQueuedWorkCard(missionId, {
     title: body.title ?? "Work card",
     description: body.description,
-    assigneeInstanceId: body.assigneeInstanceId,
+    assigneeInstanceId,
     sandboxAffinity: body.sandboxAffinity ?? { tier: "tier0", reason: "manual" },
     demoAction: body.demoAction,
     path: body.path,
@@ -840,9 +962,12 @@ app.post("/api/public/missions/:id/work-cards", async (c) => {
 });
 
 app.patch("/api/public/missions/:id/work-cards/:workCardId", async (c) => {
+  const denied = await assertMissionAccess(c);
+  if (denied) return denied;
   const body = (await c.req.json().catch(() => ({}))) as { status?: string };
-  const workCardId = c.req.param("workCardId");
-  const [before] = await db.select().from(workCards).where(eq(workCards.id, workCardId)).limit(1);
+  const missionId = assertSafeId(c.req.param("id"), "mission_id");
+  const workCardId = assertSafeId(c.req.param("workCardId"), "work_card_id");
+  const [before] = await db.select().from(workCards).where(and(eq(workCards.id, workCardId), eq(workCards.missionId, missionId))).limit(1);
   if (!before) return jsonError(c, "error.work_card.not_found", 404);
   await db.update(workCards).set({ status: body.status ?? before.status, updatedAt: now() }).where(eq(workCards.id, workCardId));
   let promoted: string | null = null;
@@ -865,9 +990,10 @@ function directThreadMessageJson(row: typeof directThreadMessages.$inferSelect) 
 }
 
 app.get("/api/public/direct-threads/:threadId/messages", async (c) => {
-  const threadId = c.req.param("threadId");
-  const [thread] = await db.select().from(directThreads).where(eq(directThreads.id, threadId)).limit(1);
-  if (!thread) return jsonError(c, "error.direct_thread.not_found", 404);
+  const threadId = assertSafeId(c.req.param("threadId"), "thread_id");
+  const access = await assertThreadAccess(c, threadId);
+  if (access.error) return access.error;
+  const thread = access.thread;
   const rows = await db.select().from(directThreadMessages).where(eq(directThreadMessages.threadId, threadId)).orderBy(asc(directThreadMessages.createdAt));
   return c.json({
     threadId,
@@ -880,11 +1006,12 @@ app.get("/api/public/direct-threads/:threadId/messages", async (c) => {
 });
 
 app.post("/api/public/direct-threads/:threadId/messages", async (c) => {
-  const threadId = c.req.param("threadId");
+  const threadId = assertSafeId(c.req.param("threadId"), "thread_id");
   const body = (await c.req.json().catch(() => ({}))) as { body?: string; clientActionId?: string };
   if (!body.body) return jsonError(c, "error.request.invalid", 400);
-  const [thread] = await db.select().from(directThreads).where(eq(directThreads.id, threadId)).limit(1);
-  if (!thread) return jsonError(c, "error.direct_thread.not_found", 404);
+  const access = await assertThreadAccess(c, threadId);
+  if (access.error) return access.error;
+  const thread = access.thread;
   const [instance] = await db.select().from(agentInstances).where(eq(agentInstances.id, thread.agentInstanceId)).limit(1);
   if (!instance) return jsonError(c, "error.agent_instance.not_found", 404);
 
@@ -981,7 +1108,9 @@ async function generateDirectAgentReply(agentId: string, instanceId: string, mis
 }
 
 app.get("/api/public/missions/:id/events", async (c) => {
-  const missionId = c.req.param("id");
+  const denied = await assertMissionAccess(c);
+  if (denied) return denied;
+  const missionId = assertSafeId(c.req.param("id"), "mission_id");
   return streamSSE(c, async (stream) => {
     let sent = 0;
     while (sent < 30) {
@@ -994,8 +1123,10 @@ app.get("/api/public/missions/:id/events", async (c) => {
 });
 
 app.post("/api/public/internal/reap", async (c) => {
-  const expected = vars.get("INTERNAL_REAP_TOKEN");
-  if (expected && c.req.header("x-internal-token") !== expected) return jsonError(c, "error.internal.unauthorized", 401);
+  const expected = await secret.get("INTERNAL_REAP_TOKEN");
+  if (!expected) return jsonError(c, "error.reap.token_not_configured", 503);
+  if (c.req.header("x-internal-token") !== expected) return jsonError(c, "error.internal.unauthorized", 401);
+  if (c.req.query("throw") === "1") throw new Error("smoke internal throw");
   const idleMs = Number(vars.get("MISSIONRY_IDLE_MS") ?? 45000);
   const idle = await listIdleSandboxes(idleMs);
   const snapshotKeys: string[] = [];

@@ -5,6 +5,7 @@ import { z } from "zod";
 import { loadSkill } from "../agents/files";
 import { workCards } from "../defs/db_schema";
 import { buckets } from "../defs/storage_schema";
+import { assertSafeId, assertSafeRelativePath } from "../lib/safe-paths";
 import * as e2b from "../sandbox/e2b";
 import { emitCostEvent } from "../sse/events";
 import { getMission, recordAudit, type SandboxRef } from "../state/missionState";
@@ -19,6 +20,7 @@ export type ToolContext = {
 };
 
 async function resolveSandbox(ctx: ToolContext, target: "mission" | "private"): Promise<SandboxRef> {
+  await e2b.assertInstanceInMission(ctx.missionId, ctx.instanceId);
   const mission = await getMission(ctx.missionId);
   if (target === "private") {
     const existing = mission.stateJson.privateSandboxes[ctx.instanceId];
@@ -81,6 +83,14 @@ async function withUsageAndSpend<T>(name: string, ctx: ToolContext, handler: () 
 }
 
 export function missionryToolKit(ctx: ToolContext) {
+  ctx = {
+    ...ctx,
+    missionId: assertSafeId(ctx.missionId, "mission_id"),
+    agentId: assertSafeId(ctx.agentId, "agent_id"),
+    instanceId: assertSafeId(ctx.instanceId, "instance_id"),
+    turnId: assertSafeId(ctx.turnId, "turn_id"),
+    workCardId: ctx.workCardId ? assertSafeId(ctx.workCardId, "work_card_id") : undefined,
+  };
   return {
     run_command: tool({
       description: "Run a shell command in the shared or private E2B sandbox.",
@@ -98,8 +108,9 @@ export function missionryToolKit(ctx: ToolContext) {
       execute: (input) =>
         withUsageAndSpend("write_file", ctx, async () => {
           const ref = await resolveSandbox(ctx, input.sandbox_target);
-          await e2b.writeFile(ref, input.path, input.content);
-          return { path: input.path, sandboxId: ref.sandboxId };
+          const path = assertSafeRelativePath(input.path);
+          await e2b.writeFile(ref, path, input.content);
+          return { path, sandboxId: ref.sandboxId };
         }),
     }),
     read_file: tool({
@@ -108,7 +119,8 @@ export function missionryToolKit(ctx: ToolContext) {
       execute: (input) =>
         withUsageAndSpend("read_file", ctx, async () => {
           const ref = await resolveSandbox(ctx, input.sandbox_target);
-          return { path: input.path, content: await e2b.readFile(ref, input.path), sandboxId: ref.sandboxId };
+          const path = assertSafeRelativePath(input.path);
+          return { path, content: await e2b.readFile(ref, path), sandboxId: ref.sandboxId };
         }),
     }),
     read_artifact: tool({
@@ -116,7 +128,9 @@ export function missionryToolKit(ctx: ToolContext) {
       inputSchema: z.object({ artifactId: z.string(), filename: z.string() }),
       execute: (input) =>
         withUsageAndSpend("read_artifact", ctx, async () => {
-          const key = `missions/${ctx.missionId}/artifacts/${input.artifactId}/${input.filename}`;
+          const artifactId = assertSafeId(input.artifactId, "artifact_id");
+          const filename = assertSafeRelativePath(input.filename);
+          const key = `missions/${ctx.missionId}/artifacts/${artifactId}/${filename}`;
           const object = await storage.from(buckets.missionryWorkspaces).get(key);
           return { key, content: object ? await storageObjectText(object) : null };
         }),
@@ -126,7 +140,9 @@ export function missionryToolKit(ctx: ToolContext) {
       inputSchema: z.object({ artifactId: z.string(), filename: z.string(), content: z.string() }),
       execute: (input) =>
         withUsageAndSpend("write_artifact", ctx, async () => {
-          const key = `missions/${ctx.missionId}/artifacts/${input.artifactId}/${input.filename}`;
+          const artifactId = assertSafeId(input.artifactId, "artifact_id");
+          const filename = assertSafeRelativePath(input.filename);
+          const key = `missions/${ctx.missionId}/artifacts/${artifactId}/${filename}`;
           await storage.from(buckets.missionryWorkspaces).put(key, input.content);
           return { key };
         }),
@@ -166,7 +182,8 @@ export function missionryToolKit(ctx: ToolContext) {
       inputSchema: z.object({ file: z.string(), content: z.string(), reason: z.string() }),
       execute: (input) =>
         withUsageAndSpend("commit_self_update", ctx, async () => {
-          const key = `agents/${ctx.agentId}/${input.file}`;
+          const file = assertSafeRelativePath(input.file);
+          const key = `agents/${ctx.agentId}/${file}`;
           const before = await storage.from(buckets.missionryWorkspaces).get(key);
           const previousBody = before ? await storageObjectText(before) : "";
           await storage.from(buckets.missionryWorkspaces).put(key, input.content);
@@ -188,7 +205,7 @@ export function missionryToolKit(ctx: ToolContext) {
     use_skill: tool({
       description: "Load a skill body lazily from storage.",
       inputSchema: z.object({ skill_id: z.string() }),
-      execute: (input) => withUsageAndSpend("use_skill", ctx, async () => ({ body: await loadSkill(ctx.agentId, input.skill_id) })),
+      execute: (input) => withUsageAndSpend("use_skill", ctx, async () => ({ body: await loadSkill(ctx.agentId, assertSafeId(input.skill_id, "skill_id")) })),
     }),
     web_fetch: tool({
       description: "Fetch a URL without opening a sandbox.",

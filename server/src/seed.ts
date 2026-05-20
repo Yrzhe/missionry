@@ -1,12 +1,13 @@
 import { db } from "edgespark";
 import { ensureAgentFiles, ensureAgentInstanceFiles } from "./agents/files";
 import { agentInstances, agents, missions, workCards } from "./defs/db_schema";
+import { assertSafeId } from "./lib/safe-paths";
 import { defaultMissionState, reserveMissionSandboxSlot, reservePrivateSandboxSlot } from "./state/missionState";
 
 const now = () => new Date().toISOString();
 
 export async function seedDemo(requestedMissionId?: string) {
-  const missionId = requestedMissionId ?? `mis_${crypto.randomUUID().slice(0, 8)}`;
+  const missionId = assertSafeId(requestedMissionId ?? `mis_${crypto.randomUUID().slice(0, 8)}`, "mission_id");
   const agentA = "agt_forge";
   const agentB = "agt_pixel";
   const instanceA = `ins_${missionId}_forge`;
@@ -60,6 +61,9 @@ export async function createDemoWorkCard(
   tier: "mission" | "private" | "tier0",
   title: string,
 ) {
+  missionId = assertSafeId(missionId, "mission_id");
+  workCardId = assertSafeId(workCardId, "work_card_id");
+  assigneeInstanceId = assertSafeId(assigneeInstanceId, "instance_id");
   const timestamp = now();
   await db.insert(workCards).values({
     id: workCardId,
@@ -80,6 +84,8 @@ export async function createDemoWorkCard(
 }
 
 async function upsertAgent(agentId: string, slug: string, name: string, timestamp: string) {
+  agentId = assertSafeId(agentId, "agent_id");
+  slug = assertSafeId(slug, "agent_slug");
   await db.insert(agents).values({
     id: agentId,
     slug,
@@ -95,6 +101,9 @@ async function upsertAgent(agentId: string, slug: string, name: string, timestam
 }
 
 async function upsertInstance(missionId: string, instanceId: string, agentId: string, role: string, alias: string, timestamp: string) {
+  missionId = assertSafeId(missionId, "mission_id");
+  instanceId = assertSafeId(instanceId, "instance_id");
+  agentId = assertSafeId(agentId, "agent_id");
   await db.insert(agentInstances).values({
     id: instanceId,
     missionId,

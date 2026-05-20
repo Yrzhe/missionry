@@ -1,4 +1,8 @@
 import { secret, vars } from "edgespark";
+import { db } from "edgespark";
+import { and, eq } from "drizzle-orm";
+import { agentInstances } from "../defs/db_schema";
+import { assertSafeId } from "../lib/safe-paths";
 import { assertUserBudgetForMission, updateMission, upsertSandboxRuntime, type SandboxRef } from "../state/missionState";
 
 type SandboxTarget = "mission" | "private";
@@ -13,6 +17,17 @@ const memorySandboxes = new Map<string, MemorySandbox>();
 
 function keyFor(missionId: string, target: SandboxTarget, instanceId?: string) {
   return target === "mission" ? `mission:${missionId}` : `agent:${missionId}:${instanceId}`;
+}
+
+export async function assertInstanceInMission(missionId: string, instanceId: string): Promise<void> {
+  missionId = assertSafeId(missionId, "mission_id");
+  instanceId = assertSafeId(instanceId, "instance_id");
+  const [row] = await db
+    .select({ id: agentInstances.id })
+    .from(agentInstances)
+    .where(and(eq(agentInstances.id, instanceId), eq(agentInstances.missionId, missionId)))
+    .limit(1);
+  if (!row) throw new Error("error.mission.access_denied");
 }
 
 async function useMemoryMode() {
@@ -38,18 +53,24 @@ async function ensureMemorySandbox(id: string): Promise<MemorySandbox> {
 }
 
 export async function startShared(missionId: string): Promise<SandboxRef> {
+  missionId = assertSafeId(missionId, "mission_id");
   return startOrResume({ missionId, target: "mission" });
 }
 
 export async function startPrivate(missionId: string, instanceId: string): Promise<SandboxRef> {
+  await assertInstanceInMission(missionId, instanceId);
   return startOrResume({ missionId, instanceId, target: "private" });
 }
 
 export async function resume(missionId: string, target: SandboxTarget, instanceId?: string): Promise<SandboxRef> {
+  missionId = assertSafeId(missionId, "mission_id");
+  if (target === "private" && instanceId) await assertInstanceInMission(missionId, instanceId);
   return startOrResume({ missionId, instanceId, target });
 }
 
 async function startOrResume(input: { missionId: string; instanceId?: string; target: SandboxTarget }): Promise<SandboxRef> {
+  input.missionId = assertSafeId(input.missionId, "mission_id");
+  if (input.instanceId) input.instanceId = assertSafeId(input.instanceId, "instance_id");
   await assertUserBudgetForMission(input.missionId, 1);
   await assertRunnableWorkerMode();
   const sandboxId = keyFor(input.missionId, input.target, input.instanceId);
@@ -80,6 +101,7 @@ async function startOrResume(input: { missionId: string; instanceId?: string; ta
 }
 
 export async function runCommand(ref: SandboxRef, command: string) {
+  await assertRefAccess(ref);
   await assertRunnableWorkerMode();
   await ensureMemorySandbox(ref.sandboxId);
   await touchSandbox(ref);
@@ -92,6 +114,7 @@ export async function runCommand(ref: SandboxRef, command: string) {
 }
 
 export async function writeFile(ref: SandboxRef, path: string, content: string) {
+  await assertRefAccess(ref);
   await assertRunnableWorkerMode();
   const sandbox = await ensureMemorySandbox(ref.sandboxId);
   sandbox.files.set(path, content);
@@ -99,6 +122,7 @@ export async function writeFile(ref: SandboxRef, path: string, content: string) 
 }
 
 export async function readFile(ref: SandboxRef, path: string) {
+  await assertRefAccess(ref);
   await assertRunnableWorkerMode();
   const sandbox = await ensureMemorySandbox(ref.sandboxId);
   await touchSandbox(ref);
@@ -108,6 +132,7 @@ export async function readFile(ref: SandboxRef, path: string) {
 }
 
 export async function pauseIfIdle(ref: SandboxRef) {
+  await assertRefAccess(ref);
   await assertRunnableWorkerMode();
   const sandbox = await ensureMemorySandbox(ref.sandboxId);
   sandbox.state = "paused";
@@ -130,4 +155,9 @@ async function touchSandbox(ref: SandboxRef) {
 
 function missionIdFor(ref: SandboxRef) {
   return ref.sandboxId.split(":")[1];
+}
+
+async function assertRefAccess(ref: SandboxRef) {
+  assertSafeId(missionIdFor(ref), "mission_id");
+  if (ref.tier === "private" && ref.ownerInstanceId) await assertInstanceInMission(missionIdFor(ref), ref.ownerInstanceId);
 }
