@@ -63,3 +63,5 @@ experiments/magicpath/
 # Claude Code transient
 .claude/projects/
 docs/implementation/notes.html
+**/.edgespark/state/
+**/.edgespark/staleness.json
