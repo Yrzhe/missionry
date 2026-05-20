@@ -1,4 +1,6 @@
-import type { EdgeSparkDb } from "../defs/runtime";
+import { db } from "edgespark";
+import { eq, desc } from "drizzle-orm";
+import { missionSpend } from "../defs/db_schema";
 import { recordAudit, recordCost, type AuditRecord, type CostRecord } from "../state/missionState";
 
 export type MissionSseEvent = {
@@ -9,13 +11,13 @@ export type MissionSseEvent = {
   occurredAt: string;
 };
 
-export async function emitAuditEvent(db: EdgeSparkDb, event: AuditRecord): Promise<string> {
-  return recordAudit(db, event);
+export async function emitAuditEvent(event: AuditRecord): Promise<string> {
+  return recordAudit(event);
 }
 
-export async function emitCostEvent(db: EdgeSparkDb, event: CostRecord): Promise<MissionSseEvent> {
-  await recordCost(db, event);
-  const auditEventId = await recordAudit(db, {
+export async function emitCostEvent(event: CostRecord): Promise<MissionSseEvent> {
+  await recordCost(event);
+  const auditEventId = await recordAudit({
     missionId: event.missionId,
     subjectType: "cost",
     subjectId: event.sandboxId ?? event.instanceId ?? event.agentId ?? event.missionId,
@@ -45,25 +47,27 @@ export async function emitCostEvent(db: EdgeSparkDb, event: CostRecord): Promise
   };
 }
 
-export async function recentMissionEvents(db: EdgeSparkDb, missionId: string): Promise<MissionSseEvent[]> {
-  const spend = await db
-    .prepare("select * from mission_spend where mission_id = ? order by created_at desc limit 20")
-    .bind(missionId)
-    .all();
-  return (spend.results ?? []).reverse().map((row) => ({
-    type: String(row.event_type),
+export async function recentMissionEvents(missionId: string): Promise<MissionSseEvent[]> {
+  const rows = await db
+    .select()
+    .from(missionSpend)
+    .where(eq(missionSpend.missionId, missionId))
+    .orderBy(desc(missionSpend.createdAt))
+    .limit(20);
+  return rows.reverse().map((row: typeof missionSpend.$inferSelect) => ({
+    type: row.eventType,
     missionId,
-    occurredAt: String(row.created_at),
+    occurredAt: row.createdAt,
     payload: {
-      clientActionId: row.client_action_id ?? undefined,
-      agentId: row.agent_id ?? undefined,
-      instanceId: row.instance_id ?? undefined,
+      clientActionId: row.clientActionId ?? undefined,
+      agentId: row.agentId ?? undefined,
+      instanceId: row.instanceId ?? undefined,
       model: row.model ?? undefined,
-      promptTokens: row.prompt_tokens ?? undefined,
-      completionTokens: row.completion_tokens ?? undefined,
-      costCents: Number(row.cost_cents),
-      sandboxId: row.sandbox_id ?? undefined,
-      sandboxSeconds: row.sandbox_seconds ?? undefined,
+      promptTokens: row.promptTokens ?? undefined,
+      completionTokens: row.completionTokens ?? undefined,
+      costCents: row.costCents,
+      sandboxId: row.sandboxId ?? undefined,
+      sandboxSeconds: row.sandboxSeconds ?? undefined,
     },
   }));
 }

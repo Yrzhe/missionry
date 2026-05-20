@@ -1,4 +1,6 @@
-import type { EdgeSparkDb } from "../defs/runtime";
+import { db } from "edgespark";
+import { and, eq, lte } from "drizzle-orm";
+import { auditEvents, missionSpend, missions, sandboxRuntime, usersProfile } from "../defs/db_schema";
 
 export type SandboxTier = "mission" | "private";
 export type SandboxState = "none" | "starting" | "running" | "paused" | "resuming" | "killed" | "error";
@@ -28,13 +30,7 @@ export type MissionStateJson = {
     lastSnapshotAt?: string;
     lastRestoreAt?: string;
   };
-  issues: {
-    total: number;
-    completed: number;
-    open: number;
-    reopened: number;
-    addedAfterDone: number;
-  };
+  issues: { total: number; completed: number; open: number; reopened: number; addedAfterDone: number };
   costGuardrailStatus: "ok" | "near_daily_cap" | "daily_cap_hit" | "global_cap_hit";
 };
 
@@ -85,8 +81,13 @@ export type AuditRecord = {
   rollbackAvailable?: boolean;
 };
 
-const emptySandbox = (tier: SandboxTier, ownerInstanceId?: string): SandboxRef => ({
-  sandboxId: tier === "mission" ? "mission:none" : `agent:none:${ownerInstanceId ?? "unknown"}`,
+export type UserProfileRow = typeof usersProfile.$inferSelect;
+
+const now = () => new Date().toISOString();
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+const emptySandbox = (tier: SandboxTier, missionId: string, ownerInstanceId?: string): SandboxRef => ({
+  sandboxId: tier === "mission" ? `mission:${missionId}` : `agent:${missionId}:${ownerInstanceId ?? "unknown"}`,
   tier,
   ownerInstanceId,
   state: "none",
@@ -97,10 +98,10 @@ const emptySandbox = (tier: SandboxTier, ownerInstanceId?: string): SandboxRef =
   environmentAccessMode: "inherit",
 });
 
-export function defaultMissionState(): MissionStateJson {
+export function defaultMissionState(missionId = "new"): MissionStateJson {
   return {
     turnQueue: [],
-    sharedSandbox: emptySandbox("mission"),
+    sharedSandbox: emptySandbox("mission", missionId),
     privateSandboxes: {},
     snapshots: { privateLatestR2Keys: {} },
     issues: { total: 0, completed: 0, open: 0, reopened: 0, addedAfterDone: 0 },
@@ -108,154 +109,206 @@ export function defaultMissionState(): MissionStateJson {
   };
 }
 
-function parseMission(row: Record<string, unknown>): MissionRow {
-  return {
-    id: String(row.id),
-    title: String(row.title),
-    objective: String(row.objective),
-    status: String(row.status),
-    ownerType: String(row.owner_type),
-    ownerUserId: row.owner_user_id ? String(row.owner_user_id) : null,
-    ownerAgentId: row.owner_agent_id ? String(row.owner_agent_id) : null,
-    ownerInstanceId: row.owner_instance_id ? String(row.owner_instance_id) : null,
-    version: Number(row.version),
-    stateJson: JSON.parse(String(row.state_json)) as MissionStateJson,
-    missionSpendCents: Number(row.mission_spend_cents),
-    llmSpendCents: Number(row.llm_spend_cents),
-    sandboxSpendCents: Number(row.sandbox_spend_cents),
-    burnRateCentsPerMinute: Number(row.burn_rate_cents_per_minute),
-    dailyBudgetCents: Number(row.daily_budget_cents),
-    createdAt: String(row.created_at),
-    updatedAt: String(row.updated_at),
-  };
+export function privateSandboxSlot(missionId: string, instanceId: string): SandboxRef {
+  return emptySandbox("private", missionId, instanceId);
 }
 
-export async function getMission(db: EdgeSparkDb, missionId: string): Promise<MissionRow> {
-  const row = await db.prepare("select * from missions where id = ?").bind(missionId).first();
+function parseMission(row: typeof missions.$inferSelect): MissionRow {
+  return { ...row, stateJson: JSON.parse(row.stateJson) as MissionStateJson };
+}
+
+function missionBurnRate(state: MissionStateJson) {
+  const shared = state.sharedSandbox.state === "running" ? state.sharedSandbox.burnRateCentsPerMinute : 0;
+  return Object.values(state.privateSandboxes)
+    .filter((ref) => ref.state === "running")
+    .reduce((sum, ref) => sum + ref.burnRateCentsPerMinute, shared);
+}
+
+export async function getMission(missionId: string): Promise<MissionRow> {
+  const [row] = await db.select().from(missions).where(eq(missions.id, missionId)).limit(1);
   if (!row) throw new Error("error.mission.not_found");
   return parseMission(row);
 }
 
-export async function updateMission(
-  db: EdgeSparkDb,
-  missionId: string,
-  mutate: (current: MissionRow) => MissionRow,
-): Promise<MissionRow> {
+export async function updateMission(missionId: string, mutate: (current: MissionRow) => MissionRow): Promise<MissionRow> {
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    const current = await getMission(db, missionId);
+    const current = await getMission(missionId);
     const next = mutate(structuredClone(current));
-    next.updatedAt = new Date().toISOString();
-    const result = await db
-      .prepare(
-        `update missions
-         set state_json = ?, mission_spend_cents = ?, llm_spend_cents = ?,
-             sandbox_spend_cents = ?, burn_rate_cents_per_minute = ?,
-             daily_budget_cents = ?, version = version + 1, updated_at = ?
-         where id = ? and version = ?`,
-      )
-      .bind(
-        JSON.stringify(next.stateJson),
-        next.missionSpendCents,
-        next.llmSpendCents,
-        next.sandboxSpendCents,
-        next.burnRateCentsPerMinute,
-        next.dailyBudgetCents,
-        next.updatedAt,
-        missionId,
-        current.version,
-      )
-      .run();
-    if (result.meta.changes > 0) return getMission(db, missionId);
+    next.updatedAt = now();
+    next.burnRateCentsPerMinute = missionBurnRate(next.stateJson);
+    const rows = await db
+      .update(missions)
+      .set({
+        title: next.title,
+        objective: next.objective,
+        status: next.status,
+        stateJson: JSON.stringify(next.stateJson),
+        missionSpendCents: next.missionSpendCents,
+        llmSpendCents: next.llmSpendCents,
+        sandboxSpendCents: next.sandboxSpendCents,
+        burnRateCentsPerMinute: next.burnRateCentsPerMinute,
+        dailyBudgetCents: next.dailyBudgetCents,
+        version: current.version + 1,
+        updatedAt: next.updatedAt,
+      })
+      .where(and(eq(missions.id, missionId), eq(missions.version, current.version)))
+      .returning();
+    if (rows.length > 0) return parseMission(rows[0]);
   }
   throw new Error("error.mission.version_conflict");
 }
 
-export async function recordCost(db: EdgeSparkDb, event: CostRecord): Promise<MissionRow> {
-  const id = crypto.randomUUID();
-  const createdAt = new Date().toISOString();
-  await db
-    .prepare(
-      `insert into mission_spend
-       (id, mission_id, client_action_id, agent_id, instance_id, model, prompt_tokens,
-        completion_tokens, cost_cents, sandbox_id, sandbox_seconds, event_type, created_at)
-       values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    )
-    .bind(
-      id,
-      event.missionId,
-      event.clientActionId ?? null,
-      event.agentId ?? null,
-      event.instanceId ?? null,
-      event.model ?? null,
-      event.promptTokens ?? null,
-      event.completionTokens ?? null,
-      event.costCents,
-      event.sandboxId ?? null,
-      event.sandboxSeconds ?? null,
-      event.eventType,
-      createdAt,
-    )
-    .run();
+export async function recordCost(event: CostRecord): Promise<MissionRow> {
+  const createdAt = now();
+  await db.insert(missionSpend).values({
+    id: crypto.randomUUID(),
+    missionId: event.missionId,
+    clientActionId: event.clientActionId ?? null,
+    agentId: event.agentId ?? null,
+    instanceId: event.instanceId ?? null,
+    model: event.model ?? null,
+    promptTokens: event.promptTokens ?? null,
+    completionTokens: event.completionTokens ?? null,
+    costCents: event.costCents,
+    sandboxId: event.sandboxId ?? null,
+    sandboxSeconds: event.sandboxSeconds ?? null,
+    eventType: event.eventType,
+    createdAt,
+  });
 
-  return updateMission(db, event.missionId, (mission) => {
+  const missionAfterSpend = await updateMission(event.missionId, (mission) => {
     mission.missionSpendCents += event.costCents;
     if (event.eventType === "sandbox_burn") mission.sandboxSpendCents += event.costCents;
     if (event.eventType === "cost_event") mission.llmSpendCents += event.costCents;
-    mission.burnRateCentsPerMinute =
-      mission.stateJson.sharedSandbox.state === "running" ? mission.stateJson.sharedSandbox.burnRateCentsPerMinute : 0;
-    mission.burnRateCentsPerMinute += Object.values(mission.stateJson.privateSandboxes)
-      .filter((ref) => ref.state === "running")
-      .reduce((sum, ref) => sum + ref.burnRateCentsPerMinute, 0);
     if (mission.dailyBudgetCents > 0 && mission.missionSpendCents >= mission.dailyBudgetCents) {
       mission.stateJson.costGuardrailStatus = "daily_cap_hit";
     }
     return mission;
   });
+  await addUserDailySpend(missionAfterSpend.ownerUserId ?? "system", event.costCents);
+  return missionAfterSpend;
 }
 
-export async function recordAudit(db: EdgeSparkDb, event: AuditRecord): Promise<string> {
+export async function assertUserBudgetForMission(missionId: string, estimatedCostCents: number) {
+  const mission = await getMission(missionId);
+  const userId = mission.ownerUserId ?? "system";
+  const profile = await getOrCreateBudgetProfile(userId);
+  if (profile.dailySpendCents + estimatedCostCents < profile.dailyBudgetCents) return profile;
+  await recordAudit({
+    missionId,
+    subjectType: "user",
+    subjectId: userId,
+    actor: { type: "system", id: "budget" },
+    action: "daily_budget_cap_hit",
+    diffSummary: `daily_spend_cents:${profile.dailySpendCents};estimated:${estimatedCostCents};cap:${profile.dailyBudgetCents}`,
+  });
+  throw new Error("error.user.daily_cap_hit");
+}
+
+export async function recordAudit(event: AuditRecord): Promise<string> {
   const id = crypto.randomUUID();
   const eventId = `evt_${id}`;
-  await db
-    .prepare(
-      `insert into audit_events
-       (id, event_id, mission_id, subject_type, subject_id, actor_json, action,
-        client_action_id, diff_summary, payload_ref_json, reversible, rollback_available, created_at)
-       values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    )
-    .bind(
-      id,
-      eventId,
-      event.missionId ?? null,
-      event.subjectType,
-      event.subjectId,
-      JSON.stringify(event.actor),
-      event.action,
-      event.clientActionId ?? null,
-      event.diffSummary,
-      event.payloadRef ? JSON.stringify(event.payloadRef) : null,
-      event.reversible ? 1 : 0,
-      event.rollbackAvailable ? 1 : 0,
-      new Date().toISOString(),
-    )
-    .run();
+  await db.insert(auditEvents).values({
+    id,
+    eventId,
+    missionId: event.missionId ?? null,
+    subjectType: event.subjectType,
+    subjectId: event.subjectId,
+    actorJson: JSON.stringify(event.actor),
+    action: event.action,
+    clientActionId: event.clientActionId ?? null,
+    diffSummary: event.diffSummary,
+    payloadRefJson: event.payloadRef ? JSON.stringify(event.payloadRef) : null,
+    reversible: event.reversible ? 1 : 0,
+    rollbackAvailable: event.rollbackAvailable ? 1 : 0,
+    createdAt: now(),
+  });
   return eventId;
 }
 
-export async function listIdleSandboxes(db: EdgeSparkDb, idleMs: number, now = Date.now()) {
-  const result = await db.prepare("select * from missions where state_json like '%running%'").all();
-  const rows = (result.results ?? []).map(parseMission);
+async function addUserDailySpend(userId: string, costCents: number) {
+  const profile = await getOrCreateBudgetProfile(userId);
+  await db
+    .update(usersProfile)
+    .set({
+      dailySpendCents: profile.dailySpendCents + costCents,
+      updatedAt: now(),
+    })
+    .where(eq(usersProfile.userId, userId));
+}
+
+async function getOrCreateBudgetProfile(userId: string): Promise<UserProfileRow> {
+  const [existing] = await db.select().from(usersProfile).where(eq(usersProfile.userId, userId)).limit(1);
+  if (existing) return resetDailyWindowIfNeeded(existing);
+  const timestamp = now();
+  const email = userId === "system" ? "system@missionry.local" : `${userId}@missionry.local`;
+  await db.insert(usersProfile).values({
+    userId,
+    email,
+    role: userId === "system" ? "admin" : "user",
+    dailyBudgetCents: userId === "system" ? 999999 : 2000,
+    dailySpendCents: 0,
+    dailyWindowStartAt: timestamp,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  }).onConflictDoNothing();
+  const [created] = await db.select().from(usersProfile).where(eq(usersProfile.userId, userId)).limit(1);
+  if (!created) throw new Error("error.user_profile.create_failed");
+  return created;
+}
+
+async function resetDailyWindowIfNeeded(profile: UserProfileRow): Promise<UserProfileRow> {
+  if (Date.now() - Date.parse(profile.dailyWindowStartAt) < DAY_MS) return profile;
+  const timestamp = now();
+  const [updated] = await db
+    .update(usersProfile)
+    .set({ dailySpendCents: 0, dailyWindowStartAt: timestamp, updatedAt: timestamp })
+    .where(eq(usersProfile.userId, profile.userId))
+    .returning();
+  return updated ?? { ...profile, dailySpendCents: 0, dailyWindowStartAt: timestamp, updatedAt: timestamp };
+}
+
+export async function upsertSandboxRuntime(ref: SandboxRef, missionId: string) {
+  const existing = await db.select().from(sandboxRuntime).where(eq(sandboxRuntime.sandboxId, ref.sandboxId)).limit(1);
+  const values = {
+    sandboxId: ref.sandboxId,
+    missionId,
+    instanceId: ref.ownerInstanceId ?? null,
+    tier: ref.tier,
+    state: ref.state,
+    e2bSandboxId: ref.e2bSandboxId ?? null,
+    lastActivityAt: ref.lastActivityAt ?? null,
+    activeSince: ref.activeSince ?? null,
+    burnRateCentsPerMinute: ref.burnRateCentsPerMinute,
+    updatedAt: now(),
+  };
+  if (existing.length > 0) {
+    await db.update(sandboxRuntime).set(values).where(eq(sandboxRuntime.sandboxId, ref.sandboxId));
+  } else {
+    await db.insert(sandboxRuntime).values(values);
+  }
+}
+
+export async function reserveMissionSandboxSlot(missionId: string) {
+  await upsertSandboxRuntime(emptySandbox("mission", missionId), missionId);
+}
+
+export async function reservePrivateSandboxSlot(missionId: string, instanceId: string) {
+  await upsertSandboxRuntime(privateSandboxSlot(missionId, instanceId), missionId);
+}
+
+export async function listIdleSandboxes(idleMs: number, timestamp = Date.now()) {
+  const cutoff = new Date(timestamp - idleMs).toISOString();
+  const rows = await db
+    .select()
+    .from(sandboxRuntime)
+    .where(and(eq(sandboxRuntime.state, "running"), lte(sandboxRuntime.lastActivityAt, cutoff)));
   const idle: Array<{ mission: MissionRow; ref: SandboxRef; target: "mission" | "private"; instanceId?: string }> = [];
-  for (const mission of rows) {
-    const shared = mission.stateJson.sharedSandbox;
-    if (shared.state === "running" && shared.lastActivityAt && now - Date.parse(shared.lastActivityAt) >= idleMs) {
-      idle.push({ mission, ref: shared, target: "mission" });
-    }
-    for (const [instanceId, ref] of Object.entries(mission.stateJson.privateSandboxes)) {
-      if (ref.state === "running" && ref.lastActivityAt && now - Date.parse(ref.lastActivityAt) >= idleMs) {
-        idle.push({ mission, ref, target: "private", instanceId });
-      }
-    }
+  for (const row of rows) {
+    const mission = await getMission(row.missionId);
+    const instanceId = row.instanceId ?? undefined;
+    const ref = row.tier === "mission" ? mission.stateJson.sharedSandbox : instanceId ? mission.stateJson.privateSandboxes[instanceId] : undefined;
+    if (ref) idle.push({ mission, ref, target: row.tier === "mission" ? "mission" : "private", instanceId });
   }
   return idle;
 }

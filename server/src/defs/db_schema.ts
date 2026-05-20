@@ -1,4 +1,4 @@
-import { integer, real, sqliteTable, text } from "drizzle-orm/sqlite-core";
+import { index, integer, real, sqliteTable, text } from "drizzle-orm/sqlite-core";
 
 export const missions = sqliteTable("missions", {
   id: text("id").primaryKey(),
@@ -64,6 +64,19 @@ export const workCards = sqliteTable("work_cards", {
   updatedAt: text("updated_at").notNull(),
 });
 
+export const sandboxRuntime = sqliteTable("sandbox_runtime", {
+  sandboxId: text("sandbox_id").primaryKey(),
+  missionId: text("mission_id").notNull(),
+  instanceId: text("instance_id"),
+  tier: text("tier").notNull(),
+  state: text("state").notNull(),
+  e2bSandboxId: text("e2b_sandbox_id"),
+  lastActivityAt: text("last_activity_at"),
+  activeSince: text("active_since"),
+  burnRateCentsPerMinute: real("burn_rate_cents_per_minute").notNull().default(0),
+  updatedAt: text("updated_at").notNull(),
+});
+
 export const auditEvents = sqliteTable("audit_events", {
   id: text("id").primaryKey(),
   eventId: text("event_id").notNull().unique(),
@@ -120,9 +133,40 @@ export const growthCandidates = sqliteTable("growth_candidates", {
   enabledBy: text("enabled_by"),
 });
 
+export const usersProfile = sqliteTable("users_profile", {
+  userId: text("user_id").primaryKey(),
+  email: text("email").notNull().unique(),
+  role: text("role").notNull(),
+  dailyBudgetCents: integer("daily_budget_cents").notNull().default(2000),
+  dailySpendCents: integer("daily_spend_cents").notNull().default(0),
+  dailyWindowStartAt: text("daily_window_start_at").notNull(),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+});
+
+export const whitelistEntries = sqliteTable(
+  "whitelist_entries",
+  {
+    id: text("id").primaryKey(),
+    type: text("type").notNull(),
+    value: text("value").notNull(),
+    enabled: integer("enabled").notNull().default(1),
+    createdBy: text("created_by").notNull(),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+  },
+  (table) => ({
+    typeValueIdx: index("idx_whitelist_entries_type_value").on(table.type, table.value),
+  }),
+);
+
 export const createIndexesSql = [
   "create index if not exists idx_agent_instances_mission on agent_instances(mission_id)",
   "create index if not exists idx_work_cards_mission on work_cards(mission_id)",
+  "create index if not exists idx_work_cards_agent_status on work_cards(assignee_instance_id, status, created_at)",
+  "create index if not exists idx_sandbox_runtime_idle on sandbox_runtime(state, last_activity_at)",
+  "create index if not exists idx_sandbox_runtime_mission on sandbox_runtime(mission_id)",
   "create index if not exists idx_audit_events_mission on audit_events(mission_id, created_at)",
   "create index if not exists idx_mission_spend_mission on mission_spend(mission_id, created_at)",
+  "create index if not exists idx_whitelist_entries_type_value on whitelist_entries(type, value)",
 ] as const;

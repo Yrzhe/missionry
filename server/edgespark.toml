@@ -21,6 +21,9 @@ MISSIONRY_IDLE_MS = "45000"
 MISSIONRY_R2_PREFIX = "dev"
 E2B_TEMPLATE_ID = ""
 DEMO_E2B_MODE = "memory"
+# Dev-only curl/demo bypass: when true, every request is treated as the
+# hardcoded super-admin. Disable for browser auth / whitelist testing.
+EDGESPARK_DEV_AS_ADMIN = "true"
 
 # Secrets entered through EdgeSpark dashboard / CLI:
 # E2B_API_KEY

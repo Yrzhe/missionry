@@ -1,11 +1,12 @@
 import { createOpenAI } from "@ai-sdk/openai";
+import { secret } from "edgespark";
 import { streamText } from "ai";
 import { loadAgentBootFiles } from "../agents/files";
-import type { EdgeSparkRuntime } from "../defs/runtime";
 import { emitCostEvent } from "../sse/events";
+import { assertUserBudgetForMission, recordAudit } from "../state/missionState";
 import { missionryToolKit } from "../tools";
 
-export type AgentTurnContext = EdgeSparkRuntime & {
+export type AgentTurnContext = {
   missionId: string;
   agentId: string;
   instanceId: string;
@@ -23,13 +24,12 @@ function estimateLlmCostCents(model: string, usage: Record<string, unknown>) {
   return Math.max(1, Math.ceil((promptTokens + completionTokens) * cheapRate));
 }
 
-export async function streamAgentTurn(ctx: AgentTurnContext): Promise<Response> {
-  const apiKey = await ctx.secret.get("OPENAI_API_KEY");
-  if (!apiKey) {
-    return Response.json({ code: "error.secret.openai_missing" }, { status: 500 });
-  }
+export async function streamAgentTurn(turn: AgentTurnContext): Promise<Response> {
+  await assertUserBudgetForMission(turn.missionId, 1);
+  const apiKey = await secret.get("OPENAI_API_KEY");
+  if (!apiKey) return Response.json({ code: "error.secret.openai_missing" }, { status: 500 });
 
-  const boot = await loadAgentBootFiles(ctx.storage, ctx.agentId);
+  const boot = await loadAgentBootFiles(turn.agentId);
   const modelName = boot.baseConfig.model ?? "gpt-4o-mini";
   const openai = createOpenAI({ apiKey });
 
@@ -39,52 +39,32 @@ export async function streamAgentTurn(ctx: AgentTurnContext): Promise<Response> 
       boot.soul,
       boot.identity,
       `Skill index: ${JSON.stringify(boot.skillsIndex)}`,
-      `Mission context: ${ctx.missionContext ?? "Phase 1 demo"}`,
+      `Mission context: ${turn.missionContext ?? "Phase 1 demo"}`,
     ].join("\n\n"),
-    messages: ctx.messages,
-    tools: missionryToolKit({
-      missionId: ctx.missionId,
-      agentId: ctx.agentId,
-      instanceId: ctx.instanceId,
-      turnId: ctx.turnId,
-      clientActionId: ctx.clientActionId,
-      workCardId: ctx.workCardId,
-      db: ctx.db,
-      storage: ctx.storage,
-      secret: ctx.secret,
-      vars: ctx.vars,
-      ctx: ctx.ctx,
-    }),
+    messages: turn.messages,
+    tools: missionryToolKit(turn),
     onFinish: async ({ usage, finishReason }) => {
       const usageRecord = usage as unknown as Record<string, unknown>;
-      const costCents = estimateLlmCostCents(modelName, usageRecord);
-      await emitCostEvent(ctx.db, {
-        missionId: ctx.missionId,
-        clientActionId: ctx.clientActionId,
-        agentId: ctx.agentId,
-        instanceId: ctx.instanceId,
+      await emitCostEvent({
+        missionId: turn.missionId,
+        clientActionId: turn.clientActionId,
+        agentId: turn.agentId,
+        instanceId: turn.instanceId,
         model: modelName,
         promptTokens: Number(usageRecord.promptTokens ?? usageRecord.inputTokens ?? 0),
         completionTokens: Number(usageRecord.completionTokens ?? usageRecord.outputTokens ?? 0),
-        costCents,
+        costCents: estimateLlmCostCents(modelName, usageRecord),
         eventType: "cost_event",
       });
       if (finishReason === "error") {
-        await ctx.db
-          .prepare("insert into audit_events (id, event_id, subject_type, subject_id, actor_json, action, diff_summary, reversible, rollback_available, created_at) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-          .bind(
-            crypto.randomUUID(),
-            `evt_${crypto.randomUUID()}`,
-            "mission",
-            ctx.missionId,
-            JSON.stringify({ type: "system", id: "runtime" }),
-            "stream_error",
-            "error.stream.failed",
-            0,
-            0,
-            new Date().toISOString(),
-          )
-          .run();
+        await recordAudit({
+          missionId: turn.missionId,
+          subjectType: "mission",
+          subjectId: turn.missionId,
+          actor: { type: "system", id: "runtime" },
+          action: "stream_error",
+          diffSummary: "error.stream.failed",
+        });
       }
     },
   });
