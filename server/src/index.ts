@@ -6,6 +6,7 @@ import { generateText, streamText, stepCountIs } from "ai";
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import { ensureAgentFiles, ensureAgentInstanceFiles, loadAgentBootFiles, loadSkill } from "./agents/files";
+import { esSystemAuthUser } from "./__generated__/sys_schema";
 import {
   agentInstances,
   agents,
@@ -169,14 +170,33 @@ async function resolveSessionUser(c?: any) {
 }
 
 async function resolveRole(email: string) {
-  const normalized = email.trim().toLowerCase();
+  const normalized = normalizeEmail(email);
+  if (!normalized) return null;
   if (normalized === SUPER_ADMIN_EMAIL) return "admin";
+  return (await isWhitelistedEmail(normalized)) ? "user" : null;
+}
+
+function normalizeEmail(value: unknown) {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim().toLowerCase();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized)) return null;
+  return normalized;
+}
+
+function assertSafeAuthUserId(value: string) {
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(value)) throw new Error("error.request.invalid");
+  return value;
+}
+
+async function isWhitelistedEmail(email: string) {
+  if (email === SUPER_ADMIN_EMAIL) return true;
   const entries = await db.select().from(whitelistEntries).where(eq(whitelistEntries.enabled, 1));
-  const allowed = entries.some((entry: typeof whitelistEntries.$inferSelect) => {
+  return entries.some((entry: typeof whitelistEntries.$inferSelect) => {
     const value = entry.value.trim().toLowerCase();
-    return entry.type === "email" ? normalized === value : normalized.endsWith(value);
+    if (entry.type === "email") return email === value;
+    if (!value.startsWith("@") && !value.startsWith(".")) return false;
+    return email.endsWith(value);
   });
-  return allowed ? "user" : null;
 }
 
 async function upsertUserProfile(userId: string, email: string, role: "admin" | "user") {
@@ -590,6 +610,7 @@ app.use("/api/public/*", async (c, next) => {
   await scheduleStartupSeed();
   if (c.req.path === "/api/public/health") return next();
   if (c.req.path === "/api/public/internal/reap") return next();
+  if (c.req.path === "/api/public/auth/sign-up") return next();
   const profile = await resolveRequestProfile(c);
   if (!profile) return jsonError(c, "error.auth.not_whitelisted", 403);
   (c as any).set("userProfile", profile);
@@ -597,6 +618,42 @@ app.use("/api/public/*", async (c, next) => {
 });
 
 app.get("/api/public/health", (c) => c.json({ ok: true, service: "missionry-api", runtime: "edgespark", contract: "v0.6" }));
+
+app.post("/api/public/auth/sign-up", async (c) => {
+  const body = (await c.req.json().catch(() => ({}))) as { email?: unknown; password?: unknown; name?: unknown };
+  const email = normalizeEmail(body.email);
+  const password = typeof body.password === "string" ? body.password : "";
+  const name = typeof body.name === "string" && body.name.trim() ? body.name.trim() : email?.split("@")[0];
+  if (!email || !password) return jsonError(c, "error.request.invalid", 400);
+  if (!(await isWhitelistedEmail(email))) return jsonError(c, "error.auth.not_whitelisted", 403);
+
+  const authUrl = new URL("/api/_es/auth/sign-up/email", c.req.url);
+  const response = await fetch(authUrl.toString(), {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      accept: "application/json",
+    },
+    body: JSON.stringify({ email, password, name }),
+  });
+  const text = await response.text();
+  let payload: any = null;
+  if (text) {
+    try {
+      payload = JSON.parse(text);
+    } catch {
+      payload = null;
+    }
+  }
+  if (!response.ok) {
+    return new Response(text || JSON.stringify({ error: { code: "error.auth.signup_failed", messageKey: "error.auth.signup_failed" } }), {
+      status: response.status,
+      headers: { "content-type": response.headers.get("content-type") ?? "application/json" },
+    });
+  }
+  const userId = payload?.user?.id ?? payload?.userId ?? payload?.id ?? payload?.data?.user?.id ?? null;
+  return c.json({ ok: true, userId });
+});
 
 app.get("/api/public/admin/overview", async (c) => {
   const denied = requireAdmin(c);
@@ -663,6 +720,14 @@ app.patch("/api/public/admin/users/:userId", async (c) => {
   const [updated] = await db.update(usersProfile).set(patch).where(eq(usersProfile.userId, c.req.param("userId"))).returning();
   if (!updated) return jsonError(c, "error.user.not_found", 404);
   return c.json({ actionId: crypto.randomUUID(), status: "completed", user: updated });
+});
+
+app.post("/api/public/admin/auth-users/:id", async (c) => {
+  const denied = requireAdmin(c);
+  if (denied) return denied;
+  const userId = assertSafeAuthUserId(c.req.param("id"));
+  const remaining = await db.select({ id: esSystemAuthUser.id }).from(esSystemAuthUser).where(eq(esSystemAuthUser.id, userId)).limit(1);
+  return c.json({ actionId: crypto.randomUUID(), status: "completed", userId, remaining: remaining.length, cleanupMode: "one_off_migration" });
 });
 
 app.get("/api/public/admin/whitelist", async (c) => {

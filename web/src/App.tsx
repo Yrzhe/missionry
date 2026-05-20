@@ -13,12 +13,18 @@ import { Workroom } from './components/magicpath/workroom/Workroom';
 import { ApiError, api, login, resolveSession } from './lib/api';
 import { subscribeMissionEvents } from './lib/sse';
 import { useAppStore } from './lib/store';
+import { SignUp } from './pages/SignUp';
 
 function App() {
   const [authState, setAuthState] = useState<'checking' | 'ready' | 'login'>('checking');
   const setSession = useAppStore((state) => state.setSession);
+  const location = useLocation();
 
   useEffect(() => {
+    if (location.pathname === '/signup') {
+      setAuthState('login');
+      return;
+    }
     let alive = true;
     resolveSession()
       .then((session) => {
@@ -34,8 +40,9 @@ function App() {
     return () => {
       alive = false;
     };
-  }, [setSession]);
+  }, [location.pathname, setSession]);
 
+  if (location.pathname === '/signup') return <SignUp onSignedIn={() => setAuthState('ready')} />;
   if (authState === 'checking') return <FullPageState label="common.loading" />;
   if (authState === 'login') return <LoginScreen onReady={() => setAuthState('ready')} />;
   return <AppDataGate />;
@@ -127,6 +134,7 @@ function RouterRoutes() {
   return (
     <Routes>
       <Route path="/" element={<Navigate to="/missions" replace />} />
+      <Route path="/signup" element={<SignUp />} />
       <Route path="/missions" element={<MissionsHome />} />
       <Route path="/missions/:id" element={<WorkroomLoader />} />
       <Route path="/missions/:id/agents/:instanceId" element={<AgentProfileControlCenter />} />
@@ -203,10 +211,19 @@ function LoginScreen({ onReady }: { onReady: () => void }) {
         <label>{t('auth.password')}<input value={password} onChange={(event) => setPassword(event.target.value)} type="password" /></label>
         {error ? <div className="mp-denied">{t('auth.error')} · {error}</div> : <div className="mp-muted mp-small">{t('auth.dev')}</div>}
         <button className="mp-button dark" disabled={!canSubmit}>{t('auth.submit')}</button>
+        <div className="auth-links">
+          <LinkLike href="/signup" label={t('auth.signup.cta')} />
+          <button type="button" className="auth-text-button" onClick={() => window.alert(t('auth.reset.unavailable'))}>{t('auth.reset.forgot')}</button>
+        </div>
         <button type="button" className="mp-button" onClick={() => void i18n.changeLanguage(i18n.language === 'zh' ? 'en' : 'zh')}>{t('common.language')}</button>
       </form>
     </main>
   );
+}
+
+function LinkLike({ href, label }: { href: string; label: string }) {
+  const navigate = useNavigate();
+  return <button type="button" className="auth-text-button" onClick={() => navigate(href)}>{label}</button>;
 }
 
 function FullPageState({ label, detail }: { label: string; detail?: string }) {

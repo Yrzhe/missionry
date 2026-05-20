@@ -16,12 +16,28 @@ const publicBase = `${API_BASE_URL}/api/public`;
 export class ApiError extends Error {
   status: number;
   code?: string;
+  messageKey?: string;
 
-  constructor(status: number, message: string, code?: string) {
+  constructor(status: number, message: string, code?: string, messageKey?: string) {
     super(message);
     this.status = status;
     this.code = code;
+    this.messageKey = messageKey;
   }
+}
+
+function parseAuthError(status: number, body: unknown, fallback: string) {
+  const payload = body as {
+    code?: string;
+    message?: string;
+    messageKey?: string;
+    error?: string | { code?: string; message?: string; messageKey?: string };
+  } | undefined;
+  const errorObject = typeof payload?.error === 'object' ? payload.error : undefined;
+  const code = errorObject?.code ?? payload?.code ?? (typeof payload?.error === 'string' ? payload.error : undefined);
+  const messageKey = errorObject?.messageKey ?? payload?.messageKey;
+  const message = errorObject?.message ?? payload?.message ?? code ?? fallback;
+  return new ApiError(status, message, code, messageKey);
 }
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -34,7 +50,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const body = text ? JSON.parse(text) : undefined;
   if (!response.ok) {
     const code = body?.error?.code ?? body?.error?.messageKey;
-    throw new ApiError(response.status, code ?? response.statusText, code);
+    throw new ApiError(response.status, code ?? response.statusText, code, body?.error?.messageKey);
   }
   return body as T;
 }
@@ -56,8 +72,23 @@ export async function login(email: string, password: string) {
     body: JSON.stringify({ email, password }),
   });
   if (!response.ok && response.status !== 404) {
-    throw new ApiError(response.status, response.statusText);
+    const body = await response.json().catch(() => undefined);
+    throw parseAuthError(response.status, body, response.statusText);
   }
+}
+
+export async function signUp(email: string, password: string, name: string) {
+  const response = await fetch(`${publicBase}/auth/sign-up`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ email, password, name }),
+  });
+  if (!response.ok) {
+    const body = await response.json().catch(() => undefined);
+    throw parseAuthError(response.status, body, response.statusText);
+  }
+  return response.json().catch(() => ({ ok: true }));
 }
 
 export async function resolveSession(): Promise<Session> {

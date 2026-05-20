@@ -8,6 +8,13 @@
       "when": 1779290121173,
       "tag": "0000_strange_luminals",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1779295000000,
+      "tag": "0001_cleanup_non_whitelisted_auth_leak",
+      "breakpoints": true
     }
   ]
 }
