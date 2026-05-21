@@ -3,7 +3,7 @@ import { db } from "edgespark";
 import { and, eq } from "drizzle-orm";
 import { agentInstances, sandboxRuntime } from "../defs/db_schema";
 import { assertSafeId, assertSafeRelativePath } from "../lib/safe-paths";
-import { BudgetService, getMission, updateMission, upsertSandboxRuntime, type SandboxRef } from "../state/missionState";
+import { BudgetService, getMissionWithRuntimeSandboxes, updateMissionRuntimeSnapshot, updateSandboxRuntimeOnly, upsertSandboxRuntime, type SandboxRef } from "../state/missionState";
 
 type SandboxTarget = "mission" | "private";
 
@@ -362,12 +362,8 @@ function refFor(input: { missionId: string; instanceId?: string; target: Sandbox
 }
 
 async function persistRef(missionId: string, ref: SandboxRef) {
-  await updateMission(missionId, (mission) => {
-    if (ref.tier === "mission") mission.stateJson.sharedSandbox = ref;
-    else if (ref.ownerInstanceId) mission.stateJson.privateSandboxes[ref.ownerInstanceId] = ref;
-    return mission;
-  });
   await upsertSandboxRuntime(ref, missionId);
+  await updateMissionRuntimeSnapshot(missionId);
 }
 
 export async function startShared(missionId: string): Promise<SandboxRef> {
@@ -602,12 +598,12 @@ async function touchSandbox(ref: SandboxRef) {
   const missionId = missionIdFor(ref);
   const timestamp = new Date().toISOString();
   const next = { ...ref, lastActivityAt: timestamp };
-  const mission = await getMission(missionId);
+  const mission = await getMissionWithRuntimeSandboxes(missionId);
   const current = next.tier === "mission" ? mission.stateJson.sharedSandbox : next.ownerInstanceId ? mission.stateJson.privateSandboxes[next.ownerInstanceId] : next;
   next.e2bSandboxId = current?.e2bSandboxId ?? next.e2bSandboxId;
   next.envdAccessToken = current?.envdAccessToken ?? next.envdAccessToken ?? null;
   next.envdHost = current?.envdHost ?? next.envdHost ?? (next.e2bSandboxId ? envdHostFor(next.e2bSandboxId) : null);
-  await persistRef(missionId, next);
+  await updateSandboxRuntimeOnly(next, missionId);
 }
 
 function missionIdFor(ref: SandboxRef) {

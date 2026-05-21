@@ -30,6 +30,7 @@ import { emitCostEvent, recentMissionEvents } from "./sse/events";
 import {
   defaultMissionState,
   getMission,
+  getMissionWithRuntimeSandboxes,
   BudgetService,
   listIdleSandboxes,
   privateSandboxSlot,
@@ -671,10 +672,6 @@ async function attachInstance(missionId: string, agentId: string, role = "member
     createdAt: now(),
     updatedAt: now(),
   });
-  await updateMission(missionId, (mission) => {
-    mission.stateJson.privateSandboxes[instanceId] = privateSandboxSlot(missionId, instanceId);
-    return mission;
-  });
   await reservePrivateSandboxSlot(missionId, instanceId);
   return instanceId;
 }
@@ -862,7 +859,7 @@ async function startWorkCard(workCardId: string, missionIdFilter?: string) {
       action: "work_card_completed",
       diffSummary: "status:done",
     });
-    const billedMission = await getMission(missionId);
+    const billedMission = await getMissionWithRuntimeSandboxes(missionId);
     const billRef = sandboxAffinity.tier === "private" ? billedMission.stateJson.privateSandboxes[instance.id] : sandboxAffinity.tier === "mission" ? billedMission.stateJson.sharedSandbox : null;
     if (billRef) await billSandboxActiveInterval({ missionId, ref: billRef, agentId: agent.id, instanceId: instance.id, resetClock: true });
     waitUntil(Promise.resolve(dequeueNextForAgent(agent.id)));
@@ -877,7 +874,7 @@ async function startWorkCard(workCardId: string, missionIdFilter?: string) {
       action: "work_card_failed",
       diffSummary: error instanceof Error ? error.message : "error.work_card.execution_failed",
     });
-    const billedMission = await getMission(missionId);
+    const billedMission = await getMissionWithRuntimeSandboxes(missionId);
     const billRef = sandboxAffinity.tier === "private" ? billedMission.stateJson.privateSandboxes[instance.id] : sandboxAffinity.tier === "mission" ? billedMission.stateJson.sharedSandbox : null;
     if (billRef) await billSandboxActiveInterval({ missionId, ref: billRef, agentId: agent.id, instanceId: instance.id, resetClock: true });
     waitUntil(Promise.resolve(dequeueNextForAgent(agent.id)));
@@ -978,7 +975,7 @@ function resolveProposedAssignee(card: ProposedCard, rows: MissionAgentInstanceR
 
 async function decomposeMission(missionId: string) {
   missionId = assertSafeId(missionId, "mission_id");
-  const mission = await getMission(missionId);
+  const mission = await getMissionWithRuntimeSandboxes(missionId);
   let leader = await resolveMissionLeader(mission);
   if (!leader) {
     const leaderAgentId = await ensureDefaultLeaderAgent();
@@ -1205,7 +1202,7 @@ async function generateMissionChatReply(input: {
 }
 
 async function dispatchMissionChatReplies(missionId: string, source: typeof missionChatMessages.$inferSelect, mentions: ChatMention[]) {
-  const mission = await getMission(missionId);
+  const mission = await getMissionWithRuntimeSandboxes(missionId);
   const created: Array<typeof missionChatMessages.$inferSelect> = [];
   const leader = await resolveMissionLeader(mission);
   const leaderInstanceId = leader?.instance.id ?? null;
@@ -1260,12 +1257,12 @@ async function dispatchMissionChatReplies(missionId: string, source: typeof miss
 }
 
 async function reconcileMissionSandboxRefs(missionId: string) {
-  let mission = await getMission(missionId);
+  let mission = await getMissionWithRuntimeSandboxes(missionId);
   const refs: SandboxRef[] = [mission.stateJson.sharedSandbox, ...Object.values(mission.stateJson.privateSandboxes)];
   for (const ref of refs) {
     if (ref.state === "running") await e2b.reconcileLiveRef(ref);
   }
-  return getMission(missionId);
+  return getMissionWithRuntimeSandboxes(missionId);
 }
 
 export async function reapIdleSandboxes() {
@@ -1672,7 +1669,7 @@ app.post("/api/public/missions", async (c) => {
 app.get("/api/public/missions/:id", async (c) => {
   const denied = await assertMissionAccess(c);
   if (denied) return denied;
-  return c.json(missionRowJson(await getMission(assertSafeId(c.req.param("id"), "mission_id"))));
+  return c.json(missionRowJson(await getMissionWithRuntimeSandboxes(assertSafeId(c.req.param("id"), "mission_id"))));
 });
 
 app.patch("/api/public/missions/:id", async (c) => {
@@ -1738,10 +1735,6 @@ app.post("/api/public/missions/:id/agent-instances", async (c) => {
       updatedAt: timestamp,
     })
     .returning();
-  await updateMission(missionId, (mission) => {
-    mission.stateJson.privateSandboxes[instanceId] = privateSandboxSlot(missionId, instanceId);
-    return mission;
-  });
   await reservePrivateSandboxSlot(missionId, instanceId);
   const auditEventId = await recordAudit({
     missionId,
@@ -1821,7 +1814,7 @@ app.post("/api/public/missions/:id/sandbox/pause", async (c) => {
   const denied = await assertMissionAccess(c);
   if (denied) return denied;
   const missionId = assertSafeId(c.req.param("id"), "mission_id");
-  const mission = await getMission(missionId);
+  const mission = await getMissionWithRuntimeSandboxes(missionId);
   const bill = await billSandboxActiveInterval({ missionId, ref: mission.stateJson.sharedSandbox });
   const ref = await e2b.pauseIfIdle(mission.stateJson.sharedSandbox);
   const pausedAt = now();
@@ -1867,7 +1860,7 @@ app.post("/api/public/missions/:id/agent-instances/:instanceId/sandbox/pause", a
   const missionId = assertSafeId(c.req.param("id"), "mission_id");
   const instanceId = assertSafeId(c.req.param("instanceId"), "instance_id");
   await e2b.assertInstanceInMission(missionId, instanceId);
-  const mission = await getMission(missionId);
+  const mission = await getMissionWithRuntimeSandboxes(missionId);
   const currentRef = mission.stateJson.privateSandboxes[instanceId] ?? privateSandboxSlot(missionId, instanceId);
   const bill = await billSandboxActiveInterval({ missionId, ref: currentRef, instanceId });
   const ref = await e2b.pauseIfIdle(currentRef);

@@ -23,7 +23,8 @@ export type SandboxRef = {
 };
 
 export type MissionStateJson = {
-  turnQueue: Array<Record<string, unknown>>;
+  /** Retired: work_cards is the authoritative FIFO queue. Kept optional for old rows. */
+  turnQueue?: Array<Record<string, unknown>>;
   sharedSandbox: SandboxRef;
   privateSandboxes: Record<string, SandboxRef>;
   snapshots: {
@@ -104,7 +105,6 @@ const emptySandbox = (tier: SandboxTier, missionId: string, ownerInstanceId?: st
 
 export function defaultMissionState(missionId = "new"): MissionStateJson {
   return {
-    turnQueue: [],
     sharedSandbox: emptySandbox("mission", missionId),
     privateSandboxes: {},
     snapshots: { privateLatestR2Keys: {} },
@@ -118,7 +118,8 @@ export function privateSandboxSlot(missionId: string, instanceId: string): Sandb
 }
 
 function parseMission(row: typeof missions.$inferSelect): MissionRow {
-  return { ...row, stateJson: JSON.parse(row.stateJson) as MissionStateJson };
+  const stateJson = JSON.parse(row.stateJson) as MissionStateJson;
+  return { ...row, stateJson };
 }
 
 function missionBurnRate(state: MissionStateJson) {
@@ -135,7 +136,8 @@ export async function getMission(missionId: string): Promise<MissionRow> {
 }
 
 export async function updateMission(missionId: string, mutate: (current: MissionRow) => MissionRow): Promise<MissionRow> {
-  for (let attempt = 0; attempt < 3; attempt += 1) {
+  const maxAttempts = 8;
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     const current = await getMission(missionId);
     const next = mutate(structuredClone(current));
     next.updatedAt = now();
@@ -155,8 +157,49 @@ export async function updateMission(missionId: string, mutate: (current: Mission
       .where(and(eq(missions.id, missionId), eq(missions.version, current.version)))
       .returning();
     if (rows.length > 0) return parseMission(rows[0]);
+    await new Promise((resolve) => setTimeout(resolve, Math.min(100, 10 * 2 ** attempt)));
   }
   throw new Error("error.mission.version_conflict");
+}
+
+export function sandboxRefFromRuntime(row: typeof sandboxRuntime.$inferSelect): SandboxRef {
+  return {
+    sandboxId: row.sandboxId,
+    tier: row.tier === "private" ? "private" : "mission",
+    ownerInstanceId: row.instanceId ?? undefined,
+    state: row.state as SandboxState,
+    e2bSandboxId: row.e2bSandboxId ?? undefined,
+    envdAccessToken: row.envdAccessToken ?? null,
+    envdHost: row.envdHost ?? null,
+    lastActivityAt: row.lastActivityAt ?? undefined,
+    activeSince: row.activeSince ?? undefined,
+    burnRateCentsPerMinute: row.burnRateCentsPerMinute,
+    environmentVersionId: row.e2bSandboxId ? "env_v1" : "env_v0",
+    injectedCredentialIds: [],
+    injectedVariableKeys: ["MISSION_ID"],
+    environmentAccessMode: "inherit",
+  };
+}
+
+export async function getMissionWithRuntimeSandboxes(missionId: string): Promise<MissionRow> {
+  const mission = await getMission(missionId);
+  const rows = await db.select().from(sandboxRuntime).where(eq(sandboxRuntime.missionId, missionId));
+  for (const row of rows) {
+    const ref = sandboxRefFromRuntime(row);
+    if (ref.tier === "mission") mission.stateJson.sharedSandbox = ref;
+    else if (ref.ownerInstanceId) mission.stateJson.privateSandboxes[ref.ownerInstanceId] = ref;
+  }
+  mission.burnRateCentsPerMinute = missionBurnRate(mission.stateJson);
+  return mission;
+}
+
+export async function updateMissionRuntimeSnapshot(missionId: string): Promise<MissionRow> {
+  const mission = await getMissionWithRuntimeSandboxes(missionId);
+  return updateMission(missionId, (current) => {
+    current.stateJson.sharedSandbox = mission.stateJson.sharedSandbox;
+    current.stateJson.privateSandboxes = mission.stateJson.privateSandboxes;
+    return current;
+  });
 }
 
 export async function recordCost(event: CostRecord): Promise<MissionRow> {
@@ -308,6 +351,10 @@ export async function upsertSandboxRuntime(ref: SandboxRef, missionId: string) {
   }
 }
 
+export async function updateSandboxRuntimeOnly(ref: SandboxRef, missionId: string) {
+  await upsertSandboxRuntime(ref, missionId);
+}
+
 export async function reserveMissionSandboxSlot(missionId: string) {
   await upsertSandboxRuntime(emptySandbox("mission", missionId), missionId);
 }
@@ -324,10 +371,9 @@ export async function listIdleSandboxes(idleMs: number, timestamp = Date.now()) 
     .where(and(eq(sandboxRuntime.state, "running"), lte(sandboxRuntime.lastActivityAt, cutoff)));
   const idle: Array<{ mission: MissionRow; ref: SandboxRef; target: "mission" | "private"; instanceId?: string }> = [];
   for (const row of rows) {
-    const mission = await getMission(row.missionId);
     const instanceId = row.instanceId ?? undefined;
-    const ref = row.tier === "mission" ? mission.stateJson.sharedSandbox : instanceId ? mission.stateJson.privateSandboxes[instanceId] : undefined;
-    if (ref) idle.push({ mission, ref, target: row.tier === "mission" ? "mission" : "private", instanceId });
+    const mission = await getMissionWithRuntimeSandboxes(row.missionId);
+    idle.push({ mission, ref: sandboxRefFromRuntime(row), target: row.tier === "mission" ? "mission" : "private", instanceId });
   }
   return idle;
 }

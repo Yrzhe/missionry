@@ -7,7 +7,7 @@ import { agents, auditEvents, workCards } from "../defs/db_schema";
 import { buckets } from "../defs/storage_schema";
 import { assertSafeId, assertSafeRelativePath } from "../lib/safe-paths";
 import * as e2b from "../sandbox/e2b";
-import { getMission, recordAudit, type SandboxRef } from "../state/missionState";
+import { getMissionWithRuntimeSandboxes, recordAudit, type SandboxRef } from "../state/missionState";
 
 export type ToolContext = {
   missionId: string;
@@ -25,7 +25,7 @@ const sandboxAffinitySchema = z.object({
 
 async function resolveSandbox(ctx: ToolContext, target: "mission" | "private"): Promise<SandboxRef> {
   await e2b.assertInstanceInMission(ctx.missionId, ctx.instanceId);
-  const mission = await getMission(ctx.missionId);
+  const mission = await getMissionWithRuntimeSandboxes(ctx.missionId);
   if (target === "private") {
     const existing = mission.stateJson.privateSandboxes[ctx.instanceId];
     if (existing?.state === "running") return existing;
