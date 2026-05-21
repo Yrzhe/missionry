@@ -1053,12 +1053,14 @@ export async function reapIdleSandboxes() {
       mission.stateJson.snapshots.lastSnapshotAt = now();
       return mission;
     });
+    // Pausing/reaping an idle sandbox is FREE — it stops future burn, it must not
+    // charge. We still emit a 0-cost event so the pause shows in the activity feed.
     await emitCostEvent({
       missionId: item.mission.id,
       instanceId: item.instanceId,
       sandboxId: item.ref.sandboxId,
       sandboxSeconds: item.ref.activeSince ? Math.max(1, (Date.now() - Date.parse(item.ref.activeSince)) / 1000) : 1,
-      costCents: 1,
+      costCents: 0,
       eventType: "sandbox_burn",
     });
   }

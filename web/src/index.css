@@ -601,6 +601,12 @@ strong { font-weight: 650; }
   gap: 12px;
 }
 
+.mp-workcard-list {
+  max-height: 460px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
 .mp-env-status {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(240px, auto);
@@ -704,6 +710,9 @@ strong { font-weight: 650; }
 .mp-activity-list {
   display: grid;
   gap: 8px;
+  max-height: 440px;
+  overflow-y: auto;
+  padding-right: 4px;
 }
 
 .mp-activity-row {
@@ -741,6 +750,9 @@ strong { font-weight: 650; }
   align-content: start;
   gap: 6px;
   min-width: 0;
+  max-height: 460px;
+  overflow-y: auto;
+  padding-right: 4px;
 }
 
 .mp-file-row {
@@ -764,6 +776,7 @@ strong { font-weight: 650; }
 .mp-file-preview {
   min-width: 0;
   min-height: 180px;
+  max-height: 460px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: #fffdf9;
@@ -865,8 +878,9 @@ strong { font-weight: 650; }
 
 .mp-chat-panel {
   display: grid;
-  grid-template-rows: auto minmax(260px, 1fr) auto auto;
-  min-height: 560px;
+  grid-template-rows: auto minmax(200px, 1fr) auto auto;
+  min-height: 480px;
+  max-height: min(680px, calc(100vh - 96px));
 }
 
 .mp-inline-check {

@@ -115,8 +115,10 @@ async function loadPersistedE2bSandboxId(refSandboxId: string) {
 async function createRealSandbox(input: { missionId: string; target: SandboxTarget; instanceId?: string }) {
   const templateID = vars.get("E2B_TEMPLATE_ID") || "base";
   const body = {
+    // 5-minute hard cap as a cost safety net: even if our opportunistic reaper
+    // fails to run, E2B pauses the VM after 5 min idle (pause = no compute billing).
     templateID,
-    timeout: 3600,
+    timeout: 300,
     secure: true,
     lifecycle: { onTimeout: "pause", autoResume: false },
     metadata: {
