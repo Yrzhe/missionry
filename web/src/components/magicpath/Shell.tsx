@@ -39,7 +39,6 @@ export function Shell({ title, meta, actions, children }: ShellProps) {
           <NavItem to="/agents" label={t('nav.agents')} mark="◐" />
           <NavItem to="/artifacts" label={t('nav.artifacts')} mark="□" />
           <NavItem to="/growth" label={t('nav.growth')} mark="↻" />
-          <NavItem to="/settings/environment" label={t('nav.extensions')} mark="◇" />
           <details className={`mp-nav-group ${settingsOpen ? 'active' : ''}`} open={settingsOpen}>
             <summary><span>⚙</span><span>{t('nav.settings')}</span></summary>
             <div className="mp-nav-subitems">

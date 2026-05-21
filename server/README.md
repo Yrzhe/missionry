@@ -74,8 +74,8 @@ Inspect Workroom, events, and files:
 ```bash
 curl -s http://localhost:7775/api/public/missions/<MISSION_ID>/workroom
 curl -s http://localhost:7775/api/public/missions/<MISSION_ID>/events
-curl -s 'http://localhost:7775/api/public/missions/<MISSION_ID>/sandbox/files?path=/workspace'
-curl -s 'http://localhost:7775/api/public/missions/<MISSION_ID>/sandbox/file?path=/workspace/work-cards/<WORK_CARD_ID>.md'
+curl -s 'http://localhost:7775/api/public/missions/<MISSION_ID>/sandbox/files?path='
+curl -s 'http://localhost:7775/api/public/missions/<MISSION_ID>/sandbox/file?path=work-cards/<WORK_CARD_ID>.md'
 ```
 
 Create or reuse a direct thread for an AgentInstance:
@@ -93,9 +93,11 @@ curl -s -X POST http://localhost:7775/api/public/internal/reap \
 
 ## Public Contract Notes
 
-- `GET /api/public/missions/:id/events` returns `{ items }`.
-- `GET /api/public/missions/:id/sandbox/files` returns `{ path, state, entries }`.
+- `GET /api/public/missions/:id/events` returns `{ items }`, newest first. Each item has `{ type, missionId, auditEventId?, actor?, authorName, actionLabel, payload, occurredAt }`.
+- `GET /api/public/missions/:id/sandbox/files` accepts workspace-relative `path` (`""` for root, `docs` for `/workspace/docs`) and returns `{ path, state, entries }`.
+- File entries have `{ name, path, displayPath?, type, size? }`; `path` is workspace-relative and can be passed directly to `/sandbox/file`.
 - File entry `type` values are exactly `dir | file`.
-- `GET /api/public/missions/:id/sandbox/file` returns `{ path, state, content }`.
+- `GET /api/public/missions/:id/sandbox/file` accepts workspace-relative `path` and returns `{ path, state, content }`.
 - `POST /api/public/missions/:id/work-cards/:workCardId/start` returns `{ actionId, status, workCard, workroom }`.
 - `POST /api/public/missions/:id/agent-instances/:instanceId/direct-thread` returns `{ actionId, status, chatThreadId, created, auditEventId? }`.
+- Pixel should trust `workroom.metricStrip.missionSpendCents` as the authoritative spend total.

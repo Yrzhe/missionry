@@ -420,13 +420,13 @@ function agentListItem(row: typeof agents.$inferSelect, instanceCount: number): 
   };
 }
 
-function normalizeWorkspacePath(value: string | undefined | null, fallback = "/workspace") {
+function normalizeWorkspacePath(value: string | undefined | null, fallback = "") {
   const raw = value?.trim() || fallback;
   if (raw.length > 256 || /[\u0000-\u001f\u007f]/.test(raw) || raw.includes("\\")) throw new Error("error.path.relative_invalid");
-  const withoutLeading = raw.replace(/^\/+/, "");
-  const relative = assertSafeRelativePath(withoutLeading);
-  if (relative !== "workspace" && !relative.startsWith("workspace/")) throw new Error("error.path.relative_invalid");
-  return `/${relative}`;
+  if (!raw || raw === "." || raw === "/workspace") return "";
+  const relative = raw.startsWith("/workspace/") ? raw.slice("/workspace/".length) : raw.replace(/^\/+/, "");
+  if (relative.startsWith("/") || relative === "workspace") throw new Error("error.path.relative_invalid");
+  return assertSafeRelativePath(relative);
 }
 
 async function resolveChatAuthorName(row: typeof missionChatMessages.$inferSelect) {
@@ -1806,7 +1806,7 @@ app.get("/api/public/missions/:id/sandbox/files", async (c) => {
   const denied = await assertMissionAccess(c);
   if (denied) return denied;
   const mission = await reconcileMissionSandboxRefs(assertSafeId(c.req.param("id"), "mission_id"));
-  const path = normalizeWorkspacePath(c.req.query("path"), "/workspace");
+  const path = normalizeWorkspacePath(c.req.query("path"), "");
   const listed = await e2b.listFiles(mission.stateJson.sharedSandbox, path);
   return c.json({ path, state: listed.state === "running" ? "running" : "none", entries: listed.entries });
 });
@@ -1815,7 +1815,7 @@ app.get("/api/public/missions/:id/sandbox/file", async (c) => {
   const denied = await assertMissionAccess(c);
   if (denied) return denied;
   const mission = await reconcileMissionSandboxRefs(assertSafeId(c.req.param("id"), "mission_id"));
-  const path = normalizeWorkspacePath(c.req.query("path"), "/workspace/README.md");
+  const path = normalizeWorkspacePath(c.req.query("path"), "README.md");
   const read = await e2b.readWorkspaceFile(mission.stateJson.sharedSandbox, path, FILE_TEXT_CAP_BYTES);
   return c.json({ path, state: read.state === "running" ? "running" : "none", content: read.content });
 });

@@ -172,10 +172,15 @@ type RawMissionChatMessage = {
 type RawMissionFileEntry = {
   name?: string;
   path: string;
+  relativePath?: string;
   type: 'file' | 'dir' | 'directory' | string;
   size?: number;
   updatedAt?: string;
 };
+
+function workspaceRelativePath(path: string) {
+  return path.replace(/^\/?workspace\/?/, '').replace(/^\/+/, '');
+}
 
 function normalizeMissionChatMessage(row: RawMissionChatMessage): MissionChatMessage {
   const authorType = row.author?.type ?? row.authorType ?? 'system';
@@ -234,18 +239,21 @@ export const api = {
   pauseAgentSandbox: (missionId: string, instanceId: string) => request<{ status?: string }>(`/missions/${missionId}/agent-instances/${instanceId}/sandbox/pause`, { method: 'POST', body: '{}' }),
   missionEvents: (missionId: string) => optional<{ items: MissionEvent[] }>(`/missions/${missionId}/events`, { items: [] }),
   missionFiles: async (missionId: string, path = '') => {
-    const response = await request<{ path: string; state?: string; entries?: RawMissionFileEntry[] }>(`/missions/${missionId}/sandbox/files?path=${encodeURIComponent(path)}`);
+    const response = await request<{ path: string; state?: string; entries?: RawMissionFileEntry[] }>(`/missions/${missionId}/sandbox/files?path=${encodeURIComponent(workspaceRelativePath(path))}`);
     return {
-      items: (response.entries ?? []).map((entry) => ({
-        name: entry.name ?? entry.path.split('/').filter(Boolean).at(-1) ?? entry.path,
-        path: entry.path,
-        type: entry.type === 'dir' ? 'directory' as const : entry.type === 'directory' ? 'directory' as const : 'file' as const,
-        size: entry.size,
-        updatedAt: entry.updatedAt,
-      })),
+      items: (response.entries ?? []).map((entry) => {
+        const path = workspaceRelativePath(entry.relativePath ?? entry.path);
+        return {
+          name: entry.name ?? path.split('/').filter(Boolean).at(-1) ?? path,
+          path,
+          type: entry.type === 'dir' ? 'directory' as const : entry.type === 'directory' ? 'directory' as const : 'file' as const,
+          size: entry.size,
+          updatedAt: entry.updatedAt,
+        };
+      }),
     };
   },
-  missionFileContent: (missionId: string, path: string) => request<MissionFileContent>(`/missions/${missionId}/sandbox/file?path=${encodeURIComponent(path)}`),
+  missionFileContent: (missionId: string, path: string) => request<MissionFileContent>(`/missions/${missionId}/sandbox/file?path=${encodeURIComponent(workspaceRelativePath(path))}`),
   decomposeMission: (missionId: string) => request<{ actionId?: string; status?: string; created?: Array<{ workCardId: string; status: string }> }>(`/missions/${missionId}/decompose`, { method: 'POST', body: '{}' }),
   startWorkCard: (missionId: string, workCardId: string) => request<{ actionId?: string; status?: string; workCard?: unknown; workCardId?: string }>(`/missions/${missionId}/work-cards/${workCardId}/start`, { method: 'POST', body: '{}' }),
   missionChat: async (missionId: string) => {

@@ -4,6 +4,9 @@ export const missionEventSchema = z.object({
   type: z.string(),
   missionId: z.string(),
   auditEventId: z.string().optional(),
+  actor: z.object({ type: z.enum(["agent", "user", "system"]), id: z.string() }).optional(),
+  authorName: z.string(),
+  actionLabel: z.string(),
   payload: z.record(z.string(), z.unknown()),
   occurredAt: z.string(),
 });
@@ -14,6 +17,8 @@ export const missionEventsResponseSchema = z.object({
 
 export const sandboxFileEntrySchema = z.object({
   name: z.string(),
+  path: z.string(),
+  displayPath: z.string().optional(),
   type: z.enum(["dir", "file"]),
   size: z.number().optional(),
 });

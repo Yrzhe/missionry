@@ -256,6 +256,9 @@ export type WhitelistEntry = {
 export type MissionEvent = {
   type: string;
   missionId?: string;
+  authorName?: string;
+  actorName?: string;
+  actorType?: 'agent' | 'agent_instance' | 'user' | 'system' | string;
   payload?: {
     costCents?: number;
     sandboxSeconds?: number;
@@ -271,6 +274,8 @@ export type MissionEvent = {
     actor?: {
       type?: string;
       id?: string;
+      name?: string;
+      displayName?: string;
     };
     diffSummary?: string;
     payloadRef?: {
@@ -280,6 +285,8 @@ export type MissionEvent = {
   };
   auditEventId?: string;
   occurredAt?: string;
+  createdAt?: string;
+  updatedAt?: string;
 };
 
 export type MissionFileEntry = {

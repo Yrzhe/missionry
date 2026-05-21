@@ -145,9 +145,6 @@ export async function updateMission(missionId: string, mutate: (current: Mission
         objective: next.objective,
         status: next.status,
         stateJson: JSON.stringify(next.stateJson),
-        missionSpendCents: next.missionSpendCents,
-        llmSpendCents: next.llmSpendCents,
-        sandboxSpendCents: next.sandboxSpendCents,
         burnRateCentsPerMinute: next.burnRateCentsPerMinute,
         dailyBudgetCents: next.dailyBudgetCents,
         version: current.version + 1,
@@ -162,32 +159,33 @@ export async function updateMission(missionId: string, mutate: (current: Mission
 
 export async function recordCost(event: CostRecord): Promise<MissionRow> {
   const createdAt = now();
-  await db.insert(missionSpend).values({
-    id: crypto.randomUUID(),
-    missionId: event.missionId,
-    clientActionId: event.clientActionId ?? null,
-    agentId: event.agentId ?? null,
-    instanceId: event.instanceId ?? null,
-    model: event.model ?? null,
-    promptTokens: event.promptTokens ?? null,
-    completionTokens: event.completionTokens ?? null,
-    costCents: event.costCents,
-    sandboxId: event.sandboxId ?? null,
-    sandboxSeconds: event.sandboxSeconds ?? null,
-    eventType: event.eventType,
-    createdAt,
-  });
-
   const timestamp = now();
-  await db
-    .update(missions)
-    .set({
-      missionSpendCents: sql`${missions.missionSpendCents} + ${event.costCents}`,
-      llmSpendCents: event.eventType === "cost_event" ? sql`${missions.llmSpendCents} + ${event.costCents}` : sql`${missions.llmSpendCents}`,
-      sandboxSpendCents: event.eventType === "sandbox_burn" ? sql`${missions.sandboxSpendCents} + ${event.costCents}` : sql`${missions.sandboxSpendCents}`,
-      updatedAt: timestamp,
-    })
-    .where(eq(missions.id, event.missionId));
+  await db.batch([
+    db.insert(missionSpend).values({
+      id: crypto.randomUUID(),
+      missionId: event.missionId,
+      clientActionId: event.clientActionId ?? null,
+      agentId: event.agentId ?? null,
+      instanceId: event.instanceId ?? null,
+      model: event.model ?? null,
+      promptTokens: event.promptTokens ?? null,
+      completionTokens: event.completionTokens ?? null,
+      costCents: event.costCents,
+      sandboxId: event.sandboxId ?? null,
+      sandboxSeconds: event.sandboxSeconds ?? null,
+      eventType: event.eventType,
+      createdAt,
+    }),
+    db
+      .update(missions)
+      .set({
+        missionSpendCents: sql`${missions.missionSpendCents} + ${event.costCents}`,
+        llmSpendCents: event.eventType === "cost_event" ? sql`${missions.llmSpendCents} + ${event.costCents}` : sql`${missions.llmSpendCents}`,
+        sandboxSpendCents: event.eventType === "sandbox_burn" ? sql`${missions.sandboxSpendCents} + ${event.costCents}` : sql`${missions.sandboxSpendCents}`,
+        updatedAt: timestamp,
+      })
+      .where(eq(missions.id, event.missionId)),
+  ]);
   let missionAfterSpend = await getMission(event.missionId);
   if (missionAfterSpend.dailyBudgetCents > 0 && missionAfterSpend.missionSpendCents >= missionAfterSpend.dailyBudgetCents && missionAfterSpend.stateJson.costGuardrailStatus !== "daily_cap_hit") {
     missionAfterSpend = await updateMission(event.missionId, (mission) => {

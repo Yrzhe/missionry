@@ -3,6 +3,7 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { api } from '../../../lib/api';
 import { useAppStore } from '../../../lib/store';
+import type { TFunction } from 'i18next';
 import type {
   CreateWorkCardInput,
   MissionAgentRow,
@@ -68,7 +69,8 @@ export function Workroom() {
   const mentionOptions = mentionQuery === undefined ? [] : (workroom?.agentInstances ?? []).filter((row) => row.agent.displayName.toLowerCase().includes(mentionQuery)).slice(0, 5);
   const missionEvents = useMemo(() => {
     const local = storeEvents.filter((event) => !id || event.missionId === id);
-    return remoteEvents.length ? remoteEvents : local;
+    const source = remoteEvents.length ? remoteEvents : local;
+    return [...source].sort((a, b) => eventTime(b) - eventTime(a));
   }, [id, remoteEvents, storeEvents]);
 
   const guardrailProgress = useMemo(() => {
@@ -416,20 +418,37 @@ function ActivityTab({ events }: { events: MissionEvent[] }) {
 
 function ActivityRow({ event }: { event: MissionEvent }) {
   const { t } = useTranslation();
+  const actor = eventActor(event, t);
   return (
     <div className="mp-activity-row">
-      <span className="mp-chip">{eventLabel(event.type)}</span>
+      <span className="mp-chip">{eventActionLabel(event.type, t)}</span>
       <div>
-        <strong>{event.payload?.diffSummary ?? event.payload?.subjectType ?? eventLabel(event.type)}</strong>
-        <p className="mp-muted">{event.payload?.subjectType ?? event.payload?.model ?? t('workroom.activitySystem')}</p>
+        <strong>{event.payload?.diffSummary ?? event.payload?.subjectType ?? eventActionLabel(event.type, t)}</strong>
+        <p className="mp-muted">{actor} · {event.payload?.subjectType ?? event.payload?.model ?? t('workroom.activitySystem')}</p>
       </div>
       <span className="mp-muted">{event.occurredAt ?? '-'}</span>
     </div>
   );
 }
 
-function eventLabel(type: string) {
-  return type.replace(/_/g, ' ');
+function eventTime(event: MissionEvent) {
+  const raw = event.occurredAt ?? event.createdAt ?? event.updatedAt ?? '';
+  const timestamp = Date.parse(raw);
+  return Number.isFinite(timestamp) ? timestamp : 0;
+}
+
+function eventActor(event: MissionEvent, t: TFunction) {
+  const actorType = event.actorType ?? event.payload?.actor?.type;
+  const actorName = event.authorName ?? event.actorName ?? event.payload?.actor?.displayName ?? event.payload?.actor?.name;
+  if (actorName) return actorName;
+  if (actorType === 'user') return t('workroom.activityActor.user');
+  if (actorType === 'agent' || actorType === 'agent_instance') return event.payload?.actor?.id ?? t('workroom.activityActor.agent');
+  if (actorType === 'system') return t('workroom.activityActor.system');
+  return event.payload?.actor?.id ?? t('workroom.activityActor.system');
+}
+
+function eventActionLabel(type: string, t: TFunction) {
+  return t(`workroom.activity.action.${type}`, { defaultValue: type.replace(/_/g, ' ') });
 }
 
 function shouldRefreshWorkroom(type: string) {

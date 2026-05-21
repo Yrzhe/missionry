@@ -73,25 +73,6 @@ export const useAppStore = create<AppState>((set) => ({
       const missionChats = missionId && chatMessage
         ? { ...state.missionChats, [missionId]: mergeChatMessages(state.missionChats[missionId] ?? [], [chatMessage as MissionChatMessage]) }
         : state.missionChats;
-      if (!missionId) return { events, missionChats };
-      const workroom = state.workrooms[missionId];
-      if (!workroom) return { events, missionChats };
-      const cost = event.payload?.costCents ?? 0;
-      const burn = event.payload?.burnRateCentsPerMinute;
-      return {
-        events,
-        missionChats,
-        workrooms: {
-          ...state.workrooms,
-          [missionId]: {
-            ...workroom,
-            metricStrip: {
-              ...workroom.metricStrip,
-              missionSpendCents: workroom.metricStrip.missionSpendCents + cost,
-              burnRateCentsPerMinute: burn ?? workroom.metricStrip.burnRateCentsPerMinute,
-            },
-          },
-        },
-      };
+      return { events, missionChats };
     }),
 }));

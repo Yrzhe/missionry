@@ -2,7 +2,7 @@ import { secret, vars } from "edgespark";
 import { db } from "edgespark";
 import { and, eq } from "drizzle-orm";
 import { agentInstances, sandboxRuntime } from "../defs/db_schema";
-import { assertSafeId } from "../lib/safe-paths";
+import { assertSafeId, assertSafeRelativePath } from "../lib/safe-paths";
 import { assertUserBudgetForMission, getMission, updateMission, upsertSandboxRuntime, type SandboxRef } from "../state/missionState";
 
 type SandboxTarget = "mission" | "private";
@@ -24,6 +24,7 @@ type E2BCreateResponse = {
 
 const E2B_API_BASE = "https://api.e2b.app";
 const DEFAULT_ENVD_PORT = 49983;
+export const WORKSPACE_ROOT = "/workspace";
 const memorySandboxes = new Map<string, MemorySandbox>();
 
 function keyFor(missionId: string, target: SandboxTarget, instanceId?: string) {
@@ -110,9 +111,29 @@ function decodeBase64Text(value: unknown) {
   }
 }
 
-function normalizeEnvdPath(path: string) {
-  const normalized = (path.startsWith("/") ? path : `/workspace/${path}`).replace(/\/+/g, "/");
-  return normalized === "/" ? "/workspace" : normalized;
+function normalizeWorkspaceRelativePath(path: string | undefined | null) {
+  const raw = String(path ?? "").trim();
+  if (!raw || raw === "." || raw === WORKSPACE_ROOT) return "";
+  const withoutRoot = raw.startsWith(`${WORKSPACE_ROOT}/`) ? raw.slice(WORKSPACE_ROOT.length + 1) : raw;
+  if (withoutRoot.startsWith("/")) throw new Error("error.path.relative_invalid");
+  return assertSafeRelativePath(withoutRoot);
+}
+
+function workspacePath(path: string | undefined | null) {
+  const relative = normalizeWorkspaceRelativePath(path);
+  return relative ? `${WORKSPACE_ROOT}/${relative}` : WORKSPACE_ROOT;
+}
+
+function pathFromWorkspace(path: string | undefined | null) {
+  const normalized = String(path ?? "").replace(/\/+/g, "/").replace(/\/$/, "");
+  if (!normalized || normalized === WORKSPACE_ROOT) return "";
+  if (normalized.startsWith(`${WORKSPACE_ROOT}/`)) return assertSafeRelativePath(normalized.slice(WORKSPACE_ROOT.length + 1));
+  return normalizeWorkspaceRelativePath(normalized);
+}
+
+function joinRelative(dir: string, name: string) {
+  const safeName = assertSafeRelativePath(name);
+  return dir ? assertSafeRelativePath(`${dir}/${safeName}`) : safeName;
 }
 
 function requireEnvd(ref: SandboxRef) {
@@ -141,6 +162,40 @@ async function envdFetch(ref: SandboxRef, path: string, init: RequestInit = {}) 
   }
   if (contentType.includes("application/json") || contentType.includes("application/connect+json")) return response.json().catch(() => ({}));
   return response.text();
+}
+
+async function envdRunCommand(ref: SandboxRef, command: string, cwd = WORKSPACE_ROOT, options: { throwOnNonZero?: boolean } = {}) {
+  const envd = requireEnvd(ref);
+  const response = await fetch(`${envd.host}/process.Process/Start`, {
+    method: "POST",
+    headers: {
+      "X-Access-Token": envd.token,
+      "Authorization": basicUserHeader(),
+      "Connect-Protocol-Version": "1",
+      "Connect-Timeout-Ms": "600000",
+      "Content-Type": "application/connect+json",
+      "Accept": "application/connect+json",
+    },
+    body: JSON.stringify({
+      process: {
+        cmd: "/bin/sh",
+        args: ["-lc", command],
+        envs: {},
+        cwd,
+      },
+      stdin: false,
+    }),
+  });
+  if (!response.ok) throw new Error(`error.e2b.envd_request_failed:${response.status}:${await response.text().catch(() => response.statusText)}`);
+  const result = { stdout: "", stderr: "", exitCode: 0 };
+  for (const frame of parseConnectJsonFrames(await response.arrayBuffer())) collectProcessEvent(frame, result);
+  if (options.throwOnNonZero && result.exitCode !== 0) throw new Error(`error.e2b.process_failed:${result.exitCode}:${result.stderr || result.stdout}`);
+  return result;
+}
+
+async function ensureWorkspaceRoot(ref: SandboxRef) {
+  if (await useMemoryMode()) return;
+  await envdRunCommand(ref, `mkdir -p ${WORKSPACE_ROOT} && test -d ${WORKSPACE_ROOT}`, "/home/user", { throwOnNonZero: true });
 }
 
 function parseConnectJsonFrames(buffer: ArrayBuffer): unknown[] {
@@ -344,6 +399,7 @@ async function startOrResume(input: { missionId: string; instanceId?: string; ta
     routing = { sandboxID: created.sandboxID, envdAccessToken: created.envdAccessToken ?? null, envdHost: envdHostFor(created.sandboxID) };
   }
   const ref = refFor(input, routing);
+  await ensureWorkspaceRoot(ref);
   await persistRef(input.missionId, ref);
   return ref;
 }
@@ -368,30 +424,7 @@ export async function runCommand(ref: SandboxRef, command: string) {
       stderr: "",
     };
   }
-  const envd = requireEnvd(running);
-  const response = await fetch(`${envd.host}/process.Process/Start`, {
-    method: "POST",
-    headers: {
-      "X-Access-Token": envd.token,
-      "Authorization": basicUserHeader(),
-      "Connect-Protocol-Version": "1",
-      "Connect-Timeout-Ms": "600000",
-      "Content-Type": "application/connect+json",
-      "Accept": "application/connect+json",
-    },
-    body: JSON.stringify({
-      process: {
-        cmd: "/bin/sh",
-        args: ["-lc", `mkdir -p /workspace && cd /workspace && ${command}`],
-        envs: {},
-        cwd: "/home/user",
-      },
-      stdin: false,
-    }),
-  });
-  if (!response.ok) throw new Error(`error.e2b.envd_request_failed:${response.status}:${await response.text().catch(() => response.statusText)}`);
-  const result = { stdout: "", stderr: "", exitCode: 0 };
-  for (const frame of parseConnectJsonFrames(await response.arrayBuffer())) collectProcessEvent(frame, result);
+  const result = await envdRunCommand(running, `mkdir -p ${WORKSPACE_ROOT} && ${command}`, WORKSPACE_ROOT);
   await touchSandbox(running);
   return result;
 }
@@ -400,11 +433,11 @@ export async function writeFile(ref: SandboxRef, path: string, content: string) 
   const running = await ensureRunningRef(ref);
   if (await useMemoryMode()) {
     const sandbox = await ensureMemorySandbox(running.sandboxId);
-    sandbox.files.set(path, content);
+    sandbox.files.set(workspacePath(path), content);
     await touchSandbox(running);
     return;
   }
-  const filePath = normalizeEnvdPath(path);
+  const filePath = workspacePath(path);
   const form = new FormData();
   form.append("file", new Blob([content], { type: "text/plain;charset=utf-8" }), filePath.split("/").filter(Boolean).at(-1) ?? "file.txt");
   await envdFetch(running, `/files?path=${encodeURIComponent(filePath)}&username=user`, {
@@ -419,11 +452,11 @@ export async function readFile(ref: SandboxRef, path: string) {
   if (await useMemoryMode()) {
     const sandbox = await ensureMemorySandbox(running.sandboxId);
     await touchSandbox(running);
-    const value = sandbox.files.get(path);
+    const value = sandbox.files.get(workspacePath(path)) ?? sandbox.files.get(path);
     if (value === undefined) throw new Error("error.file.not_found");
     return value;
   }
-  const response = await envdFetch(running, `/files?path=${encodeURIComponent(normalizeEnvdPath(path))}&username=user`, { method: "GET" });
+  const response = await envdFetch(running, `/files?path=${encodeURIComponent(workspacePath(path))}&username=user`, { method: "GET" });
   await touchSandbox(running);
   return typeof response === "string" ? response : String((response as { content?: unknown })?.content ?? "");
 }
@@ -445,7 +478,7 @@ export async function pauseIfIdle(ref: SandboxRef) {
   return paused;
 }
 
-export type SandboxFileEntry = { name: string; type: "dir" | "file"; size?: number };
+export type SandboxFileEntry = { name: string; path: string; displayPath?: string; type: "dir" | "file"; size?: number };
 
 function normalizeSandboxPath(path: string) {
   const withSlash = path.startsWith("/") ? path : `/${path}`;
@@ -453,7 +486,8 @@ function normalizeSandboxPath(path: string) {
 }
 
 function memoryChildEntries(files: Map<string, string>, dirPath: string): SandboxFileEntry[] {
-  const normalizedDir = normalizeSandboxPath(dirPath);
+  const relativeDir = normalizeWorkspaceRelativePath(dirPath);
+  const normalizedDir = normalizeSandboxPath(workspacePath(relativeDir));
   const prefix = normalizedDir === "/" ? "/" : `${normalizedDir}/`;
   const entries = new Map<string, SandboxFileEntry>();
   for (const [rawPath, content] of files.entries()) {
@@ -463,8 +497,9 @@ function memoryChildEntries(files: Map<string, string>, dirPath: string): Sandbo
     if (!rest) continue;
     const [name, ...remaining] = rest.split("/");
     if (!name) continue;
-    if (remaining.length > 0) entries.set(name, { name, type: "dir" });
-    else entries.set(name, { name, type: "file", size: new TextEncoder().encode(content).length });
+    const childPath = joinRelative(relativeDir, name);
+    if (remaining.length > 0) entries.set(childPath, { name, path: childPath, displayPath: `${WORKSPACE_ROOT}/${childPath}`, type: "dir" });
+    else entries.set(childPath, { name, path: childPath, displayPath: `${WORKSPACE_ROOT}/${childPath}`, type: "file", size: new TextEncoder().encode(content).length });
   }
   return Array.from(entries.values()).sort((a, b) => a.type.localeCompare(b.type) || a.name.localeCompare(b.name));
 }
@@ -472,10 +507,11 @@ function memoryChildEntries(files: Map<string, string>, dirPath: string): Sandbo
 export async function listFiles(ref: SandboxRef, path: string): Promise<{ state: SandboxRef["state"]; entries: SandboxFileEntry[] }> {
   await assertRefAccess(ref);
   if (ref.state !== "running") return { state: ref.state, entries: [] };
+  const relativeDir = normalizeWorkspaceRelativePath(path);
   if (await useMemoryMode()) {
     const sandbox = memorySandboxes.get(ref.sandboxId);
     if (!sandbox || sandbox.state !== "running") return { state: "none", entries: [] };
-    return { state: "running", entries: memoryChildEntries(sandbox.files, path) };
+    return { state: "running", entries: memoryChildEntries(sandbox.files, relativeDir) };
   }
   const response = await envdFetch(ref, "/filesystem.Filesystem/ListDir", {
     method: "POST",
@@ -484,7 +520,7 @@ export async function listFiles(ref: SandboxRef, path: string): Promise<{ state:
       "Connect-Protocol-Version": "1",
       "Connect-Timeout-Ms": "30000",
     },
-    body: JSON.stringify({ path: normalizeEnvdPath(path), depth: 1 }),
+    body: JSON.stringify({ path: workspacePath(relativeDir), depth: 1 }),
   }) as unknown;
   const rawEntries = Array.isArray(response)
     ? response
@@ -495,10 +531,13 @@ export async function listFiles(ref: SandboxRef, path: string): Promise<{ state:
         : [];
   const entries = rawEntries.map((entry) => {
     const row = entry as Record<string, unknown>;
-    const name = String(row.name ?? row.path ?? "");
-    const type = row.type === "dir" || row.isDir === true || row.isDirectory === true ? "dir" as const : "file" as const;
+    const rawPath = String(row.path ?? "");
+    const name = String(row.name ?? rawPath.split("/").filter(Boolean).at(-1) ?? "");
+    const typeText = String(row.type ?? "").toLowerCase();
+    const type = typeText === "dir" || typeText.includes("dir") || row.isDir === true || row.isDirectory === true ? "dir" as const : "file" as const;
     const size = row.size === undefined ? undefined : Number(row.size);
-    return { name: name.split("/").filter(Boolean).at(-1) ?? name, type, ...(Number.isFinite(size) ? { size } : {}) };
+    const relativePath = rawPath ? pathFromWorkspace(rawPath) : joinRelative(relativeDir, name);
+    return { name: name.split("/").filter(Boolean).at(-1) ?? name, path: relativePath, displayPath: `${WORKSPACE_ROOT}/${relativePath}`, type, ...(Number.isFinite(size) ? { size } : {}) };
   }).filter((entry) => entry.name);
   return { state: "running", entries };
 }
@@ -509,12 +548,12 @@ export async function readWorkspaceFile(ref: SandboxRef, path: string, maxBytes 
   if (await useMemoryMode()) {
     const sandbox = memorySandboxes.get(ref.sandboxId);
     if (!sandbox || sandbox.state !== "running") return { state: "none", content: "" };
-    const content = sandbox.files.get(path) ?? sandbox.files.get(path.replace(/^\//, ""));
+    const content = sandbox.files.get(workspacePath(path)) ?? sandbox.files.get(path) ?? sandbox.files.get(path.replace(/^\//, ""));
     if (content === undefined) return { state: "running", content: "" };
     return { state: "running", content: content.slice(0, maxBytes) };
   }
   if (!ref.e2bSandboxId) return { state: "none", content: "" };
-  const response = await envdFetch(ref, `/files?path=${encodeURIComponent(normalizeEnvdPath(path))}&username=user`, { method: "GET" });
+  const response = await envdFetch(ref, `/files?path=${encodeURIComponent(workspacePath(path))}&username=user`, { method: "GET" });
   const content = typeof response === "string" ? response : String((response as { content?: unknown })?.content ?? "");
   return { state: "running", content: content.slice(0, maxBytes) };
 }

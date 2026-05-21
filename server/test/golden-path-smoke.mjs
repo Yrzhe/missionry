@@ -149,11 +149,11 @@ try {
   const events = await request(`/missions/${mission.missionId}/events`);
   assert.ok(events.items.some((event) => ["work_card_completed", "sandbox_burn", "sandbox_burn_recorded"].includes(event.type)));
 
-  const files = await request(`/missions/${mission.missionId}/sandbox/files?path=/workspace/work-cards`);
+  const files = await request(`/missions/${mission.missionId}/sandbox/files?path=work-cards`);
   assert.equal(files.state, "running");
-  assert.ok(files.entries.some((entry) => entry.name === `${workCardId}.md` && entry.type === "file"));
+  assert.ok(files.entries.some((entry) => entry.name === `${workCardId}.md` && entry.path === `work-cards/${workCardId}.md` && entry.type === "file"));
 
-  const file = await request(`/missions/${mission.missionId}/sandbox/file?path=/workspace/work-cards/${workCardId}.md`);
+  const file = await request(`/missions/${mission.missionId}/sandbox/file?path=work-cards/${workCardId}.md`);
   assert.equal(file.state, "running");
   assert.match(file.content, /Golden path|Clarify execution plan|workspace/i);
 } finally {
