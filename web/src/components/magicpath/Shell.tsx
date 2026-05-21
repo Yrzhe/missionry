@@ -6,6 +6,7 @@ import { api } from '../../lib/api';
 import { queryKeys } from '../../lib/query';
 import { useAppStore } from '../../lib/store';
 import type { ReactNode } from 'react';
+import { MissionryMark } from '../MissionryMark';
 
 type ShellProps = {
   title: string;
@@ -37,7 +38,7 @@ export function Shell({ title, meta, actions, children }: ShellProps) {
     <div className="mp-shell">
       <aside className="mp-sidebar">
         <div className="mp-brand">
-          <div className="mp-logo">M</div>
+          <div className="mp-logo"><MissionryMark /></div>
           <div>
             <div className="mp-brand-name">{t('app.name')}</div>
             <div className="mp-muted mp-small">{t('app.workspace')}</div>

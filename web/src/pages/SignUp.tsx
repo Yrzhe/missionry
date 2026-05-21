@@ -3,6 +3,7 @@ import { Link, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { ApiError, login, resolveSession, signUp } from '../lib/api';
 import { useAppStore } from '../lib/store';
+import { MissionryMark } from '../components/MissionryMark';
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -70,7 +71,7 @@ export function SignUp({ onSignedIn }: { onSignedIn?: () => void }) {
   return (
     <main className="login-screen">
       <form className="login-card signup-page" onSubmit={submit}>
-        <div className="mp-logo">M</div>
+        <div className="mp-logo"><MissionryMark /></div>
         <h1>{t('auth.signup.title')}</h1>
         <p className="mp-muted">{t('auth.signup.subtitle')}</p>
         <label>

@@ -19,6 +19,7 @@ import { queryKeys } from './lib/query';
 import { subscribeMissionEvents } from './lib/sse';
 import { useAppStore } from './lib/store';
 import { SignUp } from './pages/SignUp';
+import { MissionryMark } from './components/MissionryMark';
 
 const SSE_MISSION_LIMIT = 4;
 
@@ -138,7 +139,7 @@ function LoginScreen({ onReady }: { onReady: () => void }) {
   return (
     <main className="login-screen">
       <form className="login-card" onSubmit={submit}>
-        <div className="mp-logo">M</div>
+        <div className="mp-logo"><MissionryMark /></div>
         <h1>{t('auth.title')}</h1>
         <p className="mp-muted">{t('auth.subtitle')}</p>
         <label>{t('auth.email')}<input value={email} onChange={(event) => setEmail(event.target.value)} type="email" /></label>
