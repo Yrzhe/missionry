@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../../../lib/api';
-import { useAppStore } from '../../../lib/store';
-import type { DirectThreadMessage, DirectThreadReadModel } from '../../../lib/types';
+import { queryKeys } from '../../../lib/query';
+import type { DirectThreadMessage } from '../../../lib/types';
 import type { FormEvent } from 'react';
 import { Shell } from '../Shell';
 import { Markdown } from '../Markdown';
@@ -13,32 +14,38 @@ const money = (cents = 0) => `$${(cents / 100).toFixed(2)}`;
 export function DirectAgentThread() {
   const { threadId = '' } = useParams();
   const { t } = useTranslation();
-  const events = useAppStore((state) => state.events);
-  const workrooms = useAppStore((state) => state.workrooms);
-  const [thread, setThread] = useState<DirectThreadReadModel | null>(null);
+  const queryClient = useQueryClient();
   const [body, setBody] = useState('');
   const [isSending, setIsSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const threadQuery = useQuery({
+    queryKey: queryKeys.directThread(threadId),
+    queryFn: () => api.directThread(threadId),
+    enabled: Boolean(threadId),
+  });
+  const thread = threadQuery.data ?? null;
+  const workroomQuery = useQuery({
+    queryKey: queryKeys.workroom(thread?.missionId ?? ''),
+    queryFn: () => api.workroom(thread?.missionId ?? ''),
+    enabled: Boolean(thread?.missionId),
+  });
+  const directEventsQuery = useQuery({
+    queryKey: thread?.missionId ? queryKeys.missionEvents(thread.missionId) : ['direct-thread-events', threadId],
+    queryFn: () => api.missionEvents(thread?.missionId ?? ''),
+    enabled: Boolean(thread?.missionId),
+  });
+  const sendMutation = useMutation({
+    mutationFn: (messageBody: string) => api.sendDirectThreadMessage(threadId, messageBody),
+    onSuccess: async () => {
+      setBody('');
+      await queryClient.invalidateQueries({ queryKey: queryKeys.directThread(threadId) });
+      if (thread?.missionId) await queryClient.invalidateQueries({ queryKey: queryKeys.missionEvents(thread.missionId) });
+    },
+  });
 
-  const workroom = thread ? workrooms[thread.missionId] : undefined;
+  const workroom = workroomQuery.data;
   const agentRow = thread && workroom ? workroom.agentInstances.find((row) => row.instance.id === thread.agentInstanceId) : undefined;
-  const directEvents = useMemo(() => events.filter((event) => event.payload?.subjectId === threadId || event.type === 'direct_thread_message_sent' || event.type === 'direct_thread_ready').slice(0, 6), [events, threadId]);
-
-  async function refresh() {
-    if (!threadId) return;
-    const next = await api.directThread(threadId);
-    setThread(next);
-    setError(null);
-  }
-
-  useEffect(() => {
-    void refresh().catch((loadError) => setError(loadError instanceof Error ? loadError.message : t('chat.loadError')));
-  }, [threadId]);
-
-  useEffect(() => {
-    const matched = events.some((event) => event.payload?.subjectId === threadId && (event.type === 'direct_thread_message_sent' || event.type === 'direct_thread_ready'));
-    if (matched) void refresh().catch(() => undefined);
-  }, [events, threadId]);
+  const directEvents = useMemo(() => (directEventsQuery.data?.items ?? []).filter((event) => event.payload?.subjectId === threadId || event.type === 'direct_thread_message_sent' || event.type === 'direct_thread_ready').slice(0, 6), [directEventsQuery.data?.items, threadId]);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -46,14 +53,7 @@ export function DirectAgentThread() {
     setIsSending(true);
     setError(null);
     try {
-      const response = await api.sendDirectThreadMessage(threadId, body.trim());
-      setThread((current) => current ? {
-        ...current,
-        messages: [...current.messages, ...[response.message, response.agentReply].filter((message): message is DirectThreadMessage => Boolean(message))],
-        lastMessageAt: response.agentReply?.createdAt ?? response.message?.createdAt ?? current.lastMessageAt,
-      } : current);
-      setBody('');
-      await refresh();
+      await sendMutation.mutateAsync(body.trim());
     } catch (sendError) {
       setError(sendError instanceof Error ? sendError.message : t('chat.sendError'));
     } finally {
@@ -79,7 +79,7 @@ export function DirectAgentThread() {
             <span className="mp-chip">{t('chat.live')}</span>
           </div>
           <div className="mp-chat-scroll">
-            {thread?.messages.length ? thread.messages.map((message) => <DirectMessage key={message.id} message={message} agentName={agentRow?.agent.displayName} />) : <div className="mp-empty mp-empty-cta"><h2>{t('chat.empty.title')}</h2><p>{t('chat.empty.body')}</p></div>}
+            {threadQuery.isLoading ? <div className="mp-muted">{t('common.loading')}</div> : thread?.messages.length ? thread.messages.map((message) => <DirectMessage key={message.id} message={message} agentName={agentRow?.agent.displayName} />) : <div className="mp-empty mp-empty-cta"><h2>{t('chat.empty.title')}</h2><p>{threadQuery.error instanceof Error ? threadQuery.error.message : t('chat.empty.body')}</p></div>}
           </div>
           <form className="mp-chat-composer" onSubmit={submit}>
             <textarea value={body} onChange={(event) => setBody(event.target.value)} placeholder={t('chat.placeholder')} />

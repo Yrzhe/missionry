@@ -1,8 +1,9 @@
 import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
+import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../../../lib/api';
-import { useAppStore } from '../../../lib/store';
+import { queryKeys } from '../../../lib/query';
 import type { MissionEvent } from '../../../lib/types';
 import { Shell } from '../Shell';
 
@@ -12,8 +13,17 @@ type FeedFilter = 'all' | 'unreviewed' | 'reviewed' | 'rolled_back';
 export function GrowthCenter() {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const events = useAppStore((state) => state.events);
-  const missions = useAppStore((state) => state.missions);
+  const queryClient = useQueryClient();
+  const missionsQuery = useQuery({ queryKey: queryKeys.missions, queryFn: api.missions });
+  const missions = missionsQuery.data?.items ?? [];
+  const eventQueries = useQueries({
+    queries: missions.slice(0, 25).map((mission) => ({
+      queryKey: queryKeys.missionEvents(mission.id),
+      queryFn: () => api.missionEvents(mission.id),
+      staleTime: 15_000,
+    })),
+  });
+  const events = useMemo(() => eventQueries.flatMap((query) => query.data?.items ?? []), [eventQueries]);
   const [tab, setTab] = useState<GrowthTab>('feed');
   const [filter, setFilter] = useState<FeedFilter>('all');
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -24,13 +34,19 @@ export function GrowthCenter() {
   const candidates = useMemo(() => events.filter((event) => event.type.includes('candidate') || event.payload?.subjectType === 'growth_candidate'), [events]);
   const rollbacks = useMemo(() => events.filter((event) => event.type.includes('rollback') || event.payload?.diffSummary?.startsWith('rollback:')), [events]);
   const highRiskCount = feed.filter((event) => risk(event) === 'high').length;
+  const rollbackMutation = useMutation({
+    mutationFn: api.rollbackAuditEvent,
+    onSuccess: async () => {
+      await Promise.all(missions.map((mission) => queryClient.invalidateQueries({ queryKey: queryKeys.missionEvents(mission.id) })));
+    },
+  });
 
   async function rollback(event: MissionEvent) {
     if (!event.auditEventId) return;
     setBusyId(event.auditEventId);
     setError(null);
     try {
-      await api.rollbackAuditEvent(event.auditEventId);
+      await rollbackMutation.mutateAsync(event.auditEventId);
     } catch (rollbackError) {
       setError(rollbackError instanceof Error ? rollbackError.message : t('growth.rollbackError'));
     } finally {

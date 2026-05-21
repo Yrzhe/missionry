@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
+import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../../../lib/api';
-import { useAppStore } from '../../../lib/store';
+import { queryKeys } from '../../../lib/query';
 import type { AgentLibraryItem, MissionAgentRow, MissionSummary } from '../../../lib/types';
 import type { FormEvent } from 'react';
 import { Shell } from '../Shell';
@@ -29,18 +30,36 @@ function issuePercent(mission: MissionSummary) {
 export function MissionsHome() {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const missions = useAppStore((state) => state.missions);
-  const workrooms = useAppStore((state) => state.workrooms);
-  const setMissions = useAppStore((state) => state.setMissions);
+  const queryClient = useQueryClient();
+  const missionsQuery = useQuery({ queryKey: queryKeys.missions, queryFn: api.missions });
+  const missions = missionsQuery.data?.items ?? [];
+  const workroomQueries = useQueries({
+    queries: missions.slice(0, 25).map((mission) => ({
+      queryKey: queryKeys.workroom(mission.id),
+      queryFn: () => api.workroom(mission.id),
+      enabled: Boolean(mission.id),
+      staleTime: 15_000,
+    })),
+  });
+  const workrooms = useMemo(() => {
+    const rows: Record<string, NonNullable<(typeof workroomQueries)[number]['data']>> = {};
+    workroomQueries.forEach((query) => {
+      if (query.data) rows[query.data.mission.id] = query.data;
+    });
+    return rows;
+  }, [workroomQueries]);
   const [query, setQuery] = useState('');
   const [agentFilter, setAgentFilter] = useState('all');
   const [statusFilter, setStatusFilter] = useState<(typeof STATUS_FILTERS)[number]>('all');
   const [modalOpen, setModalOpen] = useState(false);
-  const [libraryAgents, setLibraryAgents] = useState<AgentLibraryItem[]>([]);
-  const [isLoadingAgents, setIsLoadingAgents] = useState(false);
-  const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [form, setForm] = useState<NewMissionForm>({ title: '', objective: '', dailyBudgetCents: '2500', leaderMode: 'default', leaderAgentId: '' });
+  const agentsQuery = useQuery({
+    queryKey: queryKeys.agents,
+    queryFn: api.agents,
+    enabled: modalOpen && form.leaderMode === 'pick',
+  });
+  const libraryAgents: AgentLibraryItem[] = agentsQuery.data?.items ?? [];
 
   const agentOptions = useMemo(() => {
     const rows = new Map<string, MissionAgentRow['agent']>();
@@ -73,63 +92,50 @@ export function MissionsHome() {
     };
   }, [missions]);
 
-  useEffect(() => {
-    if (!modalOpen || form.leaderMode !== 'pick') return;
-    let alive = true;
-    setIsLoadingAgents(true);
-    api.agents()
-      .then((response) => {
-        if (alive) setLibraryAgents(response.items);
-      })
-      .catch(() => {
-        if (alive) setLibraryAgents([]);
-      })
-      .finally(() => {
-        if (alive) setIsLoadingAgents(false);
-      });
-    return () => {
-      alive = false;
-    };
-  }, [form.leaderMode, modalOpen]);
+  const createMissionMutation = useMutation({
+    mutationFn: api.createMission,
+    onSuccess: async (created) => {
+      await queryClient.invalidateQueries({ queryKey: queryKeys.missions });
+      setModalOpen(false);
+      setForm({ title: '', objective: '', dailyBudgetCents: '2500', leaderMode: 'default', leaderAgentId: '' });
+      navigate(`/missions/${created.missionId}`, { replace: false });
+    },
+  });
+
+  const createDemoMutation = useMutation({
+    mutationFn: api.createDemoMission,
+    onSuccess: async (created) => {
+      await queryClient.invalidateQueries({ queryKey: queryKeys.missions });
+      if (created.missionId) navigate(`/missions/${created.missionId}`);
+    },
+  });
 
   async function submitMission(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError(null);
-    setIsSubmitting(true);
     try {
-      const created = await api.createMission({
+      await createMissionMutation.mutateAsync({
         title: form.title.trim(),
         objective: form.objective.trim(),
         dailyBudgetCents: Number(form.dailyBudgetCents),
         leaderMode: form.leaderMode,
         leaderAgentId: form.leaderMode === 'pick' ? form.leaderAgentId : undefined,
       });
-      const next = await api.missions();
-      setMissions(next.items);
-      setModalOpen(false);
-      setForm({ title: '', objective: '', dailyBudgetCents: '2500', leaderMode: 'default', leaderAgentId: '' });
-      navigate(`/missions/${created.missionId}`, { replace: false });
     } catch (createError) {
       setError(createError instanceof Error ? createError.message : t('missions.createError'));
-    } finally {
-      setIsSubmitting(false);
     }
   }
 
   async function createDemoMission() {
     setError(null);
-    setIsSubmitting(true);
     try {
-      const created = await api.createDemoMission();
-      const next = await api.missions();
-      setMissions(next.items);
-      if (created.missionId) navigate(`/missions/${created.missionId}`);
+      await createDemoMutation.mutateAsync();
     } catch (createError) {
       setError(createError instanceof Error ? createError.message : t('missions.createError'));
-    } finally {
-      setIsSubmitting(false);
     }
   }
+
+  const isSubmitting = createMissionMutation.isPending || createDemoMutation.isPending;
 
   return (
     <Shell
@@ -202,7 +208,7 @@ export function MissionsHome() {
               <label>
                 {t('missions.modal.leaderAgent')}
                 <select value={form.leaderAgentId} onChange={(event) => setForm((current) => ({ ...current, leaderAgentId: event.target.value }))} required>
-                  <option value="">{isLoadingAgents ? t('common.loading') : t('missions.modal.leaderAgentPlaceholder')}</option>
+                  <option value="">{agentsQuery.isLoading ? t('common.loading') : t('missions.modal.leaderAgentPlaceholder')}</option>
                   {libraryAgents.map((agent) => <option key={agent.id} value={agent.id}>{agent.displayName}</option>)}
                 </select>
               </label>

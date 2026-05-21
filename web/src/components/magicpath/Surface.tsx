@@ -1,5 +1,9 @@
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
+import { useQueries, useQuery } from '@tanstack/react-query';
+import { useShallow } from 'zustand/react/shallow';
+import { api } from '../../lib/api';
+import { queryKeys } from '../../lib/query';
 import { useAppStore } from '../../lib/store';
 import type { MissionAgentRow, MissionSandboxReadModel } from '../../lib/types';
 import { Shell } from './Shell';
@@ -84,8 +88,14 @@ function SandboxPanel({ sandbox }: { sandbox: MissionSandboxReadModel }) {
 
 function AgentsPage() {
   const { t } = useTranslation();
-  const workroomsMap = useAppStore((state) => state.workrooms);
-  const workrooms = Object.values(workroomsMap);
+  const missionsQuery = useQuery({ queryKey: queryKeys.missions, queryFn: api.missions });
+  const workroomQueries = useQueries({
+    queries: (missionsQuery.data?.items ?? []).slice(0, 25).map((mission) => ({
+      queryKey: queryKeys.workroom(mission.id),
+      queryFn: () => api.workroom(mission.id),
+    })),
+  });
+  const workrooms = workroomQueries.flatMap((query) => query.data ? [query.data] : []);
   const agents = new Map<string, MissionAgentRow>();
   workrooms.forEach((workroom) => workroom.agentInstances.forEach((row) => agents.set(row.agent.id, row)));
   return (
@@ -99,7 +109,12 @@ function AgentsPage() {
 
 function AgentPage({ missionId, instanceId }: { missionId?: string; instanceId?: string }) {
   const { t } = useTranslation();
-  const workroom = useAppStore((state) => (missionId ? state.workrooms[missionId] : undefined));
+  const workroomQuery = useQuery({
+    queryKey: queryKeys.workroom(missionId ?? ''),
+    queryFn: () => api.workroom(missionId ?? ''),
+    enabled: Boolean(missionId),
+  });
+  const workroom = workroomQuery.data;
   const row = workroom?.agentInstances.find((item) => item.instance.id === instanceId);
   return (
     <>
@@ -126,13 +141,21 @@ function AgentCard({ row }: { row: MissionAgentRow }) {
 function ArtifactsPage() {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const firstMissionId = useAppStore((state) => state.missions[0]?.id);
+  const missionsQuery = useQuery({ queryKey: queryKeys.missions, queryFn: api.missions });
+  const firstMissionId = missionsQuery.data?.items[0]?.id;
   return <><PageHead label={t('artifacts.title')} title={t('artifacts.title')} subtitle={t('artifacts.subtitle')} /><EmptyNote title={t('artifacts.empty.title')} body={t('artifacts.empty.body')} action={t('artifacts.empty.action')} onAction={() => navigate(firstMissionId ? `/missions/${firstMissionId}` : '/missions')} /></>;
 }
 
 function GrowthPage() {
   const { t } = useTranslation();
-  const events = useAppStore((state) => state.events);
+  const missionsQuery = useQuery({ queryKey: queryKeys.missions, queryFn: api.missions });
+  const eventQueries = useQueries({
+    queries: (missionsQuery.data?.items ?? []).slice(0, 25).map((mission) => ({
+      queryKey: queryKeys.missionEvents(mission.id),
+      queryFn: () => api.missionEvents(mission.id),
+    })),
+  });
+  const events = eventQueries.flatMap((query) => query.data?.items ?? []);
   return (
     <>
       <PageHead label={t('growth.feed')} title={t('growth.title')} subtitle={t('growth.subtitle')} />
@@ -147,20 +170,31 @@ function GrowthPage() {
 
 function BudgetPage() {
   const { t } = useTranslation();
-  const budget = useAppStore((state) => state.budget);
-  const spend = useAppStore((state) => state.spend);
+  const budgetQuery = useQuery({ queryKey: queryKeys.budget, queryFn: api.budget });
+  const spendQuery = useQuery({ queryKey: queryKeys.missionSpend, queryFn: api.missionSpend });
+  const budget = budgetQuery.data;
+  const spend = spendQuery.data?.items ?? [];
+  const actualSpendCents = spend.reduce((sum, row) => sum + (row.spentCents ?? row.spendCents ?? row.missionSpendCents ?? 0), 0);
+  const actualLlmCents = budget?.currentSpendCents?.llm ?? spend.reduce((sum, row) => sum + (row.llmSpentCents ?? 0), 0);
+  const actualSandboxCents = budget?.currentSpendCents?.sandbox ?? spend.reduce((sum, row) => sum + (row.sandboxSpentCents ?? 0), 0);
+  const actualOtherCents = budget?.currentSpendCents?.other ?? spend.reduce((sum, row) => sum + (row.otherSpentCents ?? 0), 0);
   return (
     <>
       <PageHead label={t('budget.breakdown')} title={t('budget.title')} subtitle={t('budget.subtitle')} />
       <div className="mp-metrics">
         <Stat label={t('budget.daily')} value={money(budget?.dailyBudgetCents)} />
         <Stat label={t('budget.global')} value={money(budget?.globalCapCents)} />
-        <Stat label={t('budget.current')} value={money(budget?.currentSpendCents?.total)} />
+        <Stat label={t('budget.current')} value={money(budget?.currentSpendCents?.total ?? actualSpendCents)} />
         <Stat label={t('workroom.metric.burn')} value={`${budget?.burnRateCentsPerMinute ?? 0}c/min`} />
+      </div>
+      <div className="mp-metrics">
+        <Stat label="LLM" value={money(actualLlmCents)} />
+        <Stat label={t('common.sandbox')} value={money(actualSandboxCents)} />
+        <Stat label={t('budget.other')} value={money(actualOtherCents)} />
       </div>
       <section className="mp-card">
         <div className="mp-section-title"><strong>{t('budget.breakdown')}</strong><span className="mp-muted">{t('common.updated')}</span></div>
-        {spend.map((row) => <div className="mp-row" key={row.missionId}><strong>{row.title}</strong><span>{row.owner?.displayName ?? row.ownerEmail ?? '-'}</span><span>{money(row.spentCents ?? row.spendCents)}</span><span>{row.burnRateCentsPerMinute ?? 0}c/min</span></div>)}
+        {spend.map((row) => <div className="mp-row" key={row.missionId}><strong>{row.title}</strong><span>{row.owner?.displayName ?? row.ownerEmail ?? '-'}</span><span>{money(row.spentCents ?? row.spendCents ?? row.missionSpendCents)}</span><span>{row.burnRateCentsPerMinute ?? 0}c/min</span></div>)}
         {!spend.length ? <EmptyNote title={t('budget.empty.title')} body={t('budget.empty.body')} /> : null}
       </section>
     </>
@@ -170,8 +204,14 @@ function BudgetPage() {
 function EnvironmentPage() {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const workroomsMap = useAppStore((state) => state.workrooms);
-  const workroom = Object.values(workroomsMap)[0];
+  const missionsQuery = useQuery({ queryKey: queryKeys.missions, queryFn: api.missions });
+  const missionId = missionsQuery.data?.items[0]?.id;
+  const workroomQuery = useQuery({
+    queryKey: queryKeys.workroom(missionId ?? ''),
+    queryFn: () => api.workroom(missionId ?? ''),
+    enabled: Boolean(missionId),
+  });
+  const workroom = workroomQuery.data;
   const sandbox = workroom?.missionSandbox;
   return (
     <>
@@ -193,11 +233,16 @@ function ChatPage({ threadId }: { threadId?: string }) {
 
 function AdminPage() {
   const { t } = useTranslation();
-  const session = useAppStore((state) => state.session);
-  const overview = useAppStore((state) => state.adminOverview);
-  const users = useAppStore((state) => state.adminUsers);
-  const whitelist = useAppStore((state) => state.adminWhitelist);
-  const missions = useAppStore((state) => state.adminMissions);
+  const { session } = useAppStore(useShallow((state) => ({ session: state.session })));
+  const enabled = session?.role === 'admin';
+  const overviewQuery = useQuery({ queryKey: queryKeys.adminOverview, queryFn: api.adminOverview, enabled });
+  const usersQuery = useQuery({ queryKey: queryKeys.adminUsers, queryFn: api.adminUsers, enabled });
+  const whitelistQuery = useQuery({ queryKey: queryKeys.adminWhitelist, queryFn: api.adminWhitelist, enabled });
+  const missionsQuery = useQuery({ queryKey: queryKeys.adminMissions, queryFn: api.adminMissions, enabled });
+  const overview = overviewQuery.data;
+  const users = usersQuery.data?.items ?? [];
+  const whitelist = whitelistQuery.data?.items ?? [];
+  const missions = missionsQuery.data?.items ?? [];
   if (session?.role !== 'admin') return <div className="mp-denied">{t('admin.denied')}</div>;
   return (
     <>
@@ -211,7 +256,7 @@ function AdminPage() {
         <section className="mp-card"><h2>{t('admin.users')}</h2>{users.length ? users.map((user) => <div className="mp-row" key={user.userId}><span>{user.email}</span><span>{user.role}</span><span>{money(user.todaySpendCents ?? user.dailySpendCents)}</span><span>{money(user.dailyBudgetCents)}</span></div>) : <p className="mp-muted">{t('admin.empty.users')}</p>}</section>
         <section className="mp-card"><h2>{t('admin.whitelist')}</h2>{whitelist.length ? whitelist.map((entry) => <div className="mp-row" key={entry.id}><span>{entry.type}</span><span>{entry.value}</span><span>{String(Boolean(entry.enabled))}</span></div>) : <p className="mp-muted">{t('admin.empty.whitelist')}</p>}</section>
       </div>
-      <section className="mp-card"><h2>{t('admin.allMissions')}</h2>{missions.length ? missions.map((mission, index) => <div className="mp-row" key={mission.missionId ?? mission.title ?? index}><span>{mission.ownerEmail ?? '-'}</span><span>{mission.title}</span><span>{mission.status ?? '-'}</span><span>{money(mission.spendCents ?? mission.spentCents)}</span></div>) : <p className="mp-muted">{t('admin.empty.missions')}</p>}</section>
+        <section className="mp-card"><h2>{t('admin.allMissions')}</h2>{missions.length ? missions.map((mission, index) => <div className="mp-row" key={mission.missionId ?? mission.title ?? index}><span>{mission.ownerEmail ?? '-'}</span><span>{mission.title}</span><span>{mission.status ?? '-'}</span><span>{money(mission.spendCents ?? mission.spentCents ?? mission.missionSpendCents)}</span></div>) : <p className="mp-muted">{t('admin.empty.missions')}</p>}</section>
     </>
   );
 }

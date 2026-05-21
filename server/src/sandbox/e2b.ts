@@ -3,7 +3,7 @@ import { db } from "edgespark";
 import { and, eq } from "drizzle-orm";
 import { agentInstances, sandboxRuntime } from "../defs/db_schema";
 import { assertSafeId, assertSafeRelativePath } from "../lib/safe-paths";
-import { assertUserBudgetForMission, getMission, updateMission, upsertSandboxRuntime, type SandboxRef } from "../state/missionState";
+import { BudgetService, getMission, updateMission, upsertSandboxRuntime, type SandboxRef } from "../state/missionState";
 
 type SandboxTarget = "mission" | "private";
 
@@ -25,6 +25,7 @@ type E2BCreateResponse = {
 const E2B_API_BASE = "https://api.e2b.app";
 const DEFAULT_ENVD_PORT = 49983;
 export const WORKSPACE_ROOT = "/workspace";
+const DEFAULT_E2B_CENTS_PER_MIN = 0.45;
 const memorySandboxes = new Map<string, MemorySandbox>();
 
 function keyFor(missionId: string, target: SandboxTarget, instanceId?: string) {
@@ -50,6 +51,23 @@ export async function useMemoryMode() {
   const mode = vars.get("DEMO_E2B_MODE");
   const apiKey = await e2bApiKey();
   return mode === "memory" || !apiKey;
+}
+
+export function e2bCentsPerMinute() {
+  const value = Number(vars.get("MISSIONRY_E2B_CENTS_PER_MIN") ?? DEFAULT_E2B_CENTS_PER_MIN);
+  return Number.isFinite(value) && value >= 0 ? value : DEFAULT_E2B_CENTS_PER_MIN;
+}
+
+export function sandboxActiveSeconds(ref: SandboxRef, atMs = Date.now()) {
+  if (ref.state !== "running" || !ref.activeSince) return 0;
+  const started = Date.parse(ref.activeSince);
+  if (!Number.isFinite(started)) return 0;
+  return Math.max(0, (atMs - started) / 1000);
+}
+
+export function sandboxCostCentsForSeconds(seconds: number) {
+  if (seconds <= 0) return 0;
+  return Math.ceil((seconds / 60) * e2bCentsPerMinute());
 }
 
 function isE2bNotFound(error: unknown) {
@@ -335,7 +353,7 @@ function refFor(input: { missionId: string; instanceId?: string; target: Sandbox
     envdHost: routing.envdHost ?? envdHostFor(routing.sandboxID),
     lastActivityAt: timestamp,
     activeSince: state === "running" ? timestamp : undefined,
-    burnRateCentsPerMinute: state === "running" ? 0.45 : 0,
+    burnRateCentsPerMinute: state === "running" ? e2bCentsPerMinute() : 0,
     environmentVersionId: "env_v1",
     injectedCredentialIds: [],
     injectedVariableKeys: ["MISSION_ID"],
@@ -371,7 +389,7 @@ export async function resume(missionId: string, target: SandboxTarget, instanceI
 async function startOrResume(input: { missionId: string; instanceId?: string; target: SandboxTarget }): Promise<SandboxRef> {
   input.missionId = assertSafeId(input.missionId, "mission_id");
   if (input.instanceId) input.instanceId = assertSafeId(input.instanceId, "instance_id");
-  await assertUserBudgetForMission(input.missionId, 1);
+  await BudgetService.assertCanSpend(input.missionId, Math.max(1, sandboxCostCentsForSeconds(60)));
   const sandboxId = keyFor(input.missionId, input.target, input.instanceId);
 
   if (await useMemoryMode()) {
@@ -415,6 +433,7 @@ async function ensureRunningRef(ref: SandboxRef) {
 
 export async function runCommand(ref: SandboxRef, command: string) {
   const running = await ensureRunningRef(ref);
+  await BudgetService.assertCanSpend(missionIdFor(running), Math.max(1, sandboxCostCentsForSeconds(60)));
   if (await useMemoryMode()) {
     await touchSandbox(running);
     if (command.trim() === "false") return { exitCode: 1, stdout: "", stderr: "command exited with 1\n" };
@@ -431,6 +450,7 @@ export async function runCommand(ref: SandboxRef, command: string) {
 
 export async function writeFile(ref: SandboxRef, path: string, content: string) {
   const running = await ensureRunningRef(ref);
+  await BudgetService.assertCanSpend(missionIdFor(running), Math.max(1, sandboxCostCentsForSeconds(60)));
   if (await useMemoryMode()) {
     const sandbox = await ensureMemorySandbox(running.sandboxId);
     sandbox.files.set(workspacePath(path), content);
@@ -449,6 +469,7 @@ export async function writeFile(ref: SandboxRef, path: string, content: string) 
 
 export async function readFile(ref: SandboxRef, path: string) {
   const running = await ensureRunningRef(ref);
+  await BudgetService.assertCanSpend(missionIdFor(running), Math.max(1, sandboxCostCentsForSeconds(60)));
   if (await useMemoryMode()) {
     const sandbox = await ensureMemorySandbox(running.sandboxId);
     await touchSandbox(running);
@@ -474,8 +495,17 @@ export async function pauseIfIdle(ref: SandboxRef) {
     }
   }
   const paused = { ...ref, state: "paused" as const, burnRateCentsPerMinute: 0 };
+  paused.activeSince = undefined;
+  paused.lastActivityAt = new Date().toISOString();
   await persistRef(missionIdFor(ref), paused);
   return paused;
+}
+
+export async function resetSandboxBillingClock(ref: SandboxRef, timestamp = new Date().toISOString()) {
+  if (ref.state !== "running") return ref;
+  const next = { ...ref, activeSince: timestamp, lastActivityAt: timestamp };
+  await persistRef(missionIdFor(ref), next);
+  return next;
 }
 
 export type SandboxFileEntry = { name: string; path: string; displayPath?: string; type: "dir" | "file"; size?: number };

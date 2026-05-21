@@ -1,5 +1,9 @@
 import { NavLink, useLocation } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
+import { useQuery } from '@tanstack/react-query';
+import { useShallow } from 'zustand/react/shallow';
+import { api } from '../../lib/api';
+import { queryKeys } from '../../lib/query';
 import { useAppStore } from '../../lib/store';
 import type { ReactNode } from 'react';
 
@@ -12,9 +16,13 @@ type ShellProps = {
 
 export function Shell({ title, meta, actions, children }: ShellProps) {
   const { t, i18n } = useTranslation();
-  const session = useAppStore((state) => state.session);
-  const missions = useAppStore((state) => state.missions);
-  const adminMissions = useAppStore((state) => state.adminMissions);
+  const { session } = useAppStore(useShallow((state) => ({ session: state.session })));
+  const missionsQuery = useQuery({ queryKey: queryKeys.missions, queryFn: api.missions });
+  const adminMissionsQuery = useQuery({
+    queryKey: queryKeys.adminMissions,
+    queryFn: api.adminMissions,
+    enabled: session?.role === 'admin',
+  });
   const location = useLocation();
   const settingsOpen = location.pathname.startsWith('/settings');
 
@@ -35,7 +43,7 @@ export function Shell({ title, meta, actions, children }: ShellProps) {
           </div>
         </div>
         <nav className="mp-nav">
-          <NavItem to="/missions" label={t('nav.missions')} mark="●" count={missions.length || undefined} />
+          <NavItem to="/missions" label={t('nav.missions')} mark="●" count={missionsQuery.data?.items.length || undefined} />
           <NavItem to="/agents" label={t('nav.agents')} mark="◐" />
           <NavItem to="/artifacts" label={t('nav.artifacts')} mark="□" />
           <NavItem to="/growth" label={t('nav.growth')} mark="↻" />
@@ -47,7 +55,7 @@ export function Shell({ title, meta, actions, children }: ShellProps) {
               <NavItem to="/settings/account" label={t('nav.account')} mark="·" />
             </div>
           </details>
-          {session?.role === 'admin' ? <NavItem to="/admin" label={t('nav.admin')} mark="◆" count={adminMissions.length || undefined} /> : null}
+          {session?.role === 'admin' ? <NavItem to="/admin" label={t('nav.admin')} mark="◆" count={adminMissionsQuery.data?.items.length || undefined} /> : null}
         </nav>
       </aside>
       <main className="mp-main">

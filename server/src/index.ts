@@ -30,7 +30,7 @@ import { emitCostEvent, recentMissionEvents } from "./sse/events";
 import {
   defaultMissionState,
   getMission,
-  assertUserBudgetForMission,
+  BudgetService,
   listIdleSandboxes,
   privateSandboxSlot,
   recordAudit,
@@ -132,6 +132,38 @@ function estimateLlmCostCents(model: string, usage: Record<string, unknown>) {
   const row = pricing[model] ?? (model.includes("gpt-4o-mini") ? pricing["gpt-4o-mini"] : { inputPerMillion: 10, outputPerMillion: 30 });
   const dollars = (promptTokens * row.inputPerMillion + completionTokens * row.outputPerMillion) / 1_000_000;
   return Math.max(1, Math.ceil(dollars * 100));
+}
+
+async function billSandboxActiveInterval(input: { missionId: string; ref: SandboxRef; agentId?: string; instanceId?: string; resetClock?: boolean }) {
+  if (input.ref.state !== "running") return { seconds: 0, costCents: 0 };
+  const seconds = e2b.sandboxActiveSeconds(input.ref);
+  const costCents = e2b.sandboxCostCentsForSeconds(seconds);
+  if (costCents > 0) {
+    await emitCostEvent({
+      missionId: input.missionId,
+      agentId: input.agentId,
+      instanceId: input.instanceId ?? input.ref.ownerInstanceId,
+      sandboxId: input.ref.sandboxId,
+      sandboxSeconds: seconds,
+      costCents,
+      eventType: "sandbox_burn",
+    });
+  }
+  if (input.resetClock && input.ref.state === "running") await e2b.resetSandboxBillingClock(input.ref);
+  return { seconds, costCents };
+}
+
+function e2bSnapshotMetadata(ref: SandboxRef, pausedAt: string, bill: { seconds: number; costCents: number }) {
+  return {
+    kind: "e2b_pause_resume_ref",
+    sandboxId: ref.sandboxId,
+    e2bSandboxId: ref.e2bSandboxId ?? null,
+    state: "paused",
+    capturedAt: pausedAt,
+    sizeBytes: null,
+    billedSeconds: bill.seconds,
+    billedCostCents: bill.costCents,
+  };
 }
 
 async function storageObjectText(obj: unknown): Promise<string> {
@@ -830,6 +862,9 @@ async function startWorkCard(workCardId: string, missionIdFilter?: string) {
       action: "work_card_completed",
       diffSummary: "status:done",
     });
+    const billedMission = await getMission(missionId);
+    const billRef = sandboxAffinity.tier === "private" ? billedMission.stateJson.privateSandboxes[instance.id] : sandboxAffinity.tier === "mission" ? billedMission.stateJson.sharedSandbox : null;
+    if (billRef) await billSandboxActiveInterval({ missionId, ref: billRef, agentId: agent.id, instanceId: instance.id, resetClock: true });
     waitUntil(Promise.resolve(dequeueNextForAgent(agent.id)));
     return (await db.select().from(workCards).where(eq(workCards.id, workCardId)).limit(1))[0] ?? null;
   } catch (error) {
@@ -842,6 +877,9 @@ async function startWorkCard(workCardId: string, missionIdFilter?: string) {
       action: "work_card_failed",
       diffSummary: error instanceof Error ? error.message : "error.work_card.execution_failed",
     });
+    const billedMission = await getMission(missionId);
+    const billRef = sandboxAffinity.tier === "private" ? billedMission.stateJson.privateSandboxes[instance.id] : sandboxAffinity.tier === "mission" ? billedMission.stateJson.sharedSandbox : null;
+    if (billRef) await billSandboxActiveInterval({ missionId, ref: billRef, agentId: agent.id, instanceId: instance.id, resetClock: true });
     waitUntil(Promise.resolve(dequeueNextForAgent(agent.id)));
     return (await db.select().from(workCards).where(eq(workCards.id, workCardId)).limit(1))[0] ?? null;
   }
@@ -852,7 +890,6 @@ async function executeWorkCardMemoryMode(card: typeof workCards.$inferSelect, ag
   const path = `work-cards/${card.id}.md`;
   const body = [`# ${card.title}`, "", card.description ?? "No description.", "", `Status: executed in memory mode`, `Sandbox: ${ref.sandboxId}`].join("\n");
   await e2b.writeFile(ref, path, body);
-  await emitCostEvent({ missionId: card.missionId, agentId, instanceId, sandboxId: ref.sandboxId, sandboxSeconds: 1, costCents: 1, eventType: "sandbox_burn" });
   return `Completed in memory mode. Wrote /workspace/${path}.`;
 }
 
@@ -1081,12 +1118,12 @@ async function runAgentToolLoop(input: {
       model: modelName,
       promptTokens: 0,
       completionTokens: 0,
-      costCents: 1,
+      costCents: 0,
       eventType: "cost_event",
     });
     return input.stubBody;
   }
-  await assertUserBudgetForMission(input.missionId, 1);
+  await BudgetService.assertCanSpend(input.missionId, 1);
   const openai = createOpenAI({ apiKey });
   const rosterRows = await loadMissionAgentRows(input.missionId).catch(() => []);
   const agentRoster = rosterRows.map((row) => [
@@ -1234,39 +1271,27 @@ async function reconcileMissionSandboxRefs(missionId: string) {
 export async function reapIdleSandboxes() {
   const idleMs = Number(vars.get("MISSIONRY_IDLE_MS") ?? DEFAULT_IDLE_MS);
   const idle = await listIdleSandboxes(idleMs);
-  const snapshotKeys: string[] = [];
+  const snapshotRefs: Array<Record<string, unknown>> = [];
   for (const item of idle) {
+    const bill = await billSandboxActiveInterval({ missionId: item.mission.id, ref: item.ref, instanceId: item.instanceId });
     const paused = await e2b.pauseIfIdle(item.ref);
-    const snapshotKey =
-      item.target === "mission"
-        ? `missions/${item.mission.id}/snapshots/shared/latest.json`
-        : `missions/${item.mission.id}/snapshots/private/${item.instanceId}/latest.json`;
-    await storage.from(buckets.missionryWorkspaces).put(snapshotKey, JSON.stringify({ sandboxId: item.ref.sandboxId, pausedAt: now(), state: paused.state }, null, 2));
-    if (!(await storage.from(buckets.missionryWorkspaces).get(snapshotKey))) throw new Error("error.snapshot.write_failed");
-    snapshotKeys.push(snapshotKey);
+    const pausedAt = now();
+    const snapshotRef = e2bSnapshotMetadata(paused, pausedAt, bill);
+    snapshotRefs.push(snapshotRef);
     await updateMission(item.mission.id, (mission) => {
       if (item.target === "mission") {
         mission.stateJson.sharedSandbox = paused;
-        mission.stateJson.snapshots.sharedLatestR2Key = snapshotKey;
+        mission.stateJson.snapshots.sharedLatestE2B = snapshotRef;
       } else if (item.instanceId) {
         mission.stateJson.privateSandboxes[item.instanceId] = paused;
-        mission.stateJson.snapshots.privateLatestR2Keys[item.instanceId] = snapshotKey;
+        mission.stateJson.snapshots.privateLatestE2BRefs ??= {};
+        mission.stateJson.snapshots.privateLatestE2BRefs[item.instanceId] = snapshotRef;
       }
-      mission.stateJson.snapshots.lastSnapshotAt = now();
+      mission.stateJson.snapshots.lastSnapshotAt = pausedAt;
       return mission;
     });
-    // Pausing/reaping an idle sandbox is FREE — it stops future burn, it must not
-    // charge. We still emit a 0-cost event so the pause shows in the activity feed.
-    await emitCostEvent({
-      missionId: item.mission.id,
-      instanceId: item.instanceId,
-      sandboxId: item.ref.sandboxId,
-      sandboxSeconds: item.ref.activeSince ? Math.max(1, (Date.now() - Date.parse(item.ref.activeSince)) / 1000) : 1,
-      costCents: 0,
-      eventType: "sandbox_burn",
-    });
   }
-  return { checkedMissions: new Set(idle.map((item) => item.mission.id)).size, pausedSandboxes: idle.length, snapshotKeys, recoverableErrors: [] as string[] };
+  return { checkedMissions: new Set(idle.map((item) => item.mission.id)).size, pausedSandboxes: idle.length, snapshotRefs, recoverableErrors: [] as string[] };
 }
 
 app.use("/api/public/*", async (c, next) => {
@@ -1288,6 +1313,55 @@ app.get("/api/public/health", (c) => c.json({ ok: true, service: "missionry-api"
 app.get("/api/public/me", (c) => {
   const profile = currentUserProfile(c);
   return c.json({ userId: profile.userId, email: profile.email, role: profile.role });
+});
+
+app.get("/api/public/settings/budget", async (c) => {
+  const profile = currentUserProfile(c);
+  const missionRows = await db.select().from(missions);
+  const visible = [];
+  for (const mission of missionRows) {
+    if (await userHasMissionAccess(profile, mission.id)) visible.push(mission);
+  }
+  return c.json({
+    user: {
+      userId: profile.userId,
+      email: profile.email,
+      dailyBudgetCents: profile.dailyBudgetCents,
+      dailySpendCents: profile.dailySpendCents,
+      dailyRemainingCents: Math.max(0, profile.dailyBudgetCents - profile.dailySpendCents),
+    },
+    aggregate: {
+      missionCount: visible.length,
+      missionSpendCents: visible.reduce((sum, row) => sum + row.missionSpendCents, 0),
+      llmSpendCents: visible.reduce((sum, row) => sum + row.llmSpendCents, 0),
+      sandboxSpendCents: visible.reduce((sum, row) => sum + row.sandboxSpendCents, 0),
+    },
+    rates: {
+      e2bCentsPerMinute: e2b.e2bCentsPerMinute(),
+      e2bCostFormula: "ceil((active_wall_clock_seconds / 60) * MISSIONRY_E2B_CENTS_PER_MIN)",
+      llmPricing: { "gpt-5.5": { inputPerMillionUsd: 5, outputPerMillionUsd: 30 } },
+    },
+  });
+});
+
+app.get("/api/public/settings/budget/missions", async (c) => {
+  const profile = currentUserProfile(c);
+  const missionRows = await db.select().from(missions).orderBy(desc(missions.updatedAt));
+  const items = [];
+  for (const mission of missionRows) {
+    if (!(await userHasMissionAccess(profile, mission.id))) continue;
+    items.push({
+      missionId: mission.id,
+      title: mission.title,
+      dailyBudgetCents: mission.dailyBudgetCents,
+      missionSpendCents: mission.missionSpendCents,
+      llmSpendCents: mission.llmSpendCents,
+      sandboxSpendCents: mission.sandboxSpendCents,
+      burnRateCentsPerMinute: mission.burnRateCentsPerMinute,
+      updatedAt: mission.updatedAt,
+    });
+  }
+  return c.json({ items });
 });
 
 app.post("/api/public/auth/whitelist-check", async (c) => {
@@ -1748,7 +1822,16 @@ app.post("/api/public/missions/:id/sandbox/pause", async (c) => {
   if (denied) return denied;
   const missionId = assertSafeId(c.req.param("id"), "mission_id");
   const mission = await getMission(missionId);
+  const bill = await billSandboxActiveInterval({ missionId, ref: mission.stateJson.sharedSandbox });
   const ref = await e2b.pauseIfIdle(mission.stateJson.sharedSandbox);
+  const pausedAt = now();
+  const snapshotRef = e2bSnapshotMetadata(ref, pausedAt, bill);
+  await updateMission(missionId, (current) => {
+    current.stateJson.sharedSandbox = ref;
+    current.stateJson.snapshots.sharedLatestE2B = snapshotRef;
+    current.stateJson.snapshots.lastSnapshotAt = pausedAt;
+    return current;
+  });
   const auditEventId = await recordAudit({
     missionId,
     subjectType: "sandbox",
@@ -1757,7 +1840,7 @@ app.post("/api/public/missions/:id/sandbox/pause", async (c) => {
     action: "sandbox_paused",
     diffSummary: "mission",
   });
-  return c.json({ actionId: crypto.randomUUID(), status: "completed", sandbox: publicSandboxRef(ref), auditEventId });
+  return c.json({ actionId: crypto.randomUUID(), status: "completed", sandbox: publicSandboxRef(ref), snapshotRef, auditEventId });
 });
 
 app.post("/api/public/missions/:id/agent-instances/:instanceId/sandbox/start", async (c) => {
@@ -1785,7 +1868,18 @@ app.post("/api/public/missions/:id/agent-instances/:instanceId/sandbox/pause", a
   const instanceId = assertSafeId(c.req.param("instanceId"), "instance_id");
   await e2b.assertInstanceInMission(missionId, instanceId);
   const mission = await getMission(missionId);
-  const ref = await e2b.pauseIfIdle(mission.stateJson.privateSandboxes[instanceId] ?? privateSandboxSlot(missionId, instanceId));
+  const currentRef = mission.stateJson.privateSandboxes[instanceId] ?? privateSandboxSlot(missionId, instanceId);
+  const bill = await billSandboxActiveInterval({ missionId, ref: currentRef, instanceId });
+  const ref = await e2b.pauseIfIdle(currentRef);
+  const pausedAt = now();
+  const snapshotRef = e2bSnapshotMetadata(ref, pausedAt, bill);
+  await updateMission(missionId, (current) => {
+    current.stateJson.privateSandboxes[instanceId] = ref;
+    current.stateJson.snapshots.privateLatestE2BRefs ??= {};
+    current.stateJson.snapshots.privateLatestE2BRefs[instanceId] = snapshotRef;
+    current.stateJson.snapshots.lastSnapshotAt = pausedAt;
+    return current;
+  });
   const auditEventId = await recordAudit({
     missionId,
     subjectType: "sandbox",
@@ -1794,7 +1888,7 @@ app.post("/api/public/missions/:id/agent-instances/:instanceId/sandbox/pause", a
     action: "sandbox_paused",
     diffSummary: `private:${instanceId}`,
   });
-  return c.json({ actionId: crypto.randomUUID(), status: "completed", sandbox: publicSandboxRef(ref), auditEventId });
+  return c.json({ actionId: crypto.randomUUID(), status: "completed", sandbox: publicSandboxRef(ref), snapshotRef, auditEventId });
 });
 
 app.post("/api/public/missions/:id/agent-instances/:instanceId/direct-thread", async (c) => {
@@ -1871,6 +1965,7 @@ app.get("/api/public/missions/:id/workroom", async (c) => {
       active: mission.stateJson.sharedSandbox.state === "running",
       repoPath: "/workspace/repos/demo",
       r2SnapshotKey: mission.stateJson.snapshots.sharedLatestR2Key,
+      e2bResumeRef: mission.stateJson.snapshots.sharedLatestE2B ?? null,
       processes: [],
     },
     agentInstances: instanceRows.map((row) => missionAgentInstanceResponse(row, mission)),
@@ -2121,7 +2216,7 @@ app.post("/api/public/direct-threads/:threadId/messages", async (c) => {
 async function generateDirectAgentReply(agentId: string, instanceId: string, missionId: string, userBody: string, clientActionId?: string) {
   const apiKey = forceMockAi() ? undefined : await Promise.resolve(secret.get("OPENAI_API_KEY")).catch(() => undefined);
   if (!apiKey) {
-    await emitCostEvent({ missionId, agentId, instanceId, costCents: 1, eventType: "cost_event" });
+    await emitCostEvent({ missionId, agentId, instanceId, promptTokens: 0, completionTokens: 0, costCents: 0, eventType: "cost_event" });
     return `Acknowledged. I will handle: ${userBody}`;
   }
   const boot = await loadAgentBootFiles(agentId);

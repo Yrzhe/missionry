@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../../../lib/api';
-import { useAppStore } from '../../../lib/store';
+import { invalidateMission, queryKeys } from '../../../lib/query';
 import type { TFunction } from 'i18next';
 import type {
   CreateWorkCardInput,
@@ -37,15 +38,25 @@ export function Workroom() {
   const { id } = useParams();
   const navigate = useNavigate();
   const { t } = useTranslation();
-  const workroom = useAppStore((state) => (id ? state.workrooms[id] : undefined));
-  const isWorkroomLoading = useAppStore((state) => (id ? state.workroomLoading[id] === true : false));
-  const setWorkroom = useAppStore((state) => state.setWorkroom);
-  const missionChatsMap = useAppStore((state) => state.missionChats);
-  const chatMessages = id ? missionChatsMap[id] ?? EMPTY_MESSAGES : EMPTY_MESSAGES;
-  const setMissionChat = useAppStore((state) => state.setMissionChat);
-  const appendMissionChat = useAppStore((state) => state.appendMissionChat);
-  const storeEvents = useAppStore((state) => state.events);
+  const queryClient = useQueryClient();
   const [activeTab, setActiveTab] = useState<WorkroomTab>('plan');
+  const workroomQuery = useQuery({
+    queryKey: queryKeys.workroom(id ?? ''),
+    queryFn: () => api.workroom(id ?? ''),
+    enabled: Boolean(id),
+  });
+  const chatQuery = useQuery({
+    queryKey: queryKeys.missionChat(id ?? ''),
+    queryFn: () => api.missionChat(id ?? ''),
+    enabled: Boolean(id),
+  });
+  const eventsQuery = useQuery({
+    queryKey: queryKeys.missionEvents(id ?? ''),
+    queryFn: () => api.missionEvents(id ?? ''),
+    enabled: Boolean(id) && activeTab === 'activity',
+  });
+  const workroom = workroomQuery.data;
+  const chatMessages = chatQuery.data?.items ?? EMPTY_MESSAGES;
   const [modalOpen, setModalOpen] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -58,8 +69,6 @@ export function Workroom() {
   const [planAction, setPlanAction] = useState(false);
   const [workCardAction, setWorkCardAction] = useState<string | null>(null);
   const [directThreadAction, setDirectThreadAction] = useState<string | null>(null);
-  const [remoteEvents, setRemoteEvents] = useState<MissionEvent[]>(EMPTY_EVENTS);
-  const lastRefreshEvent = useRef<string | null>(null);
 
   const defaultAssignee = workroom?.agentInstances[0]?.instance.id ?? '';
   const selectedAssignee = form.assigneeInstanceId || defaultAssignee;
@@ -68,65 +77,65 @@ export function Workroom() {
   const mentionQuery = chatBody.match(/@([\w.-]*)$/)?.[1].toLowerCase();
   const mentionOptions = mentionQuery === undefined ? [] : (workroom?.agentInstances ?? []).filter((row) => row.agent.displayName.toLowerCase().includes(mentionQuery)).slice(0, 5);
   const missionEvents = useMemo(() => {
-    const local = storeEvents.filter((event) => !id || event.missionId === id);
-    const source = remoteEvents.length ? remoteEvents : local;
+    const source = eventsQuery.data?.items ?? EMPTY_EVENTS;
     return [...source].sort((a, b) => eventTime(b) - eventTime(a));
-  }, [id, remoteEvents, storeEvents]);
+  }, [eventsQuery.data?.items]);
 
   const guardrailProgress = useMemo(() => {
     if (!workroom?.metricStrip.dailyBudgetCents) return 0;
     return Math.min(100, Math.round((workroom.metricStrip.missionSpendCents / workroom.metricStrip.dailyBudgetCents) * 100));
   }, [workroom]);
 
-  useEffect(() => {
+  function refreshMissionQueries() {
     if (!id) return;
-    let alive = true;
-    api.missionChat(id)
-      .then((response) => {
-        if (alive) setMissionChat(id, response.items);
-      })
-      .catch(() => undefined);
-    return () => {
-      alive = false;
-    };
-  }, [id, setMissionChat]);
+    invalidateMission(id);
+  }
 
-  useEffect(() => {
-    if (!id || activeTab !== 'activity') return;
-    let alive = true;
-    api.missionEvents(id)
-      .then((response) => {
-        if (alive) setRemoteEvents(response.items);
-      })
-      .catch(() => undefined);
-    return () => {
-      alive = false;
-    };
-  }, [activeTab, id]);
+  const generatePlanMutation = useMutation({
+    mutationFn: () => api.decomposeMission(id ?? ''),
+    onSuccess: refreshMissionQueries,
+  });
 
-  const refreshWorkroom = useCallback(async () => {
-    if (!id) return;
-    const next = await api.workroom(id);
-    setWorkroom(id, next);
-  }, [id, setWorkroom]);
+  const startWorkCardMutation = useMutation({
+    mutationFn: (workCardId: string) => api.startWorkCard(id ?? '', workCardId),
+    onSuccess: refreshMissionQueries,
+  });
 
-  useEffect(() => {
-    if (!id) return;
-    const event = storeEvents.find((item) => item.missionId === id && shouldRefreshWorkroom(item.type));
-    if (!event) return;
-    const eventKey = `${event.auditEventId ?? event.type}:${event.occurredAt ?? ''}:${event.payload?.subjectId ?? ''}`;
-    if (lastRefreshEvent.current === eventKey) return;
-    lastRefreshEvent.current = eventKey;
-    void refreshWorkroom().catch(() => undefined);
-  }, [id, refreshWorkroom, storeEvents]);
+  const createWorkCardMutation = useMutation({
+    mutationFn: (input: CreateWorkCardInput) => api.createWorkCard(id ?? '', input),
+    onSuccess: refreshMissionQueries,
+  });
+
+  const sandboxMutation = useMutation({
+    mutationFn: (action: () => Promise<unknown>) => action(),
+    onSuccess: refreshMissionQueries,
+  });
+
+  const sendChatMutation = useMutation({
+    mutationFn: (body: string) => api.sendMissionChat(id ?? '', body),
+    onSuccess: async (response) => {
+      if (!id) return;
+      queryClient.setQueryData<{ items: MissionChatMessage[] }>(queryKeys.missionChat(id), (existing) => {
+        const byId = new Map((existing?.items ?? []).map((message) => [message.id, message]));
+        if (response.message) byId.set(response.message.id, response.message);
+        response.agentReplies.forEach((reply) => byId.set(reply.id, reply));
+        return { items: Array.from(byId.values()).sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt)) };
+      });
+      await queryClient.invalidateQueries({ queryKey: queryKeys.missionChat(id) });
+      setChatBody('');
+    },
+  });
+
+  const directThreadMutation = useMutation({
+    mutationFn: (instanceId: string) => api.createDirectThread(id ?? '', instanceId),
+  });
 
   async function generatePlan() {
     if (!id) return;
     setPlanAction(true);
     setError(null);
     try {
-      await api.decomposeMission(id);
-      await refreshWorkroom();
+      await generatePlanMutation.mutateAsync();
     } catch (planError) {
       setError(planError instanceof Error ? planError.message : t('workroom.generatePlan.error'));
     } finally {
@@ -139,8 +148,7 @@ export function Workroom() {
     setWorkCardAction(workCardId);
     setError(null);
     try {
-      await api.startWorkCard(id, workCardId);
-      await refreshWorkroom();
+      await startWorkCardMutation.mutateAsync(workCardId);
     } catch (startError) {
       setError(startError instanceof Error ? startError.message : t('workroom.startCard.error'));
     } finally {
@@ -153,7 +161,7 @@ export function Workroom() {
     setDirectThreadAction(instanceId);
     setError(null);
     try {
-      const response = await api.createDirectThread(id, instanceId);
+      const response = await directThreadMutation.mutateAsync(instanceId);
       navigate(`/chat/${response.chatThreadId}`);
     } catch (threadError) {
       setError(threadError instanceof Error ? threadError.message : t('workroom.directThread.error'));
@@ -168,14 +176,13 @@ export function Workroom() {
     setError(null);
     setIsSubmitting(true);
     try {
-      await api.createWorkCard(id, {
+      await createWorkCardMutation.mutateAsync({
         title: form.title.trim(),
         description: form.description.trim() || undefined,
         assigneeInstanceId: selectedAssignee,
         status: 'approved',
         sandboxAffinity: { tier: form.tier, reason: 'manual' },
       });
-      await refreshWorkroom();
       setModalOpen(false);
       setForm({ title: '', description: '', assigneeInstanceId: '', tier: 'tier0' });
     } catch (createError) {
@@ -189,8 +196,7 @@ export function Workroom() {
     setSandboxAction(key);
     setError(null);
     try {
-      await action();
-      await refreshWorkroom();
+      await sandboxMutation.mutateAsync(action);
     } catch (actionError) {
       setError(actionError instanceof Error ? actionError.message : t('workroom.sandboxActionError'));
     } finally {
@@ -204,10 +210,7 @@ export function Workroom() {
     setChatError(null);
     setIsSendingChat(true);
     try {
-      const response = await api.sendMissionChat(id, chatBody.trim());
-      if (response.message) appendMissionChat(id, response.message);
-      response.agentReplies.forEach((reply) => appendMissionChat(id, reply));
-      setChatBody('');
+      await sendChatMutation.mutateAsync(chatBody.trim());
     } catch (sendError) {
       setChatError(sendError instanceof Error ? sendError.message : t('workroom.chat.sendError'));
     } finally {
@@ -220,7 +223,7 @@ export function Workroom() {
     setChatBody((current) => current.replace(/@[\w.-]*$/, `@${handle} `));
   }
 
-  if (!workroom && isWorkroomLoading) {
+  if (!workroom && workroomQuery.isLoading) {
     return (
       <Shell title={t('workroom.route')} meta={<span className="mp-muted">{t('workroom.loadingMeta')}</span>}>
         <div className="mp-empty"><h2>{t('common.loading')}</h2><p>{t('workroom.loadingMeta')}</p></div>
@@ -231,7 +234,7 @@ export function Workroom() {
   if (!workroom) {
     return (
       <Shell title={t('workroom.route')} meta={<span className="mp-muted">{t('workroom.loadingMeta')}</span>}>
-        <div className="mp-empty mp-empty-cta"><h2>{t('workroom.empty.title')}</h2><p>{t('workroom.empty.body')}</p></div>
+        <div className="mp-empty mp-empty-cta"><h2>{t('workroom.empty.title')}</h2><p>{workroomQuery.error instanceof Error ? workroomQuery.error.message : t('workroom.empty.body')}</p></div>
       </Shell>
     );
   }
@@ -470,56 +473,29 @@ function eventActionLabel(type: string, t: TFunction) {
   return t(`workroom.activity.action.${type}`, { defaultValue: type.replace(/_/g, ' ') });
 }
 
-function shouldRefreshWorkroom(type: string) {
-  return ['work_card_allocated', 'work_card_assigned', 'work_card_queued', 'work_card_dequeued', 'work_card_updated', 'work_card_started', 'work_card_completed', 'work_card_failed', 'mission_spend_updated', 'sandbox_burn', 'cost_event'].includes(type);
-}
-
 function FileBrowser({ missionId, expanded = false }: { missionId: string; expanded?: boolean }) {
   const { t } = useTranslation();
   const [path, setPath] = useState(ROOT_PATH);
-  const [entries, setEntries] = useState<MissionFileEntry[]>([]);
-  const [selected, setSelected] = useState<MissionFileContent | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [contentError, setContentError] = useState<string | null>(null);
+  const [selectedPath, setSelectedPath] = useState<string | null>(null);
+  const filesQuery = useQuery({
+    queryKey: queryKeys.missionFiles(missionId, path),
+    queryFn: () => api.missionFiles(missionId, path),
+  });
+  const contentQuery = useQuery({
+    queryKey: queryKeys.missionFileContent(missionId, selectedPath ?? ''),
+    queryFn: () => api.missionFileContent(missionId, selectedPath ?? ''),
+    enabled: selectedPath !== null,
+  });
+  const entries: MissionFileEntry[] = filesQuery.data?.items ?? [];
+  const selected: MissionFileContent | undefined = contentQuery.data;
 
-  useEffect(() => {
-    let alive = true;
-    setLoading(true);
-    setError(null);
-    api.missionFiles(missionId, path)
-      .then((response) => {
-        if (alive) setEntries(response.items);
-      })
-      .catch((fileError) => {
-        if (alive) {
-          setEntries([]);
-          setError(fileError instanceof Error ? fileError.message : t('workroom.files.error'));
-        }
-      })
-      .finally(() => {
-        if (alive) setLoading(false);
-      });
-    return () => {
-      alive = false;
-    };
-  }, [missionId, path, t]);
-
-  async function openEntry(entry: MissionFileEntry) {
+  function openEntry(entry: MissionFileEntry) {
     if (entry.type === 'directory') {
       setPath(entry.path);
-      setSelected(null);
-      setContentError(null);
+      setSelectedPath(null);
       return;
     }
-    setContentError(null);
-    try {
-      const content = await api.missionFileContent(missionId, entry.path);
-      setSelected(content);
-    } catch (openError) {
-      setSelected(null);
-      setContentError(openError instanceof Error ? openError.message : t('workroom.files.previewError'));
-    }
+    setSelectedPath(entry.path);
   }
 
   return (
@@ -529,14 +505,14 @@ function FileBrowser({ missionId, expanded = false }: { missionId: string; expan
           <strong>{t('workroom.files.title')}</strong>
           <p className="mp-muted">{t('workroom.files.subtitle')}</p>
         </div>
-        {path ? <button className="mp-button" onClick={() => { setPath(ROOT_PATH); setSelected(null); }}>{t('workroom.files.root')}</button> : null}
+        {path ? <button className="mp-button" onClick={() => { setPath(ROOT_PATH); setSelectedPath(null); }}>{t('workroom.files.root')}</button> : null}
       </div>
-      {error ? <div className="mp-denied">{t('workroom.files.error')} · {error}</div> : null}
+      {filesQuery.isError ? <div className="mp-denied">{t('workroom.files.error')} · {filesQuery.error instanceof Error ? filesQuery.error.message : ''}</div> : null}
       <div className="mp-file-grid">
         <div className="mp-file-list">
-          {loading ? <div className="mp-muted">{t('common.loading')}</div> : null}
+          {filesQuery.isLoading ? <div className="mp-muted">{t('common.loading')}</div> : null}
           {entries.length ? entries.map((entry) => (
-            <button className="mp-file-row" key={entry.path} onClick={() => void openEntry(entry)}>
+            <button className="mp-file-row" key={entry.path} onClick={() => openEntry(entry)}>
               <span>{t(entry.type === 'directory' ? 'workroom.files.kind.directory' : 'workroom.files.kind.file')}</span>
               <strong>{entry.name}</strong>
               <span className="mp-muted">{entry.size ? `${Math.round(entry.size / 1024)} KB` : ''}</span>
@@ -549,7 +525,7 @@ function FileBrowser({ missionId, expanded = false }: { missionId: string; expan
               <div className="mp-label">{selected.path}</div>
               {selected.path.endsWith('.md') || selected.mimeType?.includes('markdown') ? <Markdown value={selected.content} /> : <pre>{selected.content}</pre>}
             </>
-          ) : contentError ? <p className="mp-denied">{t('workroom.files.previewError')} · {contentError}</p> : <p className="mp-muted">{t('workroom.files.select')}</p>}
+          ) : contentQuery.isError ? <p className="mp-denied">{t('workroom.files.previewError')} · {contentQuery.error instanceof Error ? contentQuery.error.message : ''}</p> : contentQuery.isLoading ? <p className="mp-muted">{t('common.loading')}</p> : <p className="mp-muted">{t('workroom.files.select')}</p>}
         </div>
       </div>
     </div>

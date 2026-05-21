@@ -66,3 +66,4 @@ docs/implementation/notes.html
 **/.edgespark/state/
 **/.edgespark/staleness.json
 .dev.vars
+**/.edgespark/tmp/

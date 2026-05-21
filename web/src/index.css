@@ -954,9 +954,12 @@ strong { font-weight: 650; }
 
 .mp-chat-panel {
   display: grid;
-  grid-template-rows: auto minmax(200px, 1fr) auto auto;
+  grid-template-rows: auto minmax(0, 1fr) auto auto;
   min-height: 480px;
-  max-height: none;
+  /* Bounded height so the 1fr chat-scroll row is constrained and actually
+     scrolls instead of growing the panel to fit every message. */
+  height: min(680px, calc(100vh - 120px));
+  max-height: min(680px, calc(100vh - 120px));
 }
 
 .mp-inline-check {

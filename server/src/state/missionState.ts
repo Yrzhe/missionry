@@ -29,6 +29,8 @@ export type MissionStateJson = {
   snapshots: {
     sharedLatestR2Key?: string;
     privateLatestR2Keys: Record<string, string>;
+    sharedLatestE2B?: Record<string, unknown>;
+    privateLatestE2BRefs?: Record<string, Record<string, unknown>>;
     lastSnapshotAt?: string;
     lastRestoreAt?: string;
   };
@@ -201,7 +203,7 @@ export async function assertUserBudgetForMission(missionId: string, estimatedCos
   const mission = await getMission(missionId);
   const userId = mission.ownerUserId ?? "system";
   const profile = await getOrCreateBudgetProfile(userId);
-  if (profile.dailySpendCents + estimatedCostCents < profile.dailyBudgetCents) return profile;
+  if (profile.dailySpendCents + estimatedCostCents <= profile.dailyBudgetCents) return profile;
   await recordAudit({
     missionId,
     subjectType: "user",
@@ -212,6 +214,10 @@ export async function assertUserBudgetForMission(missionId: string, estimatedCos
   });
   throw new Error("error.user.daily_cap_hit");
 }
+
+export const BudgetService = {
+  assertCanSpend: assertUserBudgetForMission,
+};
 
 export async function recordAudit(event: AuditRecord): Promise<string> {
   const id = crypto.randomUUID();

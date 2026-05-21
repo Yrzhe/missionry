@@ -1,4 +1,4 @@
-import { storage, db } from "edgespark";
+import { storage, db, secret } from "edgespark";
 import { tool } from "ai";
 import { eq, and } from "drizzle-orm";
 import { z } from "zod";
@@ -7,7 +7,6 @@ import { agents, auditEvents, workCards } from "../defs/db_schema";
 import { buckets } from "../defs/storage_schema";
 import { assertSafeId, assertSafeRelativePath } from "../lib/safe-paths";
 import * as e2b from "../sandbox/e2b";
-import { emitCostEvent } from "../sse/events";
 import { getMission, recordAudit, type SandboxRef } from "../state/missionState";
 
 export type ToolContext = {
@@ -57,22 +56,8 @@ async function storageObjectText(obj: unknown): Promise<string> {
 }
 
 async function withUsageAndSpend<T>(name: string, ctx: ToolContext, handler: () => Promise<T>) {
-  const started = Date.now();
   try {
-    const result = await handler();
-    const elapsed = Math.max(1, (Date.now() - started) / 1000);
-    if (["run_command", "write_file", "read_file"].includes(name)) {
-      await emitCostEvent({
-        missionId: ctx.missionId,
-        clientActionId: ctx.clientActionId,
-        agentId: ctx.agentId,
-        instanceId: ctx.instanceId,
-        costCents: Math.max(1, Math.ceil(elapsed * 0.01)),
-        sandboxSeconds: elapsed,
-        eventType: "sandbox_burn",
-      });
-    }
-    return result;
+    return await handler();
   } catch (error) {
     await recordAudit({
       missionId: ctx.missionId,
@@ -85,6 +70,23 @@ async function withUsageAndSpend<T>(name: string, ctx: ToolContext, handler: () 
     });
     throw error;
   }
+}
+
+function shellQuote(value: string) {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+async function repoUrlForClone(repoUrl: string) {
+  const parsed = new URL(repoUrl);
+  const token = parsed.hostname === "github.com" ? await Promise.resolve(secret.get("GITHUB_TOKEN" as any)).catch(() => undefined) : undefined;
+  if (token && parsed.protocol === "https:") parsed.username = token;
+  return parsed.toString();
+}
+
+function repoDirName(repoUrl: string) {
+  const parsed = new URL(repoUrl);
+  const last = parsed.pathname.split("/").filter(Boolean).at(-1)?.replace(/\.git$/i, "") || "repo";
+  return assertSafeRelativePath(last.toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "repo");
 }
 
 export function missionryToolKit(ctx: ToolContext) {
@@ -104,7 +106,7 @@ export function missionryToolKit(ctx: ToolContext) {
         withUsageAndSpend("run_command", ctx, async () => {
           const ref = await resolveSandbox(ctx, input.sandbox_target);
           const result = await e2b.runCommand(ref, input.command);
-          return { ...result, sandboxId: ref.sandboxId };
+          return { ...result, sandboxId: ref.sandboxId, capabilityStatus: "real" as const };
         }),
     }),
     write_file: tool({
@@ -115,7 +117,7 @@ export function missionryToolKit(ctx: ToolContext) {
           const ref = await resolveSandbox(ctx, input.sandbox_target);
           const path = assertSafeRelativePath(input.path);
           await e2b.writeFile(ref, path, input.content);
-          return { path, sandboxId: ref.sandboxId };
+          return { path, sandboxId: ref.sandboxId, capabilityStatus: "real" as const };
         }),
     }),
     read_file: tool({
@@ -125,7 +127,7 @@ export function missionryToolKit(ctx: ToolContext) {
         withUsageAndSpend("read_file", ctx, async () => {
           const ref = await resolveSandbox(ctx, input.sandbox_target);
           const path = assertSafeRelativePath(input.path);
-          return { path, content: await e2b.readFile(ref, path), sandboxId: ref.sandboxId };
+          return { path, content: await e2b.readFile(ref, path), sandboxId: ref.sandboxId, capabilityStatus: "real" as const };
         }),
     }),
     read_artifact: tool({
@@ -149,7 +151,7 @@ export function missionryToolKit(ctx: ToolContext) {
           const filename = assertSafeRelativePath(input.filename);
           const key = `missions/${ctx.missionId}/artifacts/${artifactId}/${filename}`;
           await storage.from(buckets.missionryWorkspaces).put(key, input.content);
-          return { key };
+          return { key, capabilityStatus: "real" as const };
         }),
     }),
     escalate_to_private_sandbox: tool({
@@ -179,7 +181,7 @@ export function missionryToolKit(ctx: ToolContext) {
             .update(workCards)
             .set({ status: input.status, updatedAt: new Date().toISOString() })
             .where(and(eq(workCards.id, input.workCardId), eq(workCards.missionId, ctx.missionId)));
-          return { workCardId: input.workCardId, status: input.status };
+          return { workCardId: input.workCardId, status: input.status, capabilityStatus: "real" as const };
         }),
     }),
     assign_work_card: tool({
@@ -232,7 +234,7 @@ export function missionryToolKit(ctx: ToolContext) {
               }),
             ]);
             if (updated.length !== 1) throw new Error("error.work_card.assign_failed");
-            return { workCardId, status: "queued", assigneeInstanceId, auditEventId };
+            return { workCardId, status: "queued", assigneeInstanceId, auditEventId, capabilityStatus: "real" as const };
           }
           if (!input.title) throw new Error("error.request.invalid");
           const workCardId = `wc_${crypto.randomUUID().slice(0, 8)}`;
@@ -270,7 +272,7 @@ export function missionryToolKit(ctx: ToolContext) {
               createdAt: timestamp,
             }),
           ]);
-          return { workCardId, status: "queued", assigneeInstanceId, auditEventId };
+          return { workCardId, status: "queued", assigneeInstanceId, auditEventId, capabilityStatus: "real" as const };
         }),
     }),
     commit_self_update: tool({
@@ -302,47 +304,55 @@ export function missionryToolKit(ctx: ToolContext) {
     use_skill: tool({
       description: "Load a skill body lazily from storage.",
       inputSchema: z.object({ skill_id: z.string() }),
-      execute: (input) => withUsageAndSpend("use_skill", ctx, async () => ({ body: await loadSkill(ctx.agentId, assertSafeId(input.skill_id, "skill_id")) })),
+      execute: (input) => withUsageAndSpend("use_skill", ctx, async () => ({ body: await loadSkill(ctx.agentId, assertSafeId(input.skill_id, "skill_id")), capabilityStatus: "real" as const })),
     }),
     web_fetch: tool({
       description: "Fetch a URL without opening a sandbox.",
       inputSchema: z.object({ url: z.string().url() }),
-      execute: (input) => withUsageAndSpend("web_fetch", ctx, async () => ({ url: input.url, text: await (await fetch(input.url)).text() })),
+      execute: (input) => withUsageAndSpend("web_fetch", ctx, async () => ({ url: input.url, text: await (await fetch(input.url)).text(), capabilityStatus: "real" as const })),
     }),
     web_search: tool({
       description: "Phase 1 search stub.",
       inputSchema: z.object({ query: z.string() }),
-      execute: (input) => withUsageAndSpend("web_search", ctx, async () => ({ query: input.query, results: [] })),
+      execute: (input) => withUsageAndSpend("web_search", ctx, async () => ({ query: input.query, results: [], capabilityStatus: "stub" as const })),
     }),
     terminal_create: tool({
       description: "Phase 1 terminal stub.",
       inputSchema: z.object({ command: z.string() }),
-      execute: (input) => withUsageAndSpend("terminal_create", ctx, async () => ({ terminalSessionId: crypto.randomUUID(), command: input.command })),
+      execute: (input) => withUsageAndSpend("terminal_create", ctx, async () => ({ terminalSessionId: crypto.randomUUID(), command: input.command, capabilityStatus: "stub" as const })),
     }),
     terminal_input: tool({
       description: "Phase 1 terminal input stub.",
       inputSchema: z.object({ terminalSessionId: z.string(), input: z.string() }),
-      execute: (input) => withUsageAndSpend("terminal_input", ctx, async () => ({ terminalSessionId: input.terminalSessionId, accepted: true })),
+      execute: (input) => withUsageAndSpend("terminal_input", ctx, async () => ({ terminalSessionId: input.terminalSessionId, accepted: true, capabilityStatus: "stub" as const })),
     }),
     git_clone: tool({
-      description: "Phase 1 git clone stub.",
-      inputSchema: z.object({ repoUrl: z.string() }),
-      execute: (input) => withUsageAndSpend("git_clone", ctx, async () => ({ repoPath: `/workspace/repos/${input.repoUrl.split("/").pop() ?? "repo"}` })),
+      description: "Clone a Git repository into /workspace/repos inside the mission sandbox.",
+      inputSchema: z.object({ repoUrl: z.string().url(), directory: z.string().optional() }),
+      execute: (input) =>
+        withUsageAndSpend("git_clone", ctx, async () => {
+          const ref = await resolveSandbox(ctx, "mission");
+          const directory = input.directory ? assertSafeRelativePath(input.directory) : repoDirName(input.repoUrl);
+          const repoPath = `repos/${directory}`;
+          const cloneUrl = await repoUrlForClone(input.repoUrl);
+          const result = await e2b.runCommand(ref, `mkdir -p repos && if [ -d ${shellQuote(repoPath + "/.git")} ]; then git -C ${shellQuote(repoPath)} fetch --all --prune; else git clone --depth 1 ${shellQuote(cloneUrl)} ${shellQuote(repoPath)}; fi`);
+          return { repoPath: `/workspace/${repoPath}`, stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode, sandboxId: ref.sandboxId, capabilityStatus: "real" as const };
+        }),
     }),
     git_commit: tool({
       description: "Phase 1 git commit stub.",
       inputSchema: z.object({ message: z.string() }),
-      execute: (input) => withUsageAndSpend("git_commit", ctx, async () => ({ commit: "demo", message: input.message })),
+      execute: (input) => withUsageAndSpend("git_commit", ctx, async () => ({ commit: null, message: input.message, capabilityStatus: "stub" as const })),
     }),
     git_push: tool({
       description: "Phase 1 git push stub.",
       inputSchema: z.object({ remote: z.string().default("origin") }),
-      execute: (input) => withUsageAndSpend("git_push", ctx, async () => ({ remote: input.remote, pushed: false })),
+      execute: (input) => withUsageAndSpend("git_push", ctx, async () => ({ remote: input.remote, pushed: false, capabilityStatus: "stub" as const })),
     }),
     request_cross_project_read: tool({
       description: "Phase 1 cross-project read request stub.",
       inputSchema: z.object({ sourceMissionId: z.string(), purpose: z.string() }),
-      execute: (input) => withUsageAndSpend("request_cross_project_read", ctx, async () => ({ requestId: crypto.randomUUID(), status: "pending", ...input })),
+      execute: (input) => withUsageAndSpend("request_cross_project_read", ctx, async () => ({ requestId: crypto.randomUUID(), status: "pending", capabilityStatus: "stub" as const, ...input })),
     }),
   };
 }

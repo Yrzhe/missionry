@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../../../lib/api';
-import { useAppStore } from '../../../lib/store';
+import { queryKeys } from '../../../lib/query';
 import type { AgentLibraryItem, AgentWorkCardList, MissionSummary, WorkCard } from '../../../lib/types';
 import type { FormEvent } from 'react';
 import { Shell } from '../Shell';
@@ -38,62 +39,61 @@ function avatarColor(agent: AgentLibraryItem) {
 
 export function AgentLibrary() {
   const { t } = useTranslation();
-  const missions = useAppStore((state) => state.missions);
-  const setWorkroom = useAppStore((state) => state.setWorkroom);
-  const [agents, setAgents] = useState<AgentLibraryItem[]>([]);
+  const queryClient = useQueryClient();
+  const missionsQuery = useQuery({ queryKey: queryKeys.missions, queryFn: api.missions });
+  const agentsQuery = useQuery({ queryKey: queryKeys.agents, queryFn: api.agents });
+  const missions = missionsQuery.data?.items ?? [];
+  const agents = agentsQuery.data?.items ?? [];
   const [filter, setFilter] = useState<(typeof ROLE_FILTERS)[number]>('all');
   const [createOpen, setCreateOpen] = useState(false);
   const [recruitAgent, setRecruitAgent] = useState<AgentLibraryItem | null>(null);
   const [form, setForm] = useState<AgentForm>({ displayName: '', role: 'agent', avatarSeed: '' });
   const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
+  const createAgentMutation = useMutation({
+    mutationFn: api.createAgent,
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: queryKeys.agents });
+      setCreateOpen(false);
+      setForm({ displayName: '', role: 'agent', avatarSeed: '' });
+    },
+  });
+  const recruitMutation = useMutation({
+    mutationFn: ({ missionId, agentId }: { missionId: string; agentId: string }) => api.recruitAgentToMission(missionId, agentId),
+    onSuccess: async (_response, variables) => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.missions }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.workroom(variables.missionId) }),
+      ]);
+      setRecruitAgent(null);
+    },
+  });
+  const busy = createAgentMutation.isPending || recruitMutation.isPending;
 
   const rows = useMemo(() => {
     return agents.filter((agent) => filter === 'all' || agentRole(agent).toLowerCase().includes(filter));
   }, [agents, filter]);
 
-  async function refreshAgents() {
-    const response = await api.agents();
-    setAgents(response.items);
-  }
-
-  useEffect(() => {
-    void refreshAgents().catch(() => undefined);
-  }, []);
-
   async function submitAgent(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError(null);
-    setBusy(true);
     try {
-      await api.createAgent({
+      await createAgentMutation.mutateAsync({
         displayName: form.displayName.trim(),
         role: form.role.trim(),
         avatarSeed: form.avatarSeed.trim() || form.displayName.trim().toLowerCase().replace(/\s+/g, '-'),
       });
-      await refreshAgents();
-      setCreateOpen(false);
-      setForm({ displayName: '', role: 'agent', avatarSeed: '' });
     } catch (createError) {
       setError(createError instanceof Error ? createError.message : t('agents.createError'));
-    } finally {
-      setBusy(false);
     }
   }
 
   async function recruit(mission: MissionSummary) {
     if (!recruitAgent) return;
     setError(null);
-    setBusy(true);
     try {
-      await api.recruitAgentToMission(mission.id, recruitAgent.id);
-      const workroom = await api.workroom(mission.id);
-      setWorkroom(mission.id, workroom);
-      setRecruitAgent(null);
+      await recruitMutation.mutateAsync({ missionId: mission.id, agentId: recruitAgent.id });
     } catch (recruitError) {
       setError(recruitError instanceof Error ? recruitError.message : t('agents.recruitError'));
-    } finally {
-      setBusy(false);
     }
   }
 
@@ -187,31 +187,11 @@ function AgentCard({ agent, onRecruit }: { agent: AgentLibraryItem; onRecruit: (
 
 export function AgentTaskList({ agentId, compact = false }: { agentId: string; compact?: boolean }) {
   const { t } = useTranslation();
-  const [tasks, setTasks] = useState<AgentWorkCardList | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
-
-  useEffect(() => {
-    let alive = true;
-    setLoading(true);
-    setError(null);
-    api.agentWorkCards(agentId)
-      .then((response) => {
-        if (alive) setTasks({ running: response.running ?? null, queued: response.queued ?? [], recentDone: response.recentDone ?? [] });
-      })
-      .catch((taskError) => {
-        if (alive) {
-          setTasks(null);
-          setError(taskError instanceof Error ? taskError.message : t('agents.tasks.error'));
-        }
-      })
-      .finally(() => {
-        if (alive) setLoading(false);
-      });
-    return () => {
-      alive = false;
-    };
-  }, [agentId, t]);
+  const tasksQuery = useQuery({
+    queryKey: queryKeys.agentWorkCards(agentId),
+    queryFn: () => api.agentWorkCards(agentId),
+  });
+  const tasks: AgentWorkCardList | null = tasksQuery.data ? { running: tasksQuery.data.running ?? null, queued: tasksQuery.data.queued ?? [], recentDone: tasksQuery.data.recentDone ?? [] } : null;
 
   const queued = tasks?.queued ?? [];
   const recentDone = tasks?.recentDone ?? [];
@@ -219,9 +199,9 @@ export function AgentTaskList({ agentId, compact = false }: { agentId: string; c
     <section className={`mp-agent-tasks ${compact ? 'compact' : ''}`}>
       <div className="mp-section-title">
         <strong>{t('agents.tasks.title')}</strong>
-        {loading ? <span className="mp-muted">{t('common.loading')}</span> : null}
+        {tasksQuery.isLoading ? <span className="mp-muted">{t('common.loading')}</span> : null}
       </div>
-      {error ? <div className="mp-muted mp-small">{t('agents.tasks.unavailable')}</div> : null}
+      {tasksQuery.isError ? <div className="mp-muted mp-small">{t('agents.tasks.unavailable')}</div> : null}
       {tasks?.running ? <TaskRow card={tasks.running} label={t('agents.tasks.running')} /> : <div className="mp-muted mp-small">{t('agents.tasks.noRunning')}</div>}
       {queued.length ? (
         <div className="mp-agent-task-group">

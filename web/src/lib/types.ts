@@ -227,6 +227,8 @@ export type MissionSpendBreakdown = {
   owner?: MissionOwner;
   ownerEmail?: string;
   capCents?: number;
+  dailyBudgetCents?: number;
+  missionSpendCents?: number;
   spentCents?: number;
   spendCents?: number;
   llmSpentCents?: number;

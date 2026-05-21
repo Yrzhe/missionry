@@ -258,6 +258,10 @@ export const api = {
   missionFileContent: (missionId: string, path: string) => request<MissionFileContent>(`/missions/${missionId}/sandbox/file?path=${encodeURIComponent(workspaceRelativePath(path))}`),
   decomposeMission: (missionId: string) => request<{ actionId?: string; status?: string; created?: Array<{ workCardId: string; status: string }> }>(`/missions/${missionId}/decompose`, { method: 'POST', body: '{}' }),
   startWorkCard: (missionId: string, workCardId: string) => request<{ actionId?: string; status?: string; workCard?: unknown; workCardId?: string }>(`/missions/${missionId}/work-cards/${workCardId}/start`, { method: 'POST', body: '{}' }),
+  assignWorkCard: (missionId: string, workCardId: string, assigneeInstanceId: string) => request<{ actionId?: string; status?: string; workCard?: unknown; workCardId?: string }>(`/missions/${missionId}/work-cards/${workCardId}/assign`, {
+    method: 'POST',
+    body: JSON.stringify({ assigneeInstanceId }),
+  }),
   missionChat: async (missionId: string) => {
     const response = await request<{ items: RawMissionChatMessage[] }>(`/missions/${missionId}/chat`);
     return { items: response.items.map(normalizeMissionChatMessage) };

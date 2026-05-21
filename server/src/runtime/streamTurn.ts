@@ -3,7 +3,7 @@ import { secret } from "edgespark";
 import { streamText } from "ai";
 import { loadAgentBootFiles } from "../agents/files";
 import { emitCostEvent } from "../sse/events";
-import { assertUserBudgetForMission, recordAudit } from "../state/missionState";
+import { BudgetService, recordAudit } from "../state/missionState";
 import { missionryToolKit } from "../tools";
 
 export type AgentTurnContext = {
@@ -20,12 +20,13 @@ export type AgentTurnContext = {
 function estimateLlmCostCents(model: string, usage: Record<string, unknown>) {
   const promptTokens = Number(usage.promptTokens ?? usage.inputTokens ?? 0);
   const completionTokens = Number(usage.completionTokens ?? usage.outputTokens ?? 0);
-  const cheapRate = model.includes("mini") ? 0.000001 : 0.00001;
-  return Math.max(1, Math.ceil((promptTokens + completionTokens) * cheapRate));
+  const pricing = model.includes("gpt-5.5") ? { inputPerMillion: 5, outputPerMillion: 30 } : model.includes("mini") ? { inputPerMillion: 0.15, outputPerMillion: 0.6 } : { inputPerMillion: 10, outputPerMillion: 30 };
+  const dollars = (promptTokens * pricing.inputPerMillion + completionTokens * pricing.outputPerMillion) / 1_000_000;
+  return Math.max(1, Math.ceil(dollars * 100));
 }
 
 export async function streamAgentTurn(turn: AgentTurnContext): Promise<Response> {
-  await assertUserBudgetForMission(turn.missionId, 1);
+  await BudgetService.assertCanSpend(turn.missionId, 1);
   const apiKey = await secret.get("OPENAI_API_KEY");
   if (!apiKey) return Response.json({ code: "error.secret.openai_missing" }, { status: 500 });
 

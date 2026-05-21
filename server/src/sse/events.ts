@@ -1,7 +1,7 @@
 import { db } from "edgespark";
 import { eq, desc } from "drizzle-orm";
 import { agentInstances, agents, auditEvents, missionSpend, usersProfile } from "../defs/db_schema";
-import { recordAudit, recordCost, type AuditRecord, type CostRecord } from "../state/missionState";
+import { BudgetService, recordAudit, recordCost, type AuditRecord, type CostRecord } from "../state/missionState";
 
 export type MissionSseEvent = {
   type: string;
@@ -61,6 +61,7 @@ export async function emitAuditEvent(event: AuditRecord): Promise<string> {
 }
 
 export async function emitCostEvent(event: CostRecord): Promise<MissionSseEvent> {
+  if (event.costCents > 0) await BudgetService.assertCanSpend(event.missionId, event.costCents);
   await recordCost(event);
   const auditEventId = await recordAudit({
     missionId: event.missionId,

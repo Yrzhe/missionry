@@ -1,6 +1,9 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useShallow } from 'zustand/react/shallow';
 import { api } from '../../../lib/api';
+import { queryKeys } from '../../../lib/query';
 import { useAppStore } from '../../../lib/store';
 import type { WhitelistEntry } from '../../../lib/types';
 import type { FormEvent } from 'react';
@@ -10,30 +13,39 @@ const money = (cents = 0) => `$${(cents / 100).toFixed(2)}`;
 
 export function AdminConsole() {
   const { t } = useTranslation();
-  const session = useAppStore((state) => state.session);
-  const overview = useAppStore((state) => state.adminOverview);
-  const users = useAppStore((state) => state.adminUsers);
-  const whitelist = useAppStore((state) => state.adminWhitelist);
-  const missions = useAppStore((state) => state.adminMissions);
-  const setAdmin = useAppStore((state) => state.setAdmin);
+  const queryClient = useQueryClient();
+  const { session } = useAppStore(useShallow((state) => ({ session: state.session })));
   const [form, setForm] = useState<{ type: WhitelistEntry['type']; value: string }>({ type: 'email', value: '' });
   const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-
-  async function refresh() {
-    const [adminOverview, adminUsers, adminWhitelist, adminMissions] = await Promise.all([
-      api.adminOverview(),
-      api.adminUsers(),
-      api.adminWhitelist(),
-      api.adminMissions(),
+  const enabled = session?.role === 'admin';
+  const overviewQuery = useQuery({ queryKey: queryKeys.adminOverview, queryFn: api.adminOverview, enabled });
+  const usersQuery = useQuery({ queryKey: queryKeys.adminUsers, queryFn: api.adminUsers, enabled });
+  const whitelistQuery = useQuery({ queryKey: queryKeys.adminWhitelist, queryFn: api.adminWhitelist, enabled });
+  const missionsQuery = useQuery({ queryKey: queryKeys.adminMissions, queryFn: api.adminMissions, enabled });
+  const overview = overviewQuery.data;
+  const users = usersQuery.data?.items ?? [];
+  const whitelist = whitelistQuery.data?.items ?? [];
+  const missions = missionsQuery.data?.items ?? [];
+  const invalidateAdmin = async () => {
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: queryKeys.adminOverview }),
+      queryClient.invalidateQueries({ queryKey: queryKeys.adminUsers }),
+      queryClient.invalidateQueries({ queryKey: queryKeys.adminWhitelist }),
+      queryClient.invalidateQueries({ queryKey: queryKeys.adminMissions }),
     ]);
-    setAdmin({ adminOverview, adminUsers: adminUsers.items, adminWhitelist: adminWhitelist.items, adminMissions: adminMissions.items });
-  }
-
-  useEffect(() => {
-    if (session?.role !== 'admin') return;
-    void refresh().catch(() => undefined);
-  }, [session?.role]);
+  };
+  const addMutation = useMutation({
+    mutationFn: ({ type, value }: { type: WhitelistEntry['type']; value: string }) => api.addWhitelistEntry(type, value),
+    onSuccess: async () => {
+      setForm({ type: 'email', value: '' });
+      await invalidateAdmin();
+    },
+  });
+  const removeMutation = useMutation({
+    mutationFn: api.removeWhitelistEntry,
+    onSuccess: invalidateAdmin,
+  });
 
   async function addEntry(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -41,9 +53,7 @@ export function AdminConsole() {
     setBusyId('add');
     setError(null);
     try {
-      await api.addWhitelistEntry(form.type, form.value.trim());
-      setForm({ type: 'email', value: '' });
-      await refresh();
+      await addMutation.mutateAsync({ type: form.type, value: form.value.trim() });
     } catch (addError) {
       setError(addError instanceof Error ? addError.message : t('admin.whitelistAddError'));
     } finally {
@@ -55,8 +65,7 @@ export function AdminConsole() {
     setBusyId(id);
     setError(null);
     try {
-      await api.removeWhitelistEntry(id);
-      await refresh();
+      await removeMutation.mutateAsync(id);
     } catch (removeError) {
       setError(removeError instanceof Error ? removeError.message : t('admin.whitelistRemoveError'));
     } finally {
@@ -129,7 +138,7 @@ export function AdminConsole() {
             <span>{mission.ownerEmail ?? mission.owner?.displayName ?? '-'}</span>
             <span>{mission.title}</span>
             <span className="mp-chip">{mission.status ?? '-'}</span>
-            <span>{money(mission.spentCents ?? mission.spendCents)} / {money(mission.capCents)}</span>
+            <span>{money(mission.spentCents ?? mission.spendCents ?? mission.missionSpendCents)} / {money(mission.capCents ?? mission.dailyBudgetCents)}</span>
             <span>{mission.burnRateCentsPerMinute ?? mission.sandboxSummary?.burnRateCentsPerMinute ?? 0}{t('common.centsPerMinute')}</span>
           </div>
         )) : <EmptyNote title={t('admin.empty.missions.title')} body={t('admin.empty.missions.body')} />}

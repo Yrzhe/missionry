@@ -14,6 +14,7 @@ cp ../.env.example .env
 # Live sandbox mode:
 #   DEMO_E2B_MODE=live
 #   E2B_API_KEY=<dashboard key>
+#   MISSIONRY_E2B_CENTS_PER_MIN=0.45  # sandbox cost = ceil((active seconds / 60) * this)
 #   INTERNAL_REAP_TOKEN=<shared secret for /api/public/internal/reap>
 #   MISSIONRY_SUPER_ADMIN_USER_IDS=<comma-separated better-auth user ids>
 

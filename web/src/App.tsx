@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Navigate, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useShallow } from 'zustand/react/shallow';
+import { Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { AdminConsole } from './components/magicpath/admin-console/AdminConsole';
 import { AgentLibrary } from './components/magicpath/agent-library/AgentLibrary';
@@ -13,11 +15,12 @@ import { SettingsAccount } from './components/magicpath/settings-account/Setting
 import { MagicPathSurface } from './components/magicpath/Surface';
 import { Workroom } from './components/magicpath/workroom/Workroom';
 import { ApiError, api, login, resolveSession } from './lib/api';
+import { queryKeys } from './lib/query';
 import { subscribeMissionEvents } from './lib/sse';
 import { useAppStore } from './lib/store';
 import { SignUp } from './pages/SignUp';
 
-const VISIBLE_MISSION_LIMIT = 25;
+const SSE_MISSION_LIMIT = 4;
 
 function isLoggedOutError(error: unknown) {
   return error instanceof ApiError && [401, 403, 404].includes(error.status);
@@ -25,7 +28,7 @@ function isLoggedOutError(error: unknown) {
 
 function App() {
   const [authState, setAuthState] = useState<'checking' | 'ready' | 'login'>('checking');
-  const setSession = useAppStore((state) => state.setSession);
+  const { setSession } = useAppStore(useShallow((state) => ({ setSession: state.setSession })));
   const location = useLocation();
 
   useEffect(() => {
@@ -57,90 +60,35 @@ function App() {
 }
 
 function AppDataGate() {
-  const [error, setError] = useState<string | null>(null);
-  const missions = useAppStore((state) => state.missions);
-  const setMissions = useAppStore((state) => state.setMissions);
-  const setWorkroom = useAppStore((state) => state.setWorkroom);
-  const setWorkroomLoading = useAppStore((state) => state.setWorkroomLoading);
-  const setBudget = useAppStore((state) => state.setBudget);
-  const setSpend = useAppStore((state) => state.setSpend);
-  const setAdmin = useAppStore((state) => state.setAdmin);
-  const session = useAppStore((state) => state.session);
+  const missionsQuery = useQuery({
+    queryKey: queryKeys.missions,
+    queryFn: api.missions,
+  });
 
-  useEffect(() => {
-    let alive = true;
-    async function load() {
-      try {
-        const missionItems = (await api.missions()).items;
-        if (!alive) return;
-        setMissions(missionItems);
-        await Promise.all(
-          missionItems.slice(0, VISIBLE_MISSION_LIMIT).map(async (mission) => {
-            if (alive) setWorkroomLoading(mission.id, true);
-            try {
-              const workroom = await api.workroom(mission.id);
-              if (alive) setWorkroom(mission.id, workroom);
-            } catch {
-              if (alive) setWorkroomLoading(mission.id, false);
-            }
-          }),
-        );
-        if (!alive) return;
-        setBudget({
-          dailyBudgetCents: missionItems.reduce((sum, mission) => sum + (mission.budgetCapCents ?? mission.dailyBudgetCents ?? 0), 0),
-          globalCapCents: 0,
-          currentSpendCents: {
-            total: missionItems.reduce((sum, mission) => sum + (mission.spentCents ?? mission.missionSpendCents ?? 0), 0),
-            llm: 0,
-            sandbox: 0,
-            other: 0,
-          },
-          burnRateCentsPerMinute: missionItems.reduce((sum, mission) => sum + (mission.sandboxSummary?.burnRateCentsPerMinute ?? 0), 0),
-        });
-        setSpend(missionItems.map((mission) => ({
-          missionId: mission.id,
-          title: mission.title,
-          owner: mission.owner,
-          capCents: mission.budgetCapCents,
-          spentCents: mission.spentCents,
-          burnRateCentsPerMinute: mission.sandboxSummary?.burnRateCentsPerMinute,
-          status: mission.status,
-        })));
-        if (session?.role === 'admin') {
-          const [adminOverview, adminUsers, adminWhitelist, adminMissions] = await Promise.all([
-            api.adminOverview(),
-            api.adminUsers(),
-            api.adminWhitelist(),
-            api.adminMissions(),
-          ]);
-          if (alive) setAdmin({ adminOverview, adminUsers: adminUsers.items, adminWhitelist: adminWhitelist.items, adminMissions: adminMissions.items });
-        }
-        setError(null);
-      } catch (loadError) {
-        if (alive) setError(loadError instanceof Error ? loadError.message : 'load_failed');
-      }
-    }
-    void load();
-    return () => {
-      alive = false;
-    };
-  }, [session?.role, setAdmin, setBudget, setMissions, setSpend, setWorkroom, setWorkroomLoading]);
-
-  if (error && !missions.length) return <FullPageState label="common.error" detail={error} />;
-  return <MissionEventBridge />;
+  if (missionsQuery.isError && !missionsQuery.data?.items?.length) {
+    return <FullPageState label="common.error" detail={missionsQuery.error instanceof Error ? missionsQuery.error.message : 'load_failed'} />;
+  }
+  return <MissionEventBridge missions={missionsQuery.data?.items ?? []} />;
 }
 
-function MissionEventBridge() {
-  const missions = useAppStore((state) => state.missions);
+function MissionEventBridge({ missions }: { missions: Awaited<ReturnType<typeof api.missions>>['items'] }) {
+  const queryClient = useQueryClient();
+  const location = useLocation();
+  const currentMissionId = location.pathname.match(/^\/missions\/([^/]+)/)?.[1];
+  const subscribedMissions = useMemo(() => {
+    const byId = new Map(missions.map((mission) => [mission.id, mission]));
+    const current = currentMissionId ? byId.get(currentMissionId) : undefined;
+    const foreground = missions.filter((mission) => mission.id !== currentMissionId).slice(0, SSE_MISSION_LIMIT);
+    return current ? [current, ...foreground] : foreground;
+  }, [currentMissionId, missions]);
   useEffect(() => {
-    const unsubscribers = missions.slice(0, VISIBLE_MISSION_LIMIT).map((mission) => subscribeMissionEvents(mission.id));
+    const unsubscribers = subscribedMissions.map((mission) => subscribeMissionEvents(mission.id));
     return () => unsubscribers.forEach((unsubscribe) => unsubscribe());
-  }, [missions]);
-  return <RouterRoutes />;
+  }, [subscribedMissions, queryClient]);
+  return <RouterRoutes firstMissionId={missions[0]?.id} />;
 }
 
-function RouterRoutes() {
-  const firstMissionId = useAppStore((state) => state.missions[0]?.id);
+function RouterRoutes({ firstMissionId }: { firstMissionId?: string }) {
   return (
     <Routes>
       <Route path="/" element={<Navigate to="/missions" replace />} />
@@ -162,24 +110,6 @@ function RouterRoutes() {
 }
 
 function WorkroomLoader() {
-  const { id } = useParams();
-  const setWorkroom = useAppStore((state) => state.setWorkroom);
-  const setWorkroomLoading = useAppStore((state) => state.setWorkroomLoading);
-  useEffect(() => {
-    if (!id) return;
-    let alive = true;
-    setWorkroomLoading(id, true);
-    void api.workroom(id)
-      .then((workroom) => {
-        if (alive) setWorkroom(id, workroom);
-      })
-      .catch(() => {
-        if (alive) setWorkroomLoading(id, false);
-      });
-    return () => {
-      alive = false;
-    };
-  }, [id, setWorkroom, setWorkroomLoading]);
   return <Workroom />;
 }
 
