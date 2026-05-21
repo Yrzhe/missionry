@@ -17,6 +17,11 @@ const eventTypes = new Set([
   'mission_deleted',
   'mission_environment_updated',
   'mission_spend_updated',
+  'agent_request_created',
+  'agent_request_approved',
+  'agent_request_declined',
+  'agent_joined',
+  'agent_recruited',
   'mission_chat_message_sent',
   'message',
 ]);
@@ -39,7 +44,10 @@ function upsertEvent(missionId: string, event: MissionEvent) {
 }
 
 function shouldRefreshChat(event: MissionEvent) {
-  return event.type === 'mission_chat_message_sent' || Boolean(event.payload?.message ?? event.payload?.chatMessage);
+  return event.type === 'mission_chat_message_sent'
+    || event.type === 'agent_joined'
+    || event.type.startsWith('agent_request_')
+    || Boolean(event.payload?.message ?? event.payload?.chatMessage);
 }
 
 export function subscribeMissionEvents(missionId: string) {
@@ -62,6 +70,10 @@ export function subscribeMissionEvents(missionId: string) {
       invalidateMission(resolvedMissionId);
       if (event.type.startsWith('work_card_') || event.type === 'mission_environment_updated') {
         void queryClient.invalidateQueries({ queryKey: ['agents'] });
+      }
+      if (event.type.startsWith('agent_request_') || event.type === 'agent_joined' || event.type === 'agent_recruited') {
+        void queryClient.invalidateQueries({ queryKey: queryKeys.missionAgentRequests(resolvedMissionId) });
+        void queryClient.invalidateQueries({ queryKey: queryKeys.agents });
       }
       if (shouldRefreshChat(event)) {
         void queryClient.invalidateQueries({ queryKey: queryKeys.missionChat(resolvedMissionId) });

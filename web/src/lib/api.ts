@@ -13,6 +13,7 @@ import type {
   MissionEnvironment,
   MissionEnvironmentVariable,
   MissionFileContent,
+  MissionAgentRequest,
   MissionSpendBreakdown,
   MissionSummary,
   Session,
@@ -291,6 +292,9 @@ export const api = {
     body: JSON.stringify({ variables }),
   })),
   missionEvents: (missionId: string) => optional<{ items: MissionEvent[] }>(`/missions/${missionId}/events`, { items: [] }),
+  missionAgentRequests: (missionId: string) => optional<{ items: MissionAgentRequest[] }>(`/missions/${missionId}/agent-requests`, { items: [] }),
+  approveAgentRequest: (missionId: string, requestId: string) => request<{ status?: string; agentId?: string; instanceId?: string }>(`/missions/${missionId}/agent-requests/${requestId}/approve`, { method: 'POST', body: '{}' }),
+  declineAgentRequest: (missionId: string, requestId: string) => request<{ status?: string }>(`/missions/${missionId}/agent-requests/${requestId}/decline`, { method: 'POST', body: '{}' }),
   missionFiles: async (missionId: string, path = '') => {
     const response = await request<{ path: string; state?: string; entries?: RawMissionFileEntry[] }>(`/missions/${missionId}/sandbox/files?path=${encodeURIComponent(workspaceRelativePath(path))}`);
     return {

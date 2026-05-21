@@ -11,6 +11,7 @@ import type {
   MissionChatMessage,
   MissionEnvironmentVariable,
   MissionEvent,
+  MissionAgentRequest,
   MissionFileContent,
   MissionFileEntry,
   MissionSandboxReadModel,
@@ -41,6 +42,7 @@ export function Workroom() {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
   const [activeTab, setActiveTab] = useState<WorkroomTab>('plan');
+  const [detailsOpen, setDetailsOpen] = useState(false);
   const workroomQuery = useQuery({
     queryKey: queryKeys.workroom(id ?? ''),
     queryFn: () => api.workroom(id ?? ''),
@@ -56,8 +58,14 @@ export function Workroom() {
     queryFn: () => api.missionEvents(id ?? ''),
     enabled: Boolean(id) && activeTab === 'activity',
   });
+  const agentRequestsQuery = useQuery({
+    queryKey: queryKeys.missionAgentRequests(id ?? ''),
+    queryFn: () => api.missionAgentRequests(id ?? ''),
+    enabled: Boolean(id),
+  });
   const workroom = workroomQuery.data;
   const chatMessages = chatQuery.data?.items ?? EMPTY_MESSAGES;
+  const agentRequests = agentRequestsQuery.data?.items.filter((request) => request.status === undefined || request.status === 'pending') ?? [];
   const [modalOpen, setModalOpen] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -135,6 +143,30 @@ export function Workroom() {
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: queryKeys.missions });
       navigate('/missions', { replace: true });
+    },
+  });
+  const approveAgentRequestMutation = useMutation({
+    mutationFn: (requestId: string) => api.approveAgentRequest(id ?? '', requestId),
+    onSuccess: async () => {
+      if (!id) return;
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.missionAgentRequests(id) }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.workroom(id) }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.agents }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.missionEvents(id) }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.missionChat(id) }),
+      ]);
+    },
+  });
+  const declineAgentRequestMutation = useMutation({
+    mutationFn: (requestId: string) => api.declineAgentRequest(id ?? '', requestId),
+    onSuccess: async () => {
+      if (!id) return;
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.missionAgentRequests(id) }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.missionEvents(id) }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.missionChat(id) }),
+      ]);
     },
   });
 
@@ -268,78 +300,100 @@ export function Workroom() {
     <Shell
       title={t('workroom.route')}
       meta={<span className="mp-muted">{t('workroom.meta')}</span>}
-      actions={<div className="mp-row-tight"><button className="mp-button" onClick={() => setModalOpen(true)}>{t('workroom.newCard')}</button><button className="mp-button danger" disabled={deleteMissionMutation.isPending} onClick={() => void deleteMission()}>{deleteMissionMutation.isPending ? t('common.saving') : t('common.delete')}</button></div>}
+      actions={<button className="mp-button" onClick={() => setModalOpen(true)}>{t('workroom.newCard')}</button>}
     >
-      <div className="mp-head">
-        <div>
-          <div className="mp-label">{t('common.owner')}: {ownerName}</div>
-          <h1>{workroom.mission.title || t('workroom.title')}</h1>
-          <p className="mp-muted">{workroom.mission.objective}</p>
+      <section className="mp-card mp-mission-summary">
+        <div className="mp-mission-summary-main">
+          <div>
+            <div className="mp-label">{t('common.owner')}: {ownerName}</div>
+            <h1>{workroom.mission.title || t('workroom.title')}</h1>
+          </div>
+          <div className="mp-summary-chips">
+            <span className="mp-chip"><span className={`mp-status-dot ${workroom.mission.status}`} />{t(`status.${workroom.mission.status}`, workroom.mission.status)}</span>
+            <span className="mp-chip">{t('workroom.metric.spend')}: {money(strip.missionSpendCents)}</span>
+            <span className="mp-chip">{t('workroom.metric.burn')}: {strip.burnRateCentsPerMinute.toFixed(1)}{t('common.centsPerMinute')}</span>
+          </div>
         </div>
-        <span className="mp-chip"><span className="mp-status-dot running" />{workroom.costGuardrailStatus?.state ?? t('workroom.guardrail')}</span>
-      </div>
-
-      <div className="mp-metrics">
-        <Stat label={t('workroom.metric.active')} value={String(strip.activeSandboxCount)} sub={`${strip.privateCap.activePrivateSandboxes}/${strip.privateCap.maxConcurrentPrivateSandboxes} ${t('workroom.metric.private')}`} />
-        <Stat label={t('workroom.metric.burn')} value={`${strip.burnRateCentsPerMinute.toFixed(1)}${t('common.centsPerMinute')}`} sub={t('workroom.metric.autoPause')} />
-        <Stat label={t('workroom.metric.spend')} value={money(strip.missionSpendCents)} sub={`${money(strip.dailyBudgetCents)} ${t('workroom.metric.daily')}`} />
-        <Stat label={t('common.open')} value={String(workroom.openIssues)} sub={workroom.updatedAt ?? t('common.updated')} />
-      </div>
-
-      <section className="mp-card mp-guardrail">
-        <div>
-          <strong>{t('workroom.guardrail')}</strong>
-          <p className="mp-muted">{t('workroom.guardrailBody')}</p>
-        </div>
-        <div className="mp-progress-wrap">
-          <div className="mp-progress"><div style={{ width: `${guardrailProgress}%` }} /></div>
-          <div className="mp-muted mp-small">{money(strip.missionSpendCents)} / {money(strip.dailyBudgetCents)}</div>
-        </div>
+        <button className="mp-button" onClick={() => setDetailsOpen((current) => !current)}>{detailsOpen ? t('workroom.details.hide') : t('workroom.details.show')}</button>
       </section>
 
-      <section className="mp-card mp-env-area">
-        <div className="mp-env-status">
-          <div>
-            <div className="mp-label">{t('workroom.environment.title')}</div>
-            <h2>{t('workroom.environment.heading')}</h2>
-            <p className="mp-muted">{t('workroom.environment.lifecycle')}</p>
-            <span className="mp-chip">{t('workroom.environment.auto')}</span>
-          </div>
-          <div className="mp-env-status-line">
-            <span className="mp-chip dark"><span className={`mp-status-dot ${workroom.missionSandbox.state}`} />{t(`status.${workroom.missionSandbox.state}`)}</span>
-            <span className="mp-muted">{(workroom.missionSandbox.burnRateCentsPerMinute ?? 0).toFixed(1)}{t('common.centsPerMinute')}</span>
-            <div className="mp-row-tight">
-              {canStartMission ? <button className="mp-button" disabled={sandboxAction === `mission:${workroom.mission.id}`} onClick={() => void runSandboxAction(`mission:${workroom.mission.id}`, () => api.startMissionSandbox(workroom.mission.id))}>{sandboxAction === `mission:${workroom.mission.id}` ? t('common.saving') : t('workroom.startSandbox')}</button> : null}
-              {canPauseMission ? <button className="mp-button" disabled={sandboxAction === `mission:${workroom.mission.id}`} onClick={() => void runSandboxAction(`mission:${workroom.mission.id}`, () => api.pauseMissionSandbox(workroom.mission.id))}>{sandboxAction === `mission:${workroom.mission.id}` ? t('common.saving') : t('workroom.pauseSandbox')}</button> : null}
+      {detailsOpen ? (
+        <section className="mp-card mp-mission-details">
+          <div className="mp-detail-grid">
+            <div>
+              <div className="mp-label">{t('workroom.details.objective')}</div>
+              <p className="mp-muted">{workroom.mission.objective}</p>
+              <div className="mp-metrics compact">
+                <Stat label={t('workroom.metric.active')} value={String(strip.activeSandboxCount)} sub={`${strip.privateCap.activePrivateSandboxes}/${strip.privateCap.maxConcurrentPrivateSandboxes} ${t('workroom.metric.private')}`} />
+                <Stat label={t('workroom.metric.spend')} value={money(strip.missionSpendCents)} sub={`${money(strip.dailyBudgetCents)} ${t('workroom.metric.daily')}`} />
+                <Stat label={t('common.open')} value={String(workroom.openIssues)} sub={workroom.updatedAt ?? t('common.updated')} />
+              </div>
+              <section className="mp-guardrail">
+                <div>
+                  <strong>{t('workroom.guardrail')}</strong>
+                  <p className="mp-muted">{t('workroom.guardrailBody')}</p>
+                </div>
+                <div className="mp-progress-wrap">
+                  <div className="mp-progress"><div style={{ width: `${guardrailProgress}%` }} /></div>
+                  <div className="mp-muted mp-small">{money(strip.missionSpendCents)} / {money(strip.dailyBudgetCents)}</div>
+                </div>
+              </section>
+              <div className="mp-env-status">
+                <div>
+                  <div className="mp-label">{t('workroom.environment.title')}</div>
+                  <h2>{t('workroom.environment.heading')}</h2>
+                  <p className="mp-muted">{t('workroom.environment.lifecycle')}</p>
+                  <span className="mp-chip">{t('workroom.environment.auto')}</span>
+                </div>
+                <div className="mp-env-status-line">
+                  <span className="mp-chip dark"><span className={`mp-status-dot ${workroom.missionSandbox.state}`} />{t(`status.${workroom.missionSandbox.state}`)}</span>
+                  <span className="mp-muted">{(workroom.missionSandbox.burnRateCentsPerMinute ?? 0).toFixed(1)}{t('common.centsPerMinute')}</span>
+                  <div className="mp-row-tight">
+                    {canStartMission ? <button className="mp-button" disabled={sandboxAction === `mission:${workroom.mission.id}`} onClick={() => void runSandboxAction(`mission:${workroom.mission.id}`, () => api.startMissionSandbox(workroom.mission.id))}>{sandboxAction === `mission:${workroom.mission.id}` ? t('common.saving') : t('workroom.startSandbox')}</button> : null}
+                    {canPauseMission ? <button className="mp-button" disabled={sandboxAction === `mission:${workroom.mission.id}`} onClick={() => void runSandboxAction(`mission:${workroom.mission.id}`, () => api.pauseMissionSandbox(workroom.mission.id))}>{sandboxAction === `mission:${workroom.mission.id}` ? t('common.saving') : t('workroom.pauseSandbox')}</button> : null}
+                  </div>
+                </div>
+              </div>
+              <MissionEnvironmentPanel missionId={workroom.mission.id} />
+            </div>
+            <div className="mp-agent-sandbox-compact">
+              <div className="mp-section-title">
+                <div>
+                  <strong>{t('workroom.agentSandboxes')}</strong>
+                  <p className="mp-muted">{t('workroom.agentSandboxNote')}</p>
+                </div>
+                <button className="mp-button" onClick={() => navigate('/agents')}>{t('agents.title')}</button>
+              </div>
+              <div className="mp-private-lines">
+                {workroom.agentInstances.length ? workroom.agentInstances.map((row) => (
+                  <AgentSandboxLine
+                    key={row.instance.id}
+                    row={row}
+                    isBusy={sandboxAction === row.instance.id}
+                    onStart={() => void runSandboxAction(row.instance.id, () => api.startAgentSandbox(workroom.mission.id, row.instance.id))}
+                    onPause={() => void runSandboxAction(row.instance.id, () => api.pauseAgentSandbox(workroom.mission.id, row.instance.id))}
+                    isOpeningChat={directThreadAction === row.instance.id}
+                    onOpenChat={() => void openDirectThread(row.instance.id)}
+                  />
+                )) : <EmptyCta title={t('workroom.emptyAgents.title')} body={t('workroom.emptyAgents.body')} action={t('workroom.emptyAgents.action')} onAction={() => navigate('/agents')} />}
+              </div>
+              <div className="mp-danger-zone">
+                <strong>{t('workroom.details.danger')}</strong>
+                <button className="mp-button danger" disabled={deleteMissionMutation.isPending} onClick={() => void deleteMission()}>{deleteMissionMutation.isPending ? t('common.saving') : t('common.delete')}</button>
+              </div>
             </div>
           </div>
-        </div>
-        <MissionEnvironmentPanel missionId={workroom.mission.id} />
-        <FileBrowser missionId={workroom.mission.id} />
-      </section>
+        </section>
+      ) : null}
 
-      <section className="mp-card mp-agent-sandbox-compact">
-        <div className="mp-section-title">
-          <div>
-            <strong>{t('workroom.agentSandboxes')}</strong>
-            <p className="mp-muted">{t('workroom.agentSandboxNote')}</p>
-          </div>
-          <button className="mp-button" onClick={() => navigate('/agents')}>{t('agents.title')}</button>
-        </div>
-        <div className="mp-private-lines">
-          {workroom.agentInstances.length ? workroom.agentInstances.map((row) => (
-            <AgentSandboxLine
-              key={row.instance.id}
-              row={row}
-              isBusy={sandboxAction === row.instance.id}
-              onStart={() => void runSandboxAction(row.instance.id, () => api.startAgentSandbox(workroom.mission.id, row.instance.id))}
-              onPause={() => void runSandboxAction(row.instance.id, () => api.pauseAgentSandbox(workroom.mission.id, row.instance.id))}
-              isOpeningChat={directThreadAction === row.instance.id}
-              onOpenChat={() => void openDirectThread(row.instance.id)}
-            />
-          )) : <EmptyCta title={t('workroom.emptyAgents.title')} body={t('workroom.emptyAgents.body')} action={t('workroom.emptyAgents.action')} onAction={() => navigate('/agents')} />}
-        </div>
-      </section>
+      <AgentRequestsPanel
+        requests={agentRequests}
+        isLoading={agentRequestsQuery.isLoading}
+        error={approveAgentRequestMutation.error ?? declineAgentRequestMutation.error}
+        activeRequestId={(approveAgentRequestMutation.isPending ? approveAgentRequestMutation.variables : declineAgentRequestMutation.isPending ? declineAgentRequestMutation.variables : null) ?? null}
+        onApprove={(requestId) => void approveAgentRequestMutation.mutate(requestId)}
+        onDecline={(requestId) => void declineAgentRequestMutation.mutate(requestId)}
+      />
 
       <div className="mp-workroom-layout">
         <section className="mp-card mp-panel">
@@ -419,6 +473,39 @@ function Stat({ label, value, sub }: { label: string; value: string; sub: string
   return <div className="mp-card mp-stat"><div className="mp-label">{label}</div><div className="mp-value">{value}</div><div className="mp-muted mp-small">{sub}</div></div>;
 }
 
+function AgentRequestsPanel({ requests, isLoading, error, activeRequestId, onApprove, onDecline }: { requests: MissionAgentRequest[]; isLoading: boolean; error: Error | null; activeRequestId: string | null; onApprove: (requestId: string) => void; onDecline: (requestId: string) => void }) {
+  const { t } = useTranslation();
+  if (!requests.length && !isLoading) return null;
+  return (
+    <section className="mp-card mp-agent-requests">
+      <div className="mp-section-title">
+        <div>
+          <strong>{t('workroom.agentRequests.title')}</strong>
+          <p className="mp-muted">{t('workroom.agentRequests.subtitle')}</p>
+        </div>
+        {isLoading ? <span className="mp-muted">{t('common.loading')}</span> : null}
+      </div>
+      {requests.map((request) => {
+        const isBusy = activeRequestId === request.id;
+        return (
+          <article className="mp-agent-request" key={request.id}>
+            <div>
+              <div className="mp-label">{request.requestedByName ?? t('workroom.chat.leader')}</div>
+              <strong>{t('workroom.agentRequests.prompt', { role: request.role })}</strong>
+              <p className="mp-muted">{request.reason || t('workroom.agentRequests.noReason')}</p>
+            </div>
+            <div className="mp-row-tight">
+              <button className="mp-button dark" disabled={isBusy} onClick={() => onApprove(request.id)}>{isBusy ? t('common.saving') : t('workroom.agentRequests.approve')}</button>
+              <button className="mp-button" disabled={isBusy} onClick={() => onDecline(request.id)}>{t('workroom.agentRequests.decline')}</button>
+            </div>
+          </article>
+        );
+      })}
+      {error ? <div className="mp-denied">{error.message}</div> : null}
+    </section>
+  );
+}
+
 function PlanTab({ workroom, isGeneratingPlan, activeWorkCardId, onGeneratePlan, onStartWorkCard, onNewCard }: { workroom: WorkroomReadModel; isGeneratingPlan: boolean; activeWorkCardId: string | null; onGeneratePlan: () => void; onStartWorkCard: (workCardId: string) => void; onNewCard: () => void }) {
   const { t } = useTranslation();
   const queuePositions = useMemo(() => queuePositionByCard(workroom.workCards), [workroom.workCards]);
@@ -430,7 +517,12 @@ function PlanTab({ workroom, isGeneratingPlan, activeWorkCardId, onGeneratePlan,
           <strong>{hasCards ? t('workroom.autonomy.title') : t('workroom.autonomy.waitingTitle')}</strong>
           <p className="mp-muted">{hasCards ? t('workroom.autonomy.body') : t('workroom.autonomy.waitingBody')}</p>
         </div>
-        <button className="mp-button" disabled={isGeneratingPlan || !workroom.agentInstances.length} onClick={onGeneratePlan}>{isGeneratingPlan ? t('common.saving') : t('workroom.generatePlan.regenerate')}</button>
+        {/* Plan auto-generates on mission create and auto-runs. Only offer a manual
+            "Generate plan" fallback when there are no cards yet; once cards exist the
+            flow is automatic, so no redundant regenerate button. */}
+        {!hasCards ? (
+          <button className="mp-button" disabled={isGeneratingPlan || !workroom.agentInstances.length} onClick={onGeneratePlan}>{isGeneratingPlan ? t('common.saving') : t('workroom.generatePlan.action')}</button>
+        ) : null}
       </section>
       <div className="mp-section-title">
         <strong>{t('workroom.cards')}</strong>

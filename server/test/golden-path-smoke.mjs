@@ -51,6 +51,16 @@ function hasMissionsTable(file) {
   return output === "missions";
 }
 
+function sqlString(value) {
+  return `'${String(value).replace(/'/g, "''")}'`;
+}
+
+function missionryDbFile() {
+  const file = localD1Files().find(hasMissionsTable);
+  if (!file) throw new Error("missionry local D1 file not found");
+  return file;
+}
+
 function applyLocalMigrations(files) {
   const migrationDir = join(cwd, "drizzle");
   const migrations = readdirSync(migrationDir)
@@ -146,6 +156,43 @@ try {
   });
   assert.match(mission.missionId, /^mis_/);
   assert.match(mission.leaderInstanceId, /^ins_/);
+
+  const agentRequestId = `agr_smoke_${Date.now()}`;
+  const requestPayload = {
+    role: "QA agent",
+    displayName: "Smoke QA",
+    reason: "Verify the request approval path.",
+    requestedByAgentId: "agt_forge",
+    requestedByInstanceId: mission.leaderInstanceId,
+    missionId: mission.missionId,
+  };
+  sqlite([
+    missionryDbFile(),
+    [
+      "insert into growth_candidates (id,type,title,rationale,evidence_event_ids_json,source_mission_ids_json,scope,status,estimated_future_cost_hint,created_at,enabled_at,enabled_by) values (",
+      [
+        sqlString(agentRequestId),
+        sqlString("agent_request"),
+        sqlString("Smoke QA"),
+        sqlString(JSON.stringify(requestPayload)),
+        sqlString("[]"),
+        sqlString(JSON.stringify([mission.missionId])),
+        sqlString("mission"),
+        sqlString("pending"),
+        "null",
+        sqlString(new Date().toISOString()),
+        "null",
+        "null",
+      ].join(","),
+      ");",
+    ].join(""),
+  ]);
+  const agentRequests = await request(`/missions/${mission.missionId}/agent-requests`);
+  assert.ok(agentRequests.items.some((item) => item.id === agentRequestId && item.status === "pending"));
+  const approvedRequest = await request(`/missions/${mission.missionId}/agent-requests/${agentRequestId}/approve`, { method: "POST", body: JSON.stringify({}) });
+  assert.equal(approvedRequest.request.status, "approved");
+  assert.match(approvedRequest.agent.id, /^agt_/);
+  assert.match(approvedRequest.instanceId, /^ins_/);
 
   const decomposition = await request(`/missions/${mission.missionId}/decompose`, { method: "POST" });
   assert.equal(decomposition.mock, true);

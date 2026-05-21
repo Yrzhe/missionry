@@ -161,6 +161,18 @@ export type AgentWorkCardList = {
   recentDone: WorkCard[];
 };
 
+export type MissionAgentRequest = {
+  id: string;
+  missionId?: string;
+  role: string;
+  reason?: string;
+  status?: 'pending' | 'approved' | 'declined' | string;
+  requestedByInstanceId?: string;
+  requestedByName?: string;
+  createdAt?: string;
+  updatedAt?: string;
+};
+
 export type MissionSandboxReadModel = {
   sandboxId?: string;
   state: SandboxState;

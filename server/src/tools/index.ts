@@ -1,13 +1,15 @@
 import { storage, db, secret } from "edgespark";
 import { tool } from "ai";
-import { eq, and } from "drizzle-orm";
+import { createOpenAI } from "@ai-sdk/openai";
+import { eq, and, sql } from "drizzle-orm";
+import { generateText } from "ai";
 import { z } from "zod";
-import { loadSkill } from "../agents/files";
-import { agents, auditEvents, workCards } from "../defs/db_schema";
+import { ensureAgentInstanceFiles, loadAgentBootFiles, loadSkill } from "../agents/files";
+import { agentInstances, agents, auditEvents, growthCandidates, missionChatMessages, workCards } from "../defs/db_schema";
 import { buckets } from "../defs/storage_schema";
 import { assertSafeId, assertSafeRelativePath } from "../lib/safe-paths";
 import * as e2b from "../sandbox/e2b";
-import { getMissionWithRuntimeSandboxes, recordAudit, type SandboxRef } from "../state/missionState";
+import { getMissionWithRuntimeSandboxes, recordAudit, reservePrivateSandboxSlot, type SandboxRef } from "../state/missionState";
 
 export type ToolContext = {
   missionId: string;
@@ -87,6 +89,84 @@ function repoDirName(repoUrl: string) {
   const parsed = new URL(repoUrl);
   const last = parsed.pathname.split("/").filter(Boolean).at(-1)?.replace(/\.git$/i, "") || "repo";
   return assertSafeRelativePath(last.toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "repo");
+}
+
+async function attachInstanceToMission(missionId: string, agentId: string, role = "member") {
+  missionId = assertSafeId(missionId, "mission_id");
+  agentId = assertSafeId(agentId, "agent_id");
+  const [agent] = await db.select().from(agents).where(eq(agents.id, agentId)).limit(1);
+  if (!agent) throw new Error("error.agent.not_found");
+  const [existing] = await db.select().from(agentInstances).where(and(eq(agentInstances.missionId, missionId), eq(agentInstances.agentId, agentId))).limit(1);
+  if (existing) return existing.id;
+  const instanceId = `ins_${missionId}_${agentId.replace(/^agt_/, "")}`;
+  const timestamp = new Date().toISOString();
+  await ensureAgentInstanceFiles(missionId, instanceId);
+  await db.insert(agentInstances).values({
+    id: instanceId,
+    missionId,
+    agentId,
+    role,
+    displayAlias: agent.displayName,
+    workStateJson: JSON.stringify({ status: "idle" }),
+    isolationJson: JSON.stringify({ defaultPolicy: "deny_cross_project", allowedReadGrantIds: [] }),
+    equippedSkillOverridesJson: JSON.stringify({ addSkillIds: [], removeSkillIds: [], effectiveSkillIds: JSON.parse(agent.equippedSkillIdsJson) }),
+    r2Prefix: `missions/${missionId}/agent-instances/${instanceId}/`,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  });
+  await reservePrivateSandboxSlot(missionId, instanceId);
+  return instanceId;
+}
+
+async function persistAgentChat(missionId: string, instanceId: string, body: string) {
+  const timestamp = new Date().toISOString();
+  const [message] = await db.insert(missionChatMessages).values({
+    id: `mcm_${crypto.randomUUID().slice(0, 10)}`,
+    missionId,
+    authorType: "agent_instance",
+    authorId: instanceId,
+    body,
+    mentionsJson: JSON.stringify([]),
+    isSilent: 0,
+    replyToMessageId: null,
+    createdAt: timestamp,
+  }).returning();
+  await recordAudit({
+    missionId,
+    subjectType: "mission_chat_message",
+    subjectId: message.id,
+    actor: { type: "agent", id: instanceId },
+    action: "mission_chat_message_sent",
+    diffSummary: body,
+  });
+  return message;
+}
+
+async function decideRecruitment(input: { agentId: string; missionTitle: string; missionObjective: string; reason: string }) {
+  const apiKey = await Promise.resolve(secret.get("OPENAI_API_KEY")).catch(() => undefined);
+  if (!apiKey) return { decision: "accept" as const, reason: `Accepted: ${input.reason}` };
+  const boot = await loadAgentBootFiles(input.agentId).catch(() => null);
+  const openai = createOpenAI({ apiKey });
+  const result = await generateText({
+    model: openai(boot?.baseConfig.model ?? "gpt-5.5"),
+    prompt: [
+      boot?.soul ?? "You are a Missionry agent deciding whether to join a mission.",
+      boot?.identity ?? "",
+      "Return JSON only: {\"decision\":\"accept|decline\",\"reason\":\"one short sentence\"}.",
+      `Mission: ${input.missionTitle}`,
+      `Objective: ${input.missionObjective}`,
+      `Invitation reason: ${input.reason}`,
+    ].filter(Boolean).join("\n\n"),
+  });
+  try {
+    const parsed = JSON.parse(result.text.trim().match(/```(?:json)?\s*([\s\S]*?)```/)?.[1] ?? result.text.trim());
+    return {
+      decision: parsed.decision === "decline" ? "decline" as const : "accept" as const,
+      reason: String(parsed.reason ?? input.reason).slice(0, 240),
+    };
+  } catch {
+    return { decision: "accept" as const, reason: result.text.trim().slice(0, 240) || `Accepted: ${input.reason}` };
+  }
 }
 
 export function missionryToolKit(ctx: ToolContext) {
@@ -215,7 +295,7 @@ export function missionryToolKit(ctx: ToolContext) {
                   sandboxAffinityJson: JSON.stringify(sandboxAffinity),
                   updatedAt: timestamp,
                 })
-                .where(and(eq(workCards.id, workCardId), eq(workCards.missionId, ctx.missionId), eq(workCards.status, "proposed")))
+                .where(and(eq(workCards.id, workCardId), eq(workCards.missionId, ctx.missionId), sql`${workCards.status} in ('proposed', 'approved', 'queued', 'pending')`))
                 .returning(),
               db.insert(auditEvents).values({
                 id: auditId,
@@ -273,6 +353,104 @@ export function missionryToolKit(ctx: ToolContext) {
             }),
           ]);
           return { workCardId, status: "queued", assigneeInstanceId, auditEventId, capabilityStatus: "real" as const };
+        }),
+    }),
+    recruit_agent_to_mission: tool({
+      description: "Leader-only recruitment tool. Invite an existing global agent to this mission. The invited agent decides whether to join before an instance is created.",
+      inputSchema: z.object({ agentId: z.string(), reason: z.string() }),
+      execute: (input) =>
+        withUsageAndSpend("recruit_agent_to_mission", ctx, async () => {
+          await e2b.assertInstanceInMission(ctx.missionId, ctx.instanceId);
+          const agentId = assertSafeId(input.agentId, "agent_id");
+          const [agent] = await db.select().from(agents).where(eq(agents.id, agentId)).limit(1);
+          if (!agent) throw new Error("error.agent.not_found");
+          const mission = await getMissionWithRuntimeSandboxes(ctx.missionId);
+          const decision = await decideRecruitment({ agentId, missionTitle: mission.title, missionObjective: mission.objective, reason: input.reason });
+          if (decision.decision === "decline") {
+            await persistAgentChat(ctx.missionId, agentId, `${agent.displayName} declines invitation: ${decision.reason}`);
+            await recordAudit({
+              missionId: ctx.missionId,
+              subjectType: "agent",
+              subjectId: agentId,
+              actor: { type: "agent", id: ctx.agentId },
+              action: "agent_invitation_declined",
+              clientActionId: ctx.clientActionId,
+              diffSummary: decision.reason,
+            });
+            return { agentId, accepted: false, reason: decision.reason, capabilityStatus: "real" as const };
+          }
+          const instanceId = await attachInstanceToMission(ctx.missionId, agentId, "member");
+          await persistAgentChat(ctx.missionId, instanceId, `${agent.displayName} joins the mission: ${decision.reason}`);
+          const auditEventId = await recordAudit({
+            missionId: ctx.missionId,
+            subjectType: "agent_instance",
+            subjectId: instanceId,
+            actor: { type: "agent", id: ctx.agentId },
+            action: "agent_joined",
+            clientActionId: ctx.clientActionId,
+            diffSummary: `agent:${agentId};reason:${decision.reason}`,
+          });
+          return { agentId, instanceId, accepted: true, reason: decision.reason, auditEventId, capabilityStatus: "real" as const };
+        }),
+    }),
+    request_new_agent: tool({
+      description: "Leader-only tool. Ask the user to create a new agent when no existing mission or global agent has the needed role or skills.",
+      inputSchema: z.object({ role: z.string(), displayName: z.string().optional(), reason: z.string() }),
+      execute: (input) =>
+        withUsageAndSpend("request_new_agent", ctx, async () => {
+          await e2b.assertInstanceInMission(ctx.missionId, ctx.instanceId);
+          const role = input.role.trim();
+          const reason = input.reason.trim();
+          if (!role || !reason) throw new Error("error.request.invalid");
+          const requestId = `agr_${crypto.randomUUID().slice(0, 10)}`;
+          const timestamp = new Date().toISOString();
+          const title = input.displayName?.trim() || role;
+          const payload = {
+            role,
+            displayName: input.displayName?.trim() || null,
+            reason,
+            requestedByAgentId: ctx.agentId,
+            requestedByInstanceId: ctx.instanceId,
+            missionId: ctx.missionId,
+          };
+          const chatBody = `Leader requests a new agent: ${role} — ${reason}`;
+          await db.batch([
+            db.insert(growthCandidates).values({
+              id: requestId,
+              type: "agent_request",
+              title,
+              rationale: JSON.stringify(payload),
+              evidenceEventIdsJson: JSON.stringify([]),
+              sourceMissionIdsJson: JSON.stringify([ctx.missionId]),
+              scope: "mission",
+              status: "pending",
+              estimatedFutureCostHint: null,
+              createdAt: timestamp,
+              enabledAt: null,
+              enabledBy: null,
+            }),
+            db.insert(missionChatMessages).values({
+              id: `mcm_${crypto.randomUUID().slice(0, 10)}`,
+              missionId: ctx.missionId,
+              authorType: "system",
+              authorId: "agent_request",
+              body: chatBody,
+              mentionsJson: JSON.stringify([]),
+              isSilent: 0,
+              replyToMessageId: null,
+              createdAt: timestamp,
+            }),
+          ]);
+          const auditEventId = await recordAudit({
+            missionId: ctx.missionId,
+            subjectType: "agent_request",
+            subjectId: requestId,
+            actor: { type: "agent", id: ctx.agentId },
+            action: "agent_requested",
+            clientActionId: ctx.clientActionId,
+            diffSummary: chatBody,
+          });
+          return { requestId, status: "pending", role, displayName: input.displayName ?? null, reason, auditEventId, capabilityStatus: "real" as const };
         }),
     }),
     commit_self_update: tool({

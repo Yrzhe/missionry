@@ -1,7 +1,7 @@
 import { createOpenAI } from "@ai-sdk/openai";
 import { db, storage, secret, vars, ctx } from "edgespark";
 import { auth } from "edgespark/http";
-import { and, asc, desc, eq, inArray, ne, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, lte, ne, sql } from "drizzle-orm";
 import { generateText, streamText, stepCountIs } from "ai";
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
@@ -14,6 +14,7 @@ import {
   auditEvents,
   directThreadMessages,
   directThreads,
+  growthCandidates,
   missionChatMessages,
   missionLeader,
   missionSpend,
@@ -217,6 +218,11 @@ function maybeReapInBackground() {
   ctx.runInBackground(
     reapIdleSandboxes().catch((error) => {
       console.error("OPPORTUNISTIC REAP ERROR:", error);
+    }),
+  );
+  ctx.runInBackground(
+    reapStuckWorkCards().catch((error) => {
+      console.error("STUCK WORK CARD REAP ERROR:", error);
     }),
   );
 }
@@ -534,6 +540,38 @@ function agentListItem(row: typeof agents.$inferSelect, instanceCount: number): 
   };
 }
 
+function agentSkillIds(row: typeof agents.$inferSelect) {
+  try {
+    return JSON.parse(row.equippedSkillIdsJson) as string[];
+  } catch {
+    return [];
+  }
+}
+
+function agentRole(row: typeof agents.$inferSelect) {
+  try {
+    const identity = JSON.parse(row.globalIdentityJson) as Record<string, unknown>;
+    return typeof identity.role === "string" ? identity.role : "agent";
+  } catch {
+    return "agent";
+  }
+}
+
+async function availableGlobalAgentRoster(missionId: string) {
+  const missionRows = await loadMissionAgentRows(missionId);
+  const inMission = new Set(missionRows.map((row) => row.agent.id));
+  const allAgents = await db.select().from(agents).orderBy(asc(agents.createdAt)) as Array<typeof agents.$inferSelect>;
+  return allAgents
+    .filter((agent) => !inMission.has(agent.id))
+    .slice(0, 20)
+    .map((agent) => [
+      `agentId=${agent.id}`,
+      `name=${agent.displayName}`,
+      `role=${agentRole(agent)}`,
+      `skills=${agentSkillIds(agent).join(",") || "none"}`,
+    ].join(" "));
+}
+
 function normalizeWorkspacePath(value: string | undefined | null, fallback = "") {
   const raw = value?.trim() || fallback;
   if (raw.length > 256 || /[\u0000-\u001f\u007f]/.test(raw) || raw.includes("\\")) throw new Error("error.path.relative_invalid");
@@ -569,6 +607,8 @@ async function resolveChatAuthorName(row: typeof missionChatMessages.$inferSelec
       const [agent] = await db.select({ displayName: agents.displayName }).from(agents).where(eq(agents.id, instance.agentId)).limit(1);
       return instance.displayAlias || agent?.displayName || row.authorId;
     }
+    const [agent] = await db.select({ displayName: agents.displayName }).from(agents).where(eq(agents.id, row.authorId)).limit(1);
+    if (agent?.displayName) return agent.displayName;
   }
   return row.authorId;
 }
@@ -1007,6 +1047,69 @@ async function createMission(input: { title: string; objective: string; ownerTyp
   return { mission, missionId, ownerInstanceId, leaderAgentId, leaderInstanceId };
 }
 
+function parseAgentRequest(row: typeof growthCandidates.$inferSelect) {
+  let payload: Record<string, unknown> = {};
+  let sourceMissionIds: string[] = [];
+  try {
+    payload = JSON.parse(row.rationale) as Record<string, unknown>;
+  } catch {
+    payload = { reason: row.rationale };
+  }
+  try {
+    sourceMissionIds = JSON.parse(row.sourceMissionIdsJson) as string[];
+  } catch {
+    sourceMissionIds = [];
+  }
+  return {
+    id: row.id,
+    missionId: Array.isArray(payload.sourceMissionIds) ? payload.sourceMissionIds[0] : (payload.missionId as string | undefined) ?? sourceMissionIds[0] ?? null,
+    status: row.status,
+    role: String(payload.role ?? row.title),
+    displayName: typeof payload.displayName === "string" ? payload.displayName : null,
+    reason: String(payload.reason ?? row.rationale),
+    requestedByAgentId: typeof payload.requestedByAgentId === "string" ? payload.requestedByAgentId : null,
+    requestedByInstanceId: typeof payload.requestedByInstanceId === "string" ? payload.requestedByInstanceId : null,
+    createdAt: row.createdAt,
+    resolvedAt: row.enabledAt,
+    resolvedBy: row.enabledBy,
+  };
+}
+
+function agentRequestBelongsToMission(row: typeof growthCandidates.$inferSelect, missionId: string) {
+  try {
+    const missionIds = JSON.parse(row.sourceMissionIdsJson) as string[];
+    return missionIds.includes(missionId);
+  } catch {
+    return false;
+  }
+}
+
+async function createAgentForUser(input: { displayName: string; role: string; userId: string; avatar?: { avatarSource?: string; avatarSeed?: string } }) {
+  const displayName = input.displayName.trim();
+  const role = input.role.trim();
+  if (!displayName || !role) throw new Error("error.request.invalid");
+  const agentId = assertSafeId(`agt_${crypto.randomUUID().slice(0, 12)}`, "agent_id");
+  const timestamp = now();
+  const avatar = input.avatar ?? { avatarSource: "random", avatarSeed: agentId };
+  await ensureAgentFiles(agentId, displayName);
+  const [agent] = await db
+    .insert(agents)
+    .values({
+      id: agentId,
+      slug: agentId.replace(/^agt_/, ""),
+      displayName,
+      avatarJson: JSON.stringify(avatar),
+      globalIdentityJson: JSON.stringify({ displayName, role, version: "v1", ownerUserId: input.userId }),
+      equippedSkillIdsJson: JSON.stringify(["demo-sandbox"]),
+      r2Prefix: `agents/${agentId}/`,
+      auditHeadId: null,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    })
+    .returning();
+  return agent;
+}
+
 type ProposedCard = {
   title: string;
   description?: string;
@@ -1070,13 +1173,23 @@ async function decomposeMission(missionId: string) {
   let mock = false;
   if (apiKey) {
     const openai = createOpenAI({ apiKey });
+    const roster = (await loadMissionAgentRows(missionId)).map((row) => [
+      `instanceId=${row.instance.id}`,
+      `agentId=${row.agent.id}`,
+      `name=${row.instance.displayAlias || row.agent.displayName}`,
+      `role=${row.instance.role}`,
+      `globalRole=${agentRole(row.agent)}`,
+      `skills=${agentSkillIds(row.agent).join(",") || "none"}`,
+    ].join(" ")).join("\n");
     const result = await generateText({
       model: openai("gpt-5.5"),
       prompt: [
         "Decompose this Missionry objective into 2-4 executable work cards.",
+        "You are the team lead. Prefer delegation: suggest the mission agent whose role/skills fit each card. Only suggest the Leader if it is genuinely the best fit or no other agent exists.",
         "Return JSON only as {\"cards\":[{\"title\":\"...\",\"description\":\"...\",\"suggestedAssignee\":\"agent display name or instance id\",\"sandboxAffinity\":{\"tier\":\"tier0|mission|private\",\"reason\":\"...\"}}]}.",
         `Mission title: ${mission.title}`,
         `Objective: ${mission.objective}`,
+        roster ? `Mission roster:\n${roster}` : "",
       ].join("\n"),
     });
     proposed = parseProposedCards(result.text);
@@ -1101,7 +1214,12 @@ async function decomposeMission(missionId: string) {
       mock,
     }));
   }
-  waitUntil(tryDequeue().catch((error) => console.error("AUTO DEQUEUE AFTER DECOMPOSE ERROR:", error)));
+  waitUntil(
+    runLeaderDispatchPass(missionId, "mission decomposed; delegate queued/proposed work")
+      .catch((error) => console.error("LEADER DISPATCH AFTER DECOMPOSE ERROR:", error))
+      .then(() => tryDequeue())
+      .catch((error) => console.error("AUTO DEQUEUE AFTER DECOMPOSE ERROR:", error)),
+  );
   return { created: cards, mock };
 }
 
@@ -1210,15 +1328,29 @@ async function runAgentToolLoop(input: {
     `agentId=${row.agent.id}`,
     `name=${row.instance.displayAlias || row.agent.displayName}`,
     `role=${row.instance.role}`,
+    `globalRole=${agentRole(row.agent)}`,
+    `skills=${agentSkillIds(row.agent).join(",") || "none"}`,
   ].join(" ")).join("\n");
+  const leader = await resolveMissionLeader(await getMissionWithRuntimeSandboxes(input.missionId)).catch(() => null);
+  const isLeader = leader?.instance.id === input.instanceId;
+  const globalRoster = isLeader ? (await availableGlobalAgentRoster(input.missionId).catch(() => [])).join("\n") : "";
   const result = streamText({
     model: openai(modelName),
-    stopWhen: stepCountIs(20),
+    stopWhen: stepCountIs(8),
     system: [
       boot?.soul ?? input.systemFallback,
       boot?.identity ?? "",
       boot ? `Equipped skills: ${JSON.stringify(boot.skillsIndex)}` : "",
       agentRoster ? `Mission agent instances available for assignment:\n${agentRoster}` : "",
+      isLeader
+        ? [
+            "You are the team lead. Prefer to delegate: match each task to the agent whose role/skills fit best using assign_work_card. Only execute a task yourself if no suitable agent is available. If the mission lacks a needed skill, recruit an existing agent or request a new one.",
+            "For existing mission agents, assign work with assign_work_card({ workCardId?, title?, description?, assigneeInstanceId, sandboxAffinity? }).",
+            "For suitable global agents not yet in the mission, use recruit_agent_to_mission({ agentId, reason }).",
+            "If no existing agent fits, use request_new_agent({ role, displayName?, reason }) so the user can approve creation.",
+          ].join("\n")
+        : "",
+      globalRoster ? `Available global agents the Leader may recruit:\n${globalRoster}` : "",
       input.missionContext,
       "You are an execution agent. Use tools to inspect, run commands, read/write files, and report concrete progress. Finish with a concise summary of what you actually did.",
     ].filter(Boolean).join("\n\n"),
@@ -1281,6 +1413,55 @@ async function generateMissionChatReply(input: {
     missionContext: "Mission chat turn. If the user asks for work, use tools rather than only describing the work.",
     stubBody: input.stubBody,
   });
+}
+
+async function runLeaderDispatchPass(missionId: string, reason: string) {
+  missionId = assertSafeId(missionId, "mission_id");
+  const mission = await getMissionWithRuntimeSandboxes(missionId);
+  const leader = await resolveMissionLeader(mission);
+  if (!leader) return null;
+  const cards = await db.select().from(workCards).where(eq(workCards.missionId, missionId)).orderBy(asc(workCards.createdAt)) as Array<typeof workCards.$inferSelect>;
+  const cardList = cards
+    .filter((card) => ["proposed", "approved", "queued", "pending"].includes(card.status))
+    .map((card) => [
+      `workCardId=${card.id}`,
+      `status=${card.status}`,
+      `assigneeInstanceId=${card.assigneeInstanceId ?? "none"}`,
+      `title=${card.title}`,
+      card.description ? `description=${card.description}` : "",
+      `sandboxAffinity=${card.sandboxAffinityJson}`,
+    ].filter(Boolean).join(" | "))
+    .join("\n");
+  const body = await runAgentToolLoop({
+    missionId,
+    agentId: leader.agent.id,
+    instanceId: leader.instance.id,
+    turnId: `turn_${crypto.randomUUID().slice(0, 8)}`,
+    systemFallback: "You are the Leader agent of this Mission. Coordinate and delegate work to the best-fit agents.",
+    missionContext: [
+      `Leader dispatch pass: ${reason}`,
+      "Review all assignable work cards and use delegation tools before doing any work yourself.",
+      "If a card is already assigned to the best-fit agent, leave it alone. If a better mission agent exists, assign it. If the needed skill is missing, recruit or request a new agent.",
+    ].join("\n"),
+    messages: [{
+      role: "user",
+      content: [
+        `Mission: ${mission.title}`,
+        `Objective: ${mission.objective}`,
+        cardList ? `Assignable cards:\n${cardList}` : "No assignable cards currently exist. Create or request agents only if needed.",
+      ].join("\n\n"),
+    }],
+    stubBody: `[STUB] Leader dispatch skipped: ${reason}`,
+  });
+  const message = await persistMissionChatMessage({
+    missionId,
+    authorType: "agent_instance",
+    authorId: leader.instance.id,
+    body,
+    mentions: [],
+  });
+  await updateAgentResponseCursor(missionId, leader.instance.id, message);
+  return message;
 }
 
 async function dispatchMissionChatReplies(missionId: string, source: typeof missionChatMessages.$inferSelect, mentions: ChatMention[]) {
@@ -1353,6 +1534,39 @@ function reconcileMissionSandboxRefsInBackground(missionId: string) {
       console.error("BACKGROUND SANDBOX RECONCILE ERROR:", error);
     }),
   );
+}
+
+// A work card runs inside a single Worker invocation (multi-step LLM tool loop + E2B).
+// If that invocation is killed by the platform wall-clock limit mid-run, startWorkCard's
+// try/catch never executes and the card is left 'running' forever. This sweep fails any
+// card stuck in 'running' past STUCK_WORK_CARD_MS so it stops hanging and the agent frees up.
+const STUCK_WORK_CARD_MS = 5 * 60 * 1000;
+export async function reapStuckWorkCards() {
+  const cutoff = new Date(Date.now() - STUCK_WORK_CARD_MS).toISOString();
+  const stuck = await db.select().from(workCards).where(and(eq(workCards.status, "running"), lte(workCards.updatedAt, cutoff)));
+  for (const card of stuck as Array<typeof workCards.$inferSelect>) {
+    await db.update(workCards).set({ status: "failed", updatedAt: now() }).where(eq(workCards.id, card.id));
+    await recordAudit({
+      missionId: card.missionId,
+      subjectType: "work_card",
+      subjectId: card.id,
+      actor: { type: "system", id: "runtime" },
+      action: "work_card_failed",
+      diffSummary: "status:failed reason:timed_out",
+    });
+    await persistMissionChatMessage({
+      missionId: card.missionId,
+      authorType: "system",
+      authorId: "runtime",
+      body: `Work card "${card.title}" timed out (exceeded the execution window) and was marked failed. You can retry it.`,
+      mentions: [],
+    }).catch(() => undefined);
+    const [instance] = card.assigneeInstanceId
+      ? await db.select().from(agentInstances).where(eq(agentInstances.id, card.assigneeInstanceId)).limit(1)
+      : [];
+    if (instance) waitUntil(Promise.resolve(dequeueNextForAgent(instance.agentId)));
+  }
+  return { failedStuckCards: stuck.length };
 }
 
 export async function reapIdleSandboxes() {
@@ -1727,28 +1941,10 @@ app.post("/api/public/agents", async (c) => {
   const displayName = body.displayName?.trim();
   const role = body.role?.trim();
   if (!displayName || !role) return jsonError(c, "error.request.invalid", 400);
-  const agentId = assertSafeId(`agt_${crypto.randomUUID().slice(0, 12)}`, "agent_id");
-  const timestamp = now();
-  const avatar = body.avatar ?? { avatarSource: "random", avatarSeed: agentId };
-  await ensureAgentFiles(agentId, displayName);
-  const [agent] = await db
-    .insert(agents)
-    .values({
-      id: agentId,
-      slug: agentId.replace(/^agt_/, ""),
-      displayName,
-      avatarJson: JSON.stringify(avatar),
-      globalIdentityJson: JSON.stringify({ displayName, role, version: "v1", ownerUserId: profile.userId }),
-      equippedSkillIdsJson: JSON.stringify(["demo-sandbox"]),
-      r2Prefix: `agents/${agentId}/`,
-      auditHeadId: null,
-      createdAt: timestamp,
-      updatedAt: timestamp,
-    })
-    .returning();
+  const agent = await createAgentForUser({ displayName, role, userId: profile.userId, avatar: body.avatar });
   const auditEventId = await recordAudit({
     subjectType: "agent",
-    subjectId: agentId,
+    subjectId: agent.id,
     actor: { type: "user", id: profile.userId },
     action: "agent_created",
     diffSummary: displayName,
@@ -1813,7 +2009,6 @@ app.post("/api/public/missions", async (c) => {
   const missionJson = await missionDbRowJson(created.mission);
   waitUntil(
     decomposeMission(created.missionId)
-      .then(() => tryDequeue())
       .catch((error) => console.error("AUTO DECOMPOSE ERROR:", error)),
   );
   return c.json({ ...missionJson, missionId: created.missionId, ownerInstanceId: created.ownerInstanceId, leaderAgentId: created.leaderAgentId, leaderInstanceId: created.leaderInstanceId }, 201);
@@ -1911,6 +2106,107 @@ app.get("/api/public/missions/:id/agents", async (c) => {
   const missionId = assertSafeId(c.req.param("id"), "mission_id");
   const rows = await loadMissionAgentRows(missionId);
   return c.json(rows.map((row) => missionAgentInstanceResponse(row)));
+});
+
+app.get("/api/public/missions/:id/agent-requests", async (c) => {
+  const denied = await assertMissionAccess(c);
+  if (denied) return denied;
+  const missionId = assertSafeId(c.req.param("id"), "mission_id");
+  const rows = await db.select().from(growthCandidates).where(eq(growthCandidates.type, "agent_request")).orderBy(desc(growthCandidates.createdAt)) as Array<typeof growthCandidates.$inferSelect>;
+  return c.json({
+    items: rows
+      .filter((row) => agentRequestBelongsToMission(row, missionId))
+      .map(parseAgentRequest),
+  });
+});
+
+app.post("/api/public/missions/:id/agent-requests/:reqId/approve", async (c) => {
+  const denied = await assertMissionAccess(c);
+  if (denied) return denied;
+  const missionId = assertSafeId(c.req.param("id"), "mission_id");
+  const reqId = assertSafeId(c.req.param("reqId"), "agent_request_id");
+  const profile = currentUserProfile(c);
+  const body = (await c.req.json().catch(() => ({}))) as { displayName?: string; role?: string; avatar?: { avatarSource?: string; avatarSeed?: string } };
+  const [request] = await db.select().from(growthCandidates).where(and(eq(growthCandidates.id, reqId), eq(growthCandidates.type, "agent_request"))).limit(1);
+  if (!request || !agentRequestBelongsToMission(request, missionId)) return jsonError(c, "error.agent_request.not_found", 404);
+  if (request.status !== "pending") return jsonError(c, "error.agent_request.not_pending", 409);
+  const parsed = parseAgentRequest(request);
+  const displayName = body.displayName?.trim() || parsed.displayName || parsed.role;
+  const role = body.role?.trim() || parsed.role;
+  const agent = await createAgentForUser({ displayName, role, userId: profile.userId, avatar: body.avatar });
+  const instanceId = await attachInstance(missionId, agent.id, "member");
+  const timestamp = now();
+  await db.batch([
+    db.update(growthCandidates).set({ status: "approved", enabledAt: timestamp, enabledBy: profile.userId }).where(eq(growthCandidates.id, reqId)),
+  ]);
+  const chat = await persistMissionChatMessage({
+    missionId,
+    authorType: "system",
+    authorId: "agent_request",
+    body: `Agent request approved: ${agent.displayName} joined as ${role}.`,
+    mentions: [],
+  });
+  const auditEventId = await recordAudit({
+    missionId,
+    subjectType: "agent_request",
+    subjectId: reqId,
+    actor: { type: "user", id: profile.userId },
+    action: "agent_request_approved",
+    diffSummary: `agent:${agent.id};instance:${instanceId}`,
+  });
+  waitUntil(
+    runLeaderDispatchPass(missionId, `new agent joined from approved request: ${agent.displayName}`)
+      .catch((error) => console.error("LEADER DISPATCH AFTER AGENT REQUEST APPROVAL ERROR:", error))
+      .then(() => tryDequeue())
+      .catch((error) => console.error("AUTO DEQUEUE AFTER AGENT REQUEST APPROVAL ERROR:", error)),
+  );
+  return c.json({
+    actionId: crypto.randomUUID(),
+    status: "completed",
+    request: { ...parsed, status: "approved", resolvedAt: timestamp, resolvedBy: profile.userId },
+    agent: agentListItem(agent, 1),
+    instanceId,
+    message: await chatMessageJson(chat),
+    auditEventId,
+  });
+});
+
+app.post("/api/public/missions/:id/agent-requests/:reqId/decline", async (c) => {
+  const denied = await assertMissionAccess(c);
+  if (denied) return denied;
+  const missionId = assertSafeId(c.req.param("id"), "mission_id");
+  const reqId = assertSafeId(c.req.param("reqId"), "agent_request_id");
+  const profile = currentUserProfile(c);
+  const body = (await c.req.json().catch(() => ({}))) as { reason?: string };
+  const [request] = await db.select().from(growthCandidates).where(and(eq(growthCandidates.id, reqId), eq(growthCandidates.type, "agent_request"))).limit(1);
+  if (!request || !agentRequestBelongsToMission(request, missionId)) return jsonError(c, "error.agent_request.not_found", 404);
+  if (request.status !== "pending") return jsonError(c, "error.agent_request.not_pending", 409);
+  const parsed = parseAgentRequest(request);
+  const timestamp = now();
+  await db.update(growthCandidates).set({ status: "declined", enabledAt: timestamp, enabledBy: profile.userId }).where(eq(growthCandidates.id, reqId));
+  const reason = body.reason?.trim();
+  const chat = await persistMissionChatMessage({
+    missionId,
+    authorType: "system",
+    authorId: "agent_request",
+    body: `Agent request declined: ${parsed.role}${reason ? ` — ${reason}` : ""}.`,
+    mentions: [],
+  });
+  const auditEventId = await recordAudit({
+    missionId,
+    subjectType: "agent_request",
+    subjectId: reqId,
+    actor: { type: "user", id: profile.userId },
+    action: "agent_request_declined",
+    diffSummary: reason ?? parsed.reason,
+  });
+  return c.json({
+    actionId: crypto.randomUUID(),
+    status: "completed",
+    request: { ...parsed, status: "declined", resolvedAt: timestamp, resolvedBy: profile.userId },
+    message: await chatMessageJson(chat),
+    auditEventId,
+  });
 });
 
 app.post("/api/public/missions/:id/agents/:agentId/instances", async (c) => {
