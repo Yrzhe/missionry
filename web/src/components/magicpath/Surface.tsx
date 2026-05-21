@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useAppStore } from '../../lib/store';
 import type { MissionAgentRow, MissionSandboxReadModel } from '../../lib/types';
 import { Shell } from './Shell';
+import { AgentTaskList } from './agent-library/AgentLibrary';
 
 type Page =
   | 'agents'
@@ -117,6 +118,7 @@ function AgentCard({ row }: { row: MissionAgentRow }) {
       <Info label={t('agent.instance')} value={row.instance.displayAlias ?? row.agent.displayName} />
       <Info label={t('common.status')} value={row.instance.workState?.status ?? '-'} />
       <Info label={t('agent.sandbox')} value={row.instance.sandboxSummary?.state ?? 'none'} />
+      <AgentTaskList agentId={row.agent.id} />
     </section>
   );
 }

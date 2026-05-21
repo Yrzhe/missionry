@@ -94,10 +94,13 @@ export type MissionAgentRow = {
 
 export type WorkCard = {
   id: string;
+  missionId?: string;
+  missionTitle?: string;
   title: string;
   description?: string;
   assigneeInstanceId?: string;
   status: 'proposed' | 'approved' | 'queued' | 'pending' | 'running' | 'done' | 'failed' | 'cancelled' | 'blocked' | string;
+  queuePosition?: number;
   priority?: string;
   dependencies?: string[];
   issueIds?: string[];
@@ -120,10 +123,17 @@ export type CreateWorkCardInput = {
   title: string;
   description?: string;
   assigneeInstanceId: string;
+  status?: 'approved' | 'queued' | 'proposed' | string;
   sandboxAffinity: {
     tier: 'tier0' | 'mission' | 'private';
     reason: string;
   };
+};
+
+export type AgentWorkCardList = {
+  running?: WorkCard | null;
+  queued: WorkCard[];
+  recentDone: WorkCard[];
 };
 
 export type MissionSandboxReadModel = {

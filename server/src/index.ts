@@ -1,7 +1,7 @@
 import { createOpenAI } from "@ai-sdk/openai";
 import { db, storage, secret, vars, ctx } from "edgespark";
 import { auth } from "edgespark/http";
-import { and, asc, desc, eq, ne, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, ne, sql } from "drizzle-orm";
 import { generateText, streamText, stepCountIs } from "ai";
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
@@ -174,6 +174,8 @@ function scheduleStartupSeed() {
 // keeps idle sandboxes from billing without a dedicated scheduler.
 let lastOpportunisticReapAt = 0;
 const REAP_THROTTLE_MS = 60_000;
+let lastOpportunisticDequeueAt = 0;
+const DEQUEUE_THROTTLE_MS = 10_000;
 function maybeReapInBackground() {
   const nowMs = Date.now();
   if (nowMs - lastOpportunisticReapAt < REAP_THROTTLE_MS) return;
@@ -181,6 +183,17 @@ function maybeReapInBackground() {
   ctx.runInBackground(
     reapIdleSandboxes().catch((error) => {
       console.error("OPPORTUNISTIC REAP ERROR:", error);
+    }),
+  );
+}
+
+function maybeDequeueInBackground() {
+  const nowMs = Date.now();
+  if (nowMs - lastOpportunisticDequeueAt < DEQUEUE_THROTTLE_MS) return;
+  lastOpportunisticDequeueAt = nowMs;
+  waitUntil(
+    tryDequeue().catch((error) => {
+      console.error("OPPORTUNISTIC DEQUEUE ERROR:", error);
     }),
   );
 }
@@ -698,19 +711,40 @@ async function triggerWorkCardStarted(missionId: string, workCardId: string) {
   });
 }
 
-async function promoteNextPending(agentId: string) {
+async function dequeueNextForAgent(agentId: string) {
   agentId = assertSafeId(agentId, "agent_id");
+  if (await hasRunningCard(agentId)) return null;
   const rows = await db
     .select({ card: workCards })
     .from(workCards)
     .innerJoin(agentInstances, eq(agentInstances.id, workCards.assigneeInstanceId))
-    .where(and(eq(agentInstances.agentId, agentId), sql`${workCards.status} in ('queued', 'approved', 'pending')`))
+    .where(and(eq(agentInstances.agentId, agentId), eq(workCards.status, "queued")))
     .orderBy(asc(workCards.createdAt))
     .limit(1);
   const row = rows[0]?.card;
   if (!row) return null;
   waitUntil(startWorkCard(row.id));
   return row.id;
+}
+
+async function tryDequeue() {
+  const rows = await db
+    .select({ card: workCards })
+    .from(workCards)
+    .where(eq(workCards.status, "queued"))
+    .orderBy(asc(workCards.createdAt))
+    .limit(100);
+  const agentIds = new Set<string>();
+  const started: string[] = [];
+  for (const { card } of rows) {
+    if (!card.assigneeInstanceId) continue;
+    const [instance] = await db.select({ agentId: agentInstances.agentId }).from(agentInstances).where(eq(agentInstances.id, card.assigneeInstanceId)).limit(1);
+    if (!instance || agentIds.has(instance.agentId) || await hasRunningCard(instance.agentId)) continue;
+    agentIds.add(instance.agentId);
+    waitUntil(startWorkCard(card.id));
+    started.push(card.id);
+  }
+  return { started };
 }
 
 export async function executeWorkCard(workCardId: string) {
@@ -796,7 +830,7 @@ async function startWorkCard(workCardId: string, missionIdFilter?: string) {
       action: "work_card_completed",
       diffSummary: "status:done",
     });
-    waitUntil(Promise.resolve(promoteNextPending(agent.id)));
+    waitUntil(Promise.resolve(dequeueNextForAgent(agent.id)));
     return (await db.select().from(workCards).where(eq(workCards.id, workCardId)).limit(1))[0] ?? null;
   } catch (error) {
     await db.update(workCards).set({ status: "failed", updatedAt: now() }).where(eq(workCards.id, workCardId));
@@ -808,17 +842,18 @@ async function startWorkCard(workCardId: string, missionIdFilter?: string) {
       action: "work_card_failed",
       diffSummary: error instanceof Error ? error.message : "error.work_card.execution_failed",
     });
+    waitUntil(Promise.resolve(dequeueNextForAgent(agent.id)));
     return (await db.select().from(workCards).where(eq(workCards.id, workCardId)).limit(1))[0] ?? null;
   }
 }
 
 async function executeWorkCardMemoryMode(card: typeof workCards.$inferSelect, agentId: string, instanceId: string, sandboxAffinity: SandboxAffinityInput) {
   const ref = sandboxAffinity.tier === "private" ? await e2b.startPrivate(card.missionId, instanceId) : await e2b.startShared(card.missionId);
-  const path = `/workspace/work-cards/${card.id}.md`;
+  const path = `work-cards/${card.id}.md`;
   const body = [`# ${card.title}`, "", card.description ?? "No description.", "", `Status: executed in memory mode`, `Sandbox: ${ref.sandboxId}`].join("\n");
   await e2b.writeFile(ref, path, body);
   await emitCostEvent({ missionId: card.missionId, agentId, instanceId, sandboxId: ref.sandboxId, sandboxSeconds: 1, costCents: 1, eventType: "sandbox_burn" });
-  return `Completed in memory mode. Wrote ${path}.`;
+  return `Completed in memory mode. Wrote /workspace/${path}.`;
 }
 
 async function createMission(input: { title: string; objective: string; ownerType: "user" | "agent"; ownerAgentId?: string; leaderAgentId?: string; dailyBudgetCents?: number; requestUserId: string }) {
@@ -1053,6 +1088,13 @@ async function runAgentToolLoop(input: {
   }
   await assertUserBudgetForMission(input.missionId, 1);
   const openai = createOpenAI({ apiKey });
+  const rosterRows = await loadMissionAgentRows(input.missionId).catch(() => []);
+  const agentRoster = rosterRows.map((row) => [
+    `instanceId=${row.instance.id}`,
+    `agentId=${row.agent.id}`,
+    `name=${row.instance.displayAlias || row.agent.displayName}`,
+    `role=${row.instance.role}`,
+  ].join(" ")).join("\n");
   const result = streamText({
     model: openai(modelName),
     stopWhen: stepCountIs(20),
@@ -1060,6 +1102,7 @@ async function runAgentToolLoop(input: {
       boot?.soul ?? input.systemFallback,
       boot?.identity ?? "",
       boot ? `Equipped skills: ${JSON.stringify(boot.skillsIndex)}` : "",
+      agentRoster ? `Mission agent instances available for assignment:\n${agentRoster}` : "",
       input.missionContext,
       "You are an execution agent. Use tools to inspect, run commands, read/write files, and report concrete progress. Finish with a concise summary of what you actually did.",
     ].filter(Boolean).join("\n\n"),
@@ -1237,6 +1280,7 @@ app.use("/api/public/*", async (c, next) => {
   (c as any).set("userProfile", profile);
   maybeReapInBackground();
   await next();
+  maybeDequeueInBackground();
 });
 
 app.get("/api/public/health", (c) => c.json({ ok: true, service: "missionry-api", runtime: "edgespark", contract: "v0.6" }));
@@ -1419,6 +1463,40 @@ app.get("/api/public/agents", async (c) => {
     })
     .map((agent: typeof agents.$inferSelect) => agentListItem(agent, instanceCounts.get(agent.id) ?? 0));
   return c.json({ items });
+});
+
+app.get("/api/public/agents/:agentId/work-cards", async (c) => {
+  const agentId = assertSafeId(c.req.param("agentId"), "agent_id");
+  const profile = currentUserProfile(c);
+  const instances = await db.select().from(agentInstances).where(eq(agentInstances.agentId, agentId));
+  if (instances.length === 0) return c.json({ running: null, queued: [], recentDone: [] });
+  const instanceIds = (instances as Array<typeof agentInstances.$inferSelect>).map((row) => row.id);
+  const cards = await db
+    .select()
+    .from(workCards)
+    .where(inArray(workCards.assigneeInstanceId, instanceIds))
+    .orderBy(asc(workCards.createdAt));
+  const visible = [];
+  const accessCache = new Map<string, boolean>();
+  for (const card of cards) {
+    let allowed = accessCache.get(card.missionId);
+    if (allowed === undefined) {
+      allowed = await userHasMissionAccess(profile, card.missionId);
+      accessCache.set(card.missionId, allowed);
+    }
+    if (allowed) visible.push(card);
+  }
+  const running = visible.find((card) => card.status === "running") ?? null;
+  const queued = visible.filter((card) => card.status === "queued").sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  const recentDone = visible
+    .filter((card) => card.status === "done")
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+    .slice(0, 20);
+  return c.json({
+    running: running ? workCardJson(running) : null,
+    queued: queued.map(workCardJson),
+    recentDone: recentDone.map(workCardJson),
+  });
 });
 
 app.post("/api/public/agents", async (c) => {
@@ -1935,7 +2013,7 @@ app.patch("/api/public/missions/:id/work-cards/:workCardId", async (c) => {
   const nextStatus = body.status === "running" && before.status !== "running" ? "queued" : body.status ?? before.status;
   await db.update(workCards).set({ status: nextStatus, updatedAt: now() }).where(eq(workCards.id, workCardId));
   let promoted: string | null = null;
-  if (body.status === "done" || body.status === "failed") promoted = await promoteNextPending(await agentForInstance(before.assigneeInstanceId ?? ""));
+  if (body.status === "done" || body.status === "failed") promoted = await dequeueNextForAgent(await agentForInstance(before.assigneeInstanceId ?? ""));
   if (body.status === "running" && before.status !== "running") waitUntil(startWorkCard(workCardId));
   return c.json({ actionId: crypto.randomUUID(), status: "completed", workCardId, promoted });
 });
@@ -2101,6 +2179,13 @@ app.post("/api/public/audit-events/:auditEventId/rollback", async (c) => {
   const auditEventId = c.req.param("auditEventId");
   const [row] = await db.select().from(auditEvents).where(eq(auditEvents.eventId, auditEventId)).limit(1);
   if (!row?.payloadRefJson) return jsonError(c, "error.audit.rollback_unavailable", 404);
+  const profile = currentUserProfile(c);
+  if (row.missionId) {
+    const denied = await assertMissionAccess(c, row.missionId);
+    if (denied) return denied;
+  } else if (profile.role !== "admin") {
+    return jsonError(c, "error.auth.admin_required", 403);
+  }
   const payload = JSON.parse(row.payloadRefJson) as { r2Key?: string; previousBody?: string; authoredAgainstAuditHeadId?: string | null };
   if (!payload.r2Key) return jsonError(c, "error.audit.rollback_unavailable", 404);
   if (row.subjectType === "agent") {
@@ -2119,7 +2204,7 @@ app.post("/api/public/audit-events/:auditEventId/rollback", async (c) => {
     missionId: row.missionId ?? undefined,
     subjectType: row.subjectType,
     subjectId: row.subjectId,
-    actor: { type: "user", id: "user_local" },
+    actor: { type: "user", id: profile.userId },
     action: "rollback_completed",
     diffSummary: `rollback:${row.eventId}`,
     payloadRef: { r2Key: payload.r2Key, rollbackOfEventId: row.eventId, authoredAgainstAuditHeadId: payload.authoredAgainstAuditHeadId ?? null },

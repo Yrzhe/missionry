@@ -3,7 +3,7 @@ import { tool } from "ai";
 import { eq, and } from "drizzle-orm";
 import { z } from "zod";
 import { loadSkill } from "../agents/files";
-import { agents, workCards } from "../defs/db_schema";
+import { agents, auditEvents, workCards } from "../defs/db_schema";
 import { buckets } from "../defs/storage_schema";
 import { assertSafeId, assertSafeRelativePath } from "../lib/safe-paths";
 import * as e2b from "../sandbox/e2b";
@@ -18,6 +18,11 @@ export type ToolContext = {
   clientActionId?: string;
   workCardId?: string;
 };
+
+const sandboxAffinitySchema = z.object({
+  tier: z.enum(["tier0", "mission", "private"]),
+  reason: z.string().default("leader assignment"),
+});
 
 async function resolveSandbox(ctx: ToolContext, target: "mission" | "private"): Promise<SandboxRef> {
   await e2b.assertInstanceInMission(ctx.missionId, ctx.instanceId);
@@ -175,6 +180,97 @@ export function missionryToolKit(ctx: ToolContext) {
             .set({ status: input.status, updatedAt: new Date().toISOString() })
             .where(and(eq(workCards.id, input.workCardId), eq(workCards.missionId, ctx.missionId)));
           return { workCardId: input.workCardId, status: input.status };
+        }),
+    }),
+    assign_work_card: tool({
+      description: "Leader-only assignment tool. Assign an existing proposed work card to a Mission agent instance, or create a new queued work card for that instance.",
+      inputSchema: z.object({
+        workCardId: z.string().optional(),
+        title: z.string().optional(),
+        description: z.string().optional(),
+        assigneeInstanceId: z.string(),
+        sandboxAffinity: sandboxAffinitySchema.optional(),
+      }),
+      execute: (input) =>
+        withUsageAndSpend("assign_work_card", ctx, async () => {
+          const assigneeInstanceId = assertSafeId(input.assigneeInstanceId, "instance_id");
+          await e2b.assertInstanceInMission(ctx.missionId, assigneeInstanceId);
+          const timestamp = new Date().toISOString();
+          const sandboxAffinity = input.sandboxAffinity ?? { tier: "mission" as const, reason: "leader assignment" };
+          const auditId = crypto.randomUUID();
+          const auditEventId = `evt_${auditId}`;
+          if (input.workCardId) {
+            const workCardId = assertSafeId(input.workCardId, "work_card_id");
+            const [updated, _audit] = await db.batch([
+              db
+                .update(workCards)
+                .set({
+                  ...(input.title ? { title: input.title } : {}),
+                  ...(input.description !== undefined ? { description: input.description } : {}),
+                  pmInstanceId: ctx.instanceId,
+                  assigneeInstanceId,
+                  status: "queued",
+                  sandboxAffinityJson: JSON.stringify(sandboxAffinity),
+                  updatedAt: timestamp,
+                })
+                .where(and(eq(workCards.id, workCardId), eq(workCards.missionId, ctx.missionId), eq(workCards.status, "proposed")))
+                .returning(),
+              db.insert(auditEvents).values({
+                id: auditId,
+                eventId: auditEventId,
+                missionId: ctx.missionId,
+                subjectType: "work_card",
+                subjectId: workCardId,
+                actorJson: JSON.stringify({ type: "agent", id: ctx.agentId }),
+                action: "work_card_assigned",
+                clientActionId: ctx.clientActionId ?? null,
+                diffSummary: `assignee:${assigneeInstanceId};status:queued`,
+                payloadRefJson: null,
+                reversible: 0,
+                rollbackAvailable: 0,
+                createdAt: timestamp,
+              }),
+            ]);
+            if (updated.length !== 1) throw new Error("error.work_card.assign_failed");
+            return { workCardId, status: "queued", assigneeInstanceId, auditEventId };
+          }
+          if (!input.title) throw new Error("error.request.invalid");
+          const workCardId = `wc_${crypto.randomUUID().slice(0, 8)}`;
+          await db.batch([
+            db.insert(workCards).values({
+              id: workCardId,
+              missionId: ctx.missionId,
+              title: input.title,
+              description: input.description ?? null,
+              pmInstanceId: ctx.instanceId,
+              assigneeInstanceId,
+              reviewerInstanceId: null,
+              status: "queued",
+              priority: "medium",
+              sandboxAffinityJson: JSON.stringify(sandboxAffinity),
+              dependenciesJson: JSON.stringify([]),
+              issueIdsJson: JSON.stringify([]),
+              costJson: JSON.stringify({ spentCents: 0 }),
+              createdAt: timestamp,
+              updatedAt: timestamp,
+            }),
+            db.insert(auditEvents).values({
+              id: auditId,
+              eventId: auditEventId,
+              missionId: ctx.missionId,
+              subjectType: "work_card",
+              subjectId: workCardId,
+              actorJson: JSON.stringify({ type: "agent", id: ctx.agentId }),
+              action: "work_card_created_assigned",
+              clientActionId: ctx.clientActionId ?? null,
+              diffSummary: `assignee:${assigneeInstanceId};status:queued`,
+              payloadRefJson: null,
+              reversible: 0,
+              rollbackAvailable: 0,
+              createdAt: timestamp,
+            }),
+          ]);
+          return { workCardId, status: "queued", assigneeInstanceId, auditEventId };
         }),
     }),
     commit_self_update: tool({

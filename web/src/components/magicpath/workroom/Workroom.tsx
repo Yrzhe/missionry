@@ -172,6 +172,7 @@ export function Workroom() {
         title: form.title.trim(),
         description: form.description.trim() || undefined,
         assigneeInstanceId: selectedAssignee,
+        status: 'approved',
         sandboxAffinity: { tier: form.tier, reason: 'manual' },
       });
       await refreshWorkroom();
@@ -384,6 +385,7 @@ function Stat({ label, value, sub }: { label: string; value: string; sub: string
 
 function PlanTab({ workroom, isGeneratingPlan, activeWorkCardId, onGeneratePlan, onStartWorkCard, onNewCard }: { workroom: WorkroomReadModel; isGeneratingPlan: boolean; activeWorkCardId: string | null; onGeneratePlan: () => void; onStartWorkCard: (workCardId: string) => void; onNewCard: () => void }) {
   const { t } = useTranslation();
+  const queuePositions = useMemo(() => queuePositionByCard(workroom.workCards), [workroom.workCards]);
   return (
     <div className="mp-tab-panel">
       <section className="mp-plan-cta">
@@ -398,10 +400,27 @@ function PlanTab({ workroom, isGeneratingPlan, activeWorkCardId, onGeneratePlan,
         <button className="mp-button" onClick={onNewCard}>{t('workroom.newCard')}</button>
       </div>
       <div className="mp-workcard-list">
-        {workroom.workCards.length ? workroom.workCards.map((card) => <WorkCardRow key={card.id} card={card} workroom={workroom} isStarting={activeWorkCardId === card.id} onStart={() => onStartWorkCard(card.id)} />) : <EmptyCta title={t('workroom.emptyCards.title')} body={t('workroom.emptyCards.body')} action={t('workroom.generatePlan.action')} onAction={onGeneratePlan} />}
+        {workroom.workCards.length ? workroom.workCards.map((card) => <WorkCardRow key={card.id} card={card} queuePosition={queuePositions.get(card.id)} workroom={workroom} isStarting={activeWorkCardId === card.id} onStart={() => onStartWorkCard(card.id)} />) : <EmptyCta title={t('workroom.emptyCards.title')} body={t('workroom.emptyCards.body')} action={t('workroom.generatePlan.action')} onAction={onGeneratePlan} />}
       </div>
     </div>
   );
+}
+
+function queuePositionByCard(cards: WorkCard[]) {
+  const byAssignee = new Map<string, number>();
+  const result = new Map<string, number>();
+  cards.forEach((card) => {
+    if (card.status !== 'queued') return;
+    if (typeof card.queuePosition === 'number') {
+      result.set(card.id, card.queuePosition);
+      return;
+    }
+    const key = card.assigneeInstanceId ?? 'unassigned';
+    const next = (byAssignee.get(key) ?? 0) + 1;
+    byAssignee.set(key, next);
+    result.set(card.id, next);
+  });
+  return result;
 }
 
 function ActivityTab({ events }: { events: MissionEvent[] }) {
@@ -452,7 +471,7 @@ function eventActionLabel(type: string, t: TFunction) {
 }
 
 function shouldRefreshWorkroom(type: string) {
-  return ['work_card_allocated', 'work_card_updated', 'work_card_started', 'work_card_completed', 'work_card_failed', 'mission_spend_updated', 'sandbox_burn', 'cost_event'].includes(type);
+  return ['work_card_allocated', 'work_card_assigned', 'work_card_queued', 'work_card_dequeued', 'work_card_updated', 'work_card_started', 'work_card_completed', 'work_card_failed', 'mission_spend_updated', 'sandbox_burn', 'cost_event'].includes(type);
 }
 
 function FileBrowser({ missionId, expanded = false }: { missionId: string; expanded?: boolean }) {
@@ -574,7 +593,7 @@ function ChatMessage({ message, workroom, leaderInstanceId }: { message: Mission
   );
 }
 
-function WorkCardRow({ card, workroom, isStarting, onStart }: { card: WorkCard; workroom: WorkroomReadModel; isStarting: boolean; onStart: () => void }) {
+function WorkCardRow({ card, queuePosition, workroom, isStarting, onStart }: { card: WorkCard; queuePosition?: number; workroom: WorkroomReadModel; isStarting: boolean; onStart: () => void }) {
   const { t } = useTranslation();
   const assignee = workroom.agentInstances.find((row) => row.instance.id === card.assigneeInstanceId);
   const tier = card.sandboxAffinity?.tier ?? 'tier0';
@@ -584,7 +603,7 @@ function WorkCardRow({ card, workroom, isStarting, onStart }: { card: WorkCard; 
       <div className="mp-workcard-main">
         <div className="mp-section-title">
           <strong>{card.title}</strong>
-          <span className={`mp-chip ${card.status === 'running' ? 'dark' : ''}`}>{t(`status.${card.status}`, card.status)}</span>
+          <span className={`mp-chip ${card.status === 'running' ? 'dark' : ''}`}>{card.status === 'queued' && queuePosition ? t('workroom.queuePosition', { position: queuePosition }) : t(`status.${card.status}`, card.status)}</span>
         </div>
         <Markdown value={card.description ?? t('workroom.cardNoDescription')} compact />
       </div>

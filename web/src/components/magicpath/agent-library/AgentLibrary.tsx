@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../../../lib/api';
 import { useAppStore } from '../../../lib/store';
-import type { AgentLibraryItem, MissionSummary } from '../../../lib/types';
+import type { AgentLibraryItem, AgentWorkCardList, MissionSummary, WorkCard } from '../../../lib/types';
 import type { FormEvent } from 'react';
 import { Shell } from '../Shell';
 
@@ -176,11 +176,79 @@ function AgentCard({ agent, onRecruit }: { agent: AgentLibraryItem; onRecruit: (
         <span className="mp-chip">{t('agents.model')}: {agent.model ?? agent.globalIdentity?.baseConfigSummary ?? '-'}</span>
       </div>
       <p className="mp-muted">{t('agents.skills')}: {skills.length ? skills.join(', ') : t('common.pending')}</p>
+      <AgentTaskList agentId={agent.id} compact />
       <div className="mp-row-tight">
         <button className="mp-button dark" onClick={onRecruit}>{t('agents.recruit.action')}</button>
       </div>
       <div className="mp-muted mp-mono mp-small">{agent.updatedAt ?? agent.createdAt ?? agent.id}</div>
     </article>
+  );
+}
+
+export function AgentTaskList({ agentId, compact = false }: { agentId: string; compact?: boolean }) {
+  const { t } = useTranslation();
+  const [tasks, setTasks] = useState<AgentWorkCardList | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    setLoading(true);
+    setError(null);
+    api.agentWorkCards(agentId)
+      .then((response) => {
+        if (alive) setTasks({ running: response.running ?? null, queued: response.queued ?? [], recentDone: response.recentDone ?? [] });
+      })
+      .catch((taskError) => {
+        if (alive) {
+          setTasks(null);
+          setError(taskError instanceof Error ? taskError.message : t('agents.tasks.error'));
+        }
+      })
+      .finally(() => {
+        if (alive) setLoading(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [agentId, t]);
+
+  const queued = tasks?.queued ?? [];
+  const recentDone = tasks?.recentDone ?? [];
+  return (
+    <section className={`mp-agent-tasks ${compact ? 'compact' : ''}`}>
+      <div className="mp-section-title">
+        <strong>{t('agents.tasks.title')}</strong>
+        {loading ? <span className="mp-muted">{t('common.loading')}</span> : null}
+      </div>
+      {error ? <div className="mp-muted mp-small">{t('agents.tasks.unavailable')}</div> : null}
+      {tasks?.running ? <TaskRow card={tasks.running} label={t('agents.tasks.running')} /> : <div className="mp-muted mp-small">{t('agents.tasks.noRunning')}</div>}
+      {queued.length ? (
+        <div className="mp-agent-task-group">
+          <div className="mp-label">{t('agents.tasks.queued')}</div>
+          {queued.map((card, index) => <TaskRow key={card.id} card={card} label={t('agents.tasks.queuePosition', { position: card.queuePosition ?? index + 1 })} />)}
+        </div>
+      ) : <div className="mp-muted mp-small">{t('agents.tasks.noQueued')}</div>}
+      {recentDone.length ? (
+        <div className="mp-agent-task-group">
+          <div className="mp-label">{t('agents.tasks.recentDone')}</div>
+          {recentDone.slice(0, compact ? 3 : 8).map((card) => <TaskRow key={card.id} card={card} label={t('status.done')} />)}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function TaskRow({ card, label }: { card: WorkCard; label: string }) {
+  const { t } = useTranslation();
+  return (
+    <div className="mp-agent-task-row">
+      <span className={`mp-chip ${card.status === 'running' ? 'dark' : ''}`}>{label}</span>
+      <div>
+        <strong>{card.title}</strong>
+        <p className="mp-muted">{card.missionTitle ?? card.missionId ?? '-'} · {t(`status.${card.status}`, card.status)}</p>
+      </div>
+    </div>
   );
 }
 

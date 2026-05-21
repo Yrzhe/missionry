@@ -7,6 +7,7 @@ import type {
   CreateMissionInput,
   CreateWorkCardInput,
   DirectThreadReadModel,
+  AgentWorkCardList,
   MissionChatMessage,
   MissionEvent,
   MissionFileContent,
@@ -225,6 +226,7 @@ export const api = {
     body: JSON.stringify({ ...input, sandboxTarget: input.sandboxAffinity.tier }),
   }),
   agents: () => request<{ items: AgentLibraryItem[] }>('/agents'),
+  agentWorkCards: (agentId: string) => request<AgentWorkCardList>(`/agents/${agentId}/work-cards`),
   createAgent: (input: CreateAgentInput) => request<{ agent?: AgentLibraryItem; agentId?: string }>('/agents', {
     method: 'POST',
     body: JSON.stringify(input),

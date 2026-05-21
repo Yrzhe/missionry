@@ -496,6 +496,40 @@ strong { font-weight: 650; }
 
 .mp-agent-card-head > div:last-child { min-width: 0; }
 
+.mp-agent-tasks {
+  display: grid;
+  gap: 8px;
+  border-top: 1px solid #eee7d8;
+  padding-top: 10px;
+  min-width: 0;
+}
+
+.mp-agent-tasks.compact {
+  max-height: 280px;
+  overflow: auto;
+  padding-right: 3px;
+}
+
+.mp-agent-task-group {
+  display: grid;
+  gap: 6px;
+}
+
+.mp-agent-task-row {
+  display: grid;
+  grid-template-columns: minmax(82px, auto) minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+  padding: 7px 0;
+  border-top: 1px solid #f1eadc;
+  font-size: 13px;
+  min-width: 0;
+}
+
+.mp-agent-task-row p {
+  margin: 3px 0 0;
+}
+
 .mp-agent-avatar {
   width: 54px;
   height: 54px;
@@ -1231,7 +1265,7 @@ strong { font-weight: 650; }
   .mp-content { padding: 18px 14px; }
   .mp-topbar { padding: 8px 14px; flex-wrap: wrap; align-items: flex-start; }
   .mp-topbar-actions { margin-left: 0; width: 100%; }
-  .mp-mission-row, .mp-grid.two, .mp-grid.three, .mp-row, .mp-event, .mp-workcard-row, .mp-workcard-item, .mp-agent-sandbox-row, .mp-private-line, .mp-plan-cta, .mp-activity-row, .mp-growth-row, .mp-growth-rollback-row, .mp-admin-add-row, .mp-direct-layout, .mp-workroom-layout, .mp-env-status { grid-template-columns: 1fr; }
+  .mp-mission-row, .mp-grid.two, .mp-grid.three, .mp-row, .mp-event, .mp-workcard-row, .mp-workcard-item, .mp-agent-task-row, .mp-agent-sandbox-row, .mp-private-line, .mp-plan-cta, .mp-activity-row, .mp-growth-row, .mp-growth-rollback-row, .mp-admin-add-row, .mp-direct-layout, .mp-workroom-layout, .mp-env-status { grid-template-columns: 1fr; }
   .mp-metrics, .mp-sandbox-grid, .mp-sandbox-control-grid, .mp-agent-grid, .mp-growth-candidate-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .mp-env-status-line { justify-content: flex-start; }
   .mp-chat-panel, .mp-direct-chat { min-height: 520px; }

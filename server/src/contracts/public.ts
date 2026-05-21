@@ -76,8 +76,15 @@ export const startWorkCardResponseSchema = z.object({
   }),
 });
 
+export const agentWorkCardsResponseSchema = z.object({
+  running: workCardResponseSchema.nullable(),
+  queued: z.array(workCardResponseSchema),
+  recentDone: z.array(workCardResponseSchema),
+});
+
 export type MissionEventsResponse = z.infer<typeof missionEventsResponseSchema>;
 export type SandboxFilesResponse = z.infer<typeof sandboxFilesResponseSchema>;
 export type SandboxFileResponse = z.infer<typeof sandboxFileResponseSchema>;
 export type StartWorkCardResponse = z.infer<typeof startWorkCardResponseSchema>;
 export type DirectThreadCreateResponse = z.infer<typeof directThreadCreateResponseSchema>;
+export type AgentWorkCardsResponse = z.infer<typeof agentWorkCardsResponseSchema>;
