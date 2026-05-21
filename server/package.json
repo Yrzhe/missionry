@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "edgespark dev",
+    "test": "node test/golden-path-smoke.mjs",
     "typecheck": "tsc --noEmit",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "edgespark db migrate",

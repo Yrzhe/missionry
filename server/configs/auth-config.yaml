@@ -11,6 +11,9 @@ providerEmailPassword:
   enabled: true
   config:
     minPasswordLength: 10
-    requireEmailVerification: true
-    requirePasswordResetEmailVerification: true
+    # Email verification is OFF until an email-delivery provider is configured —
+    # turning it on without SMTP would lock out every account (no way to verify).
+    # disableSignUp: true is the actual security fix (no open self-registration).
+    requireEmailVerification: false
+    requirePasswordResetEmailVerification: false
     revokeSessionsOnPasswordReset: true

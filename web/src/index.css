@@ -561,6 +561,33 @@ strong { font-weight: 650; }
   resize: vertical;
 }
 
+.mp-fieldset {
+  display: grid;
+  gap: 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  padding: 10px;
+  margin: 0;
+}
+
+.mp-fieldset legend {
+  padding: 0 4px;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.mp-radio-line {
+  display: flex !important;
+  grid-template-columns: none !important;
+  align-items: center;
+  gap: 8px !important;
+}
+
+.mp-radio-line input {
+  width: auto;
+  min-height: auto;
+}
+
 .mp-guardrail {
   display: flex;
   justify-content: space-between;
@@ -594,11 +621,21 @@ strong { font-weight: 650; }
 
 .mp-env-area,
 .mp-agent-sandbox-compact,
+.mp-plan-cta,
 .mp-tab-panel,
 .mp-workcard-list,
 .mp-private-lines {
   display: grid;
   gap: 12px;
+}
+
+.mp-plan-cta {
+  grid-template-columns: minmax(0, 1fr) minmax(130px, auto);
+  align-items: center;
+  border: 1px solid var(--line);
+  background: #fffdf8;
+  border-radius: 8px;
+  padding: 12px;
 }
 
 .mp-workcard-list {
@@ -1189,7 +1226,7 @@ strong { font-weight: 650; }
   .mp-content { padding: 18px 14px; }
   .mp-topbar { padding: 8px 14px; flex-wrap: wrap; align-items: flex-start; }
   .mp-topbar-actions { margin-left: 0; width: 100%; }
-  .mp-mission-row, .mp-grid.two, .mp-grid.three, .mp-row, .mp-event, .mp-workcard-row, .mp-workcard-item, .mp-agent-sandbox-row, .mp-private-line, .mp-activity-row, .mp-growth-row, .mp-growth-rollback-row, .mp-admin-add-row, .mp-direct-layout, .mp-workroom-layout, .mp-env-status { grid-template-columns: 1fr; }
+  .mp-mission-row, .mp-grid.two, .mp-grid.three, .mp-row, .mp-event, .mp-workcard-row, .mp-workcard-item, .mp-agent-sandbox-row, .mp-private-line, .mp-plan-cta, .mp-activity-row, .mp-growth-row, .mp-growth-rollback-row, .mp-admin-add-row, .mp-direct-layout, .mp-workroom-layout, .mp-env-status { grid-template-columns: 1fr; }
   .mp-metrics, .mp-sandbox-grid, .mp-sandbox-control-grid, .mp-agent-grid, .mp-growth-candidate-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .mp-env-status-line { justify-content: flex-start; }
   .mp-chat-panel, .mp-direct-chat { min-height: 520px; }

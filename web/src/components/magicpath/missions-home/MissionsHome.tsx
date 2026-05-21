@@ -1,9 +1,9 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { api } from '../../../lib/api';
 import { useAppStore } from '../../../lib/store';
-import type { MissionAgentRow, MissionSummary } from '../../../lib/types';
+import type { AgentLibraryItem, MissionAgentRow, MissionSummary } from '../../../lib/types';
 import type { FormEvent } from 'react';
 import { Shell } from '../Shell';
 
@@ -11,6 +11,8 @@ type NewMissionForm = {
   title: string;
   objective: string;
   dailyBudgetCents: string;
+  leaderMode: 'default' | 'pick' | 'human';
+  leaderAgentId: string;
 };
 
 const STATUS_FILTERS = ['all', 'active', 'running', 'planning', 'blocked', 'completed'] as const;
@@ -34,9 +36,11 @@ export function MissionsHome() {
   const [agentFilter, setAgentFilter] = useState('all');
   const [statusFilter, setStatusFilter] = useState<(typeof STATUS_FILTERS)[number]>('all');
   const [modalOpen, setModalOpen] = useState(false);
+  const [libraryAgents, setLibraryAgents] = useState<AgentLibraryItem[]>([]);
+  const [isLoadingAgents, setIsLoadingAgents] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [form, setForm] = useState<NewMissionForm>({ title: '', objective: '', dailyBudgetCents: '2500' });
+  const [form, setForm] = useState<NewMissionForm>({ title: '', objective: '', dailyBudgetCents: '2500', leaderMode: 'default', leaderAgentId: '' });
 
   const agentOptions = useMemo(() => {
     const rows = new Map<string, MissionAgentRow['agent']>();
@@ -69,20 +73,57 @@ export function MissionsHome() {
     };
   }, [missions]);
 
+  useEffect(() => {
+    if (!modalOpen || form.leaderMode !== 'pick') return;
+    let alive = true;
+    setIsLoadingAgents(true);
+    api.agents()
+      .then((response) => {
+        if (alive) setLibraryAgents(response.items);
+      })
+      .catch(() => {
+        if (alive) setLibraryAgents([]);
+      })
+      .finally(() => {
+        if (alive) setIsLoadingAgents(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [form.leaderMode, modalOpen]);
+
   async function submitMission(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError(null);
     setIsSubmitting(true);
     try {
-      await api.createMission({
+      const created = await api.createMission({
         title: form.title.trim(),
         objective: form.objective.trim(),
         dailyBudgetCents: Number(form.dailyBudgetCents),
+        leaderMode: form.leaderMode,
+        leaderAgentId: form.leaderMode === 'pick' ? form.leaderAgentId : undefined,
       });
       const next = await api.missions();
       setMissions(next.items);
       setModalOpen(false);
-      setForm({ title: '', objective: '', dailyBudgetCents: '2500' });
+      setForm({ title: '', objective: '', dailyBudgetCents: '2500', leaderMode: 'default', leaderAgentId: '' });
+      navigate(`/missions/${created.missionId}`, { replace: false });
+    } catch (createError) {
+      setError(createError instanceof Error ? createError.message : t('missions.createError'));
+    } finally {
+      setIsSubmitting(false);
+    }
+  }
+
+  async function createDemoMission() {
+    setError(null);
+    setIsSubmitting(true);
+    try {
+      const created = await api.createDemoMission();
+      const next = await api.missions();
+      setMissions(next.items);
+      if (created.missionId) navigate(`/missions/${created.missionId}`);
     } catch (createError) {
       setError(createError instanceof Error ? createError.message : t('missions.createError'));
     } finally {
@@ -135,7 +176,7 @@ export function MissionsHome() {
       <div className="mp-card mp-list">
         {rows.length ? rows.map((mission) => (
           <MissionRow key={mission.id} mission={mission} agents={workrooms[mission.id]?.agentInstances ?? []} onOpen={() => navigate(`/missions/${mission.id}`)} />
-        )) : <EmptyCta title={t('missions.empty.title')} body={t('missions.empty.body')} action={t('missions.empty.action')} onAction={() => setModalOpen(true)} />}
+        )) : <EmptyCta title={t('missions.empty.title')} body={t('missions.empty.body')} action={t('missions.empty.action')} secondaryAction={t('missions.empty.demoAction')} onAction={() => setModalOpen(true)} onSecondaryAction={() => void createDemoMission()} />}
       </div>
 
       {modalOpen ? (
@@ -151,8 +192,23 @@ export function MissionsHome() {
             <label>{t('missions.modal.missionTitle')}<input value={form.title} onChange={(event) => setForm((current) => ({ ...current, title: event.target.value }))} required /></label>
             <label>{t('missions.modal.objective')}<textarea value={form.objective} onChange={(event) => setForm((current) => ({ ...current, objective: event.target.value }))} required /></label>
             <label>{t('missions.modal.dailyBudgetCents')}<input value={form.dailyBudgetCents} onChange={(event) => setForm((current) => ({ ...current, dailyBudgetCents: event.target.value }))} type="number" min={0} required /></label>
+            <fieldset className="mp-fieldset">
+              <legend>{t('missions.modal.leader')}</legend>
+              <label className="mp-radio-line"><input type="radio" name="leaderMode" checked={form.leaderMode === 'default'} onChange={() => setForm((current) => ({ ...current, leaderMode: 'default', leaderAgentId: '' }))} />{t('missions.modal.leader.default')}</label>
+              <label className="mp-radio-line"><input type="radio" name="leaderMode" checked={form.leaderMode === 'pick'} onChange={() => setForm((current) => ({ ...current, leaderMode: 'pick' }))} />{t('missions.modal.leader.pick')}</label>
+              <label className="mp-radio-line"><input type="radio" name="leaderMode" checked={form.leaderMode === 'human'} onChange={() => setForm((current) => ({ ...current, leaderMode: 'human', leaderAgentId: '' }))} />{t('missions.modal.leader.human')}</label>
+            </fieldset>
+            {form.leaderMode === 'pick' ? (
+              <label>
+                {t('missions.modal.leaderAgent')}
+                <select value={form.leaderAgentId} onChange={(event) => setForm((current) => ({ ...current, leaderAgentId: event.target.value }))} required>
+                  <option value="">{isLoadingAgents ? t('common.loading') : t('missions.modal.leaderAgentPlaceholder')}</option>
+                  {libraryAgents.map((agent) => <option key={agent.id} value={agent.id}>{agent.displayName}</option>)}
+                </select>
+              </label>
+            ) : null}
             {error ? <div className="mp-denied">{error}</div> : null}
-            <button className="mp-button dark" disabled={isSubmitting}>{isSubmitting ? t('common.saving') : t('common.create')}</button>
+            <button className="mp-button dark" disabled={isSubmitting || (form.leaderMode === 'pick' && !form.leaderAgentId)}>{isSubmitting ? t('common.saving') : t('common.create')}</button>
           </form>
         </div>
       ) : null}
@@ -198,12 +254,15 @@ function MissionRow({ mission, agents, onOpen }: { mission: MissionSummary; agen
   );
 }
 
-function EmptyCta({ title, body, action, onAction }: { title: string; body: string; action: string; onAction: () => void }) {
+function EmptyCta({ title, body, action, secondaryAction, onAction, onSecondaryAction }: { title: string; body: string; action: string; secondaryAction?: string; onAction: () => void; onSecondaryAction?: () => void }) {
   return (
     <div className="mp-empty mp-empty-cta">
       <h2>{title}</h2>
       <p>{body}</p>
-      <button className="mp-button dark" onClick={onAction}>{action}</button>
+      <div className="mp-row-tight">
+        <button className="mp-button dark" onClick={onAction}>{action}</button>
+        {secondaryAction && onSecondaryAction ? <button className="mp-button" onClick={onSecondaryAction}>{secondaryAction}</button> : null}
+      </div>
     </div>
   );
 }

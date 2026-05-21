@@ -19,6 +19,8 @@ export type CreateMissionInput = {
   title: string;
   objective: string;
   dailyBudgetCents: number;
+  leaderAgentId?: string;
+  leaderMode?: 'default' | 'pick' | 'human';
 };
 
 export type MissionSummary = {
@@ -95,7 +97,7 @@ export type WorkCard = {
   title: string;
   description?: string;
   assigneeInstanceId?: string;
-  status: string;
+  status: 'proposed' | 'approved' | 'queued' | 'pending' | 'running' | 'done' | 'failed' | 'cancelled' | 'blocked' | string;
   priority?: string;
   dependencies?: string[];
   issueIds?: string[];

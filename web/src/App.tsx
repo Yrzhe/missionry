@@ -71,11 +71,7 @@ function AppDataGate() {
     let alive = true;
     async function load() {
       try {
-        let missionItems = (await api.missions()).items;
-        if (!missionItems.length) {
-          await api.createDemoMission();
-          missionItems = (await api.missions()).items;
-        }
+        const missionItems = (await api.missions()).items;
         if (!alive) return;
         setMissions(missionItems);
         await Promise.all(

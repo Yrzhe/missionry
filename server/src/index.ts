@@ -48,6 +48,8 @@ type WorkCardInput = {
   description?: string;
   assigneeInstanceId: string;
   sandboxAffinity: SandboxAffinityInput;
+  status?: "proposed" | "approved" | "queued" | "pending";
+  mock?: boolean;
   demoAction?: string;
   path?: string;
   content?: string;
@@ -71,6 +73,7 @@ type MissionCreateInput = {
   dailyBudgetCents?: number;
   ownerType?: "user" | "agent";
   ownerAgentId?: string;
+  leaderAgentId?: string;
   owner?: OwnerInput;
 };
 
@@ -190,6 +193,10 @@ function isDevAdminOverride() {
   return vars.get("EDGESPARK_DEV_AS_ADMIN") === "true";
 }
 
+function forceMockAi() {
+  return vars.get("MISSIONRY_FORCE_MOCK_AI") === "true";
+}
+
 const processEnv = (globalThis as unknown as { process?: { env?: Record<string, string | undefined> } }).process?.env;
 if (processEnv?.EDGESPARK_DEV_AS_ADMIN === "true" && (processEnv.EDGESPARK_ENV || processEnv.NODE_ENV || "production").toLowerCase() !== "development") {
   throw new Error("error.runtime.dev_admin_forbidden");
@@ -197,7 +204,7 @@ if (processEnv?.EDGESPARK_DEV_AS_ADMIN === "true" && (processEnv.EDGESPARK_ENV |
 
 async function devHeaderSession(c: any) {
   if (runtimeEnv() !== "development") return null;
-  const expected = await Promise.resolve(secret.get("MISSIONRY_DEV_HEADER_SECRET")).catch(() => undefined);
+  const expected = vars.get("MISSIONRY_DEV_HEADER_SECRET") || undefined;
   if (!expected || c.req.header("x-missionry-dev-secret") !== expected) return null;
   const userId = c.req.header("x-missionry-dev-user-id");
   const email = c.req.header("x-missionry-dev-email");
@@ -284,7 +291,7 @@ async function resolveRequestProfile(c: any) {
   if (!session) return null;
   const existingRows = await db.select().from(usersProfile).where(eq(usersProfile.userId, session.userId)).limit(1);
   const existing = existingRows[0] ?? (await db.select().from(usersProfile).where(eq(usersProfile.email, session.email)).limit(1))[0];
-  const trustedAdminIds = await Promise.resolve(secret.get("MISSIONRY_SUPER_ADMIN_USER_IDS")).catch(() => "");
+  const trustedAdminIds = vars.get("MISSIONRY_SUPER_ADMIN_USER_IDS") ?? "";
   const isTrustedAdmin = session.userId === "dev_super_admin" || String(trustedAdminIds ?? "").split(",").map((value) => value.trim()).filter(Boolean).includes(session.userId);
   const whitelistRole = await resolveRole(session.email);
   const role = isTrustedAdmin || existing?.role === "admin" ? "admin" : whitelistRole;
@@ -566,6 +573,33 @@ async function ensureAgent(agentId: string, displayName = agentId) {
   });
 }
 
+async function ensureDefaultLeaderAgent() {
+  await ensureAgent("agt_forge", "Forge");
+  return "agt_forge";
+}
+
+async function resolveCreateLeaderAgentId(input: { ownerType: "user" | "agent"; ownerAgentId?: string; leaderAgentId?: string }) {
+  const explicitLeaderAgentId = input.leaderAgentId ? assertSafeId(input.leaderAgentId, "agent_id") : undefined;
+  if (explicitLeaderAgentId) {
+    const [agent] = await db.select({ id: agents.id }).from(agents).where(eq(agents.id, explicitLeaderAgentId)).limit(1);
+    if (!agent && explicitLeaderAgentId !== "agt_forge") throw new Error("error.agent.not_found");
+    if (!agent) await ensureDefaultLeaderAgent();
+    return explicitLeaderAgentId;
+  }
+  if (input.ownerType === "agent" && input.ownerAgentId) return assertSafeId(input.ownerAgentId, "agent_id");
+  return ensureDefaultLeaderAgent();
+}
+
+async function setMissionLeader(missionId: string, leaderInstanceId: string, promotedBy: string) {
+  missionId = assertSafeId(missionId, "mission_id");
+  leaderInstanceId = assertSafeId(leaderInstanceId, "instance_id");
+  const timestamp = now();
+  await db.batch([
+    db.delete(missionLeader).where(eq(missionLeader.missionId, missionId)),
+    db.insert(missionLeader).values({ missionId, leaderInstanceId, promotedBy, promotedAt: timestamp }),
+  ]);
+}
+
 async function attachInstance(missionId: string, agentId: string, role = "member") {
   missionId = assertSafeId(missionId, "mission_id");
   agentId = assertSafeId(agentId, "agent_id");
@@ -625,7 +659,8 @@ async function createQueuedWorkCard(missionId: string, input: WorkCardInput) {
   missionId = assertSafeId(missionId, "mission_id");
   input.assigneeInstanceId = assertSafeId(input.assigneeInstanceId, "instance_id");
   const agentId = await agentForInstance(input.assigneeInstanceId);
-  const shouldStart = input.activate !== false && !(await hasRunningCard(agentId));
+  const status = input.status ?? "queued";
+  const shouldStart = input.activate !== false && ["queued", "pending"].includes(status) && !(await hasRunningCard(agentId));
   const workCardId = `wc_${crypto.randomUUID().slice(0, 8)}`;
   await db.insert(workCards).values({
     id: workCardId,
@@ -635,19 +670,19 @@ async function createQueuedWorkCard(missionId: string, input: WorkCardInput) {
     pmInstanceId: input.assigneeInstanceId,
     assigneeInstanceId: input.assigneeInstanceId,
     reviewerInstanceId: null,
-    status: "pending",
+    status,
     priority: "medium",
     sandboxAffinityJson: JSON.stringify(input.sandboxAffinity),
     dependenciesJson: JSON.stringify([]),
     issueIdsJson: JSON.stringify([]),
-    costJson: JSON.stringify({ spentCents: 0 }),
+    costJson: JSON.stringify({ spentCents: 0, ...(input.mock ? { mock: true } : {}) }),
     createdAt: now(),
     updatedAt: now(),
   });
   if (shouldStart) {
-    waitUntil(executeWorkCard(workCardId));
+    waitUntil(startWorkCard(workCardId));
   }
-  return { workCardId, status: "pending" };
+  return { workCardId, status, mock: input.mock === true };
 }
 
 async function triggerWorkCardStarted(missionId: string, workCardId: string) {
@@ -669,39 +704,49 @@ async function promoteNextPending(agentId: string) {
     .select({ card: workCards })
     .from(workCards)
     .innerJoin(agentInstances, eq(agentInstances.id, workCards.assigneeInstanceId))
-    .where(and(eq(agentInstances.agentId, agentId), eq(workCards.status, "pending")))
+    .where(and(eq(agentInstances.agentId, agentId), sql`${workCards.status} in ('queued', 'approved', 'pending')`))
     .orderBy(asc(workCards.createdAt))
     .limit(1);
   const row = rows[0]?.card;
   if (!row) return null;
-  waitUntil(executeWorkCard(row.id));
+  waitUntil(startWorkCard(row.id));
   return row.id;
 }
 
 export async function executeWorkCard(workCardId: string) {
+  return startWorkCard(workCardId);
+}
+
+async function startWorkCard(workCardId: string, missionIdFilter?: string) {
   workCardId = assertSafeId(workCardId, "work_card_id");
-  const [card] = await db.select().from(workCards).where(eq(workCards.id, workCardId)).limit(1);
-  if (!card || card.status !== "pending" || !card.assigneeInstanceId) return;
+  if (missionIdFilter) missionIdFilter = assertSafeId(missionIdFilter, "mission_id");
+  const cardWhere = missionIdFilter ? and(eq(workCards.id, workCardId), eq(workCards.missionId, missionIdFilter)) : eq(workCards.id, workCardId);
+  const [card] = await db.select().from(workCards).where(cardWhere).limit(1);
+  if (!card || !card.assigneeInstanceId) return null;
+  if (["done", "failed", "cancelled", "blocked"].includes(card.status)) return card;
   const [instance] = await db.select().from(agentInstances).where(eq(agentInstances.id, card.assigneeInstanceId)).limit(1);
   if (!instance) throw new Error("error.agent_instance.not_found");
   const [agent] = await db.select().from(agents).where(eq(agents.id, instance.agentId)).limit(1);
   if (!agent) throw new Error("error.agent.not_found");
-  const claimed = await db
-    .update(workCards)
-    .set({ status: "running", updatedAt: now() })
-    .where(and(
-      eq(workCards.id, workCardId),
-      eq(workCards.status, "pending"),
-      sql`not exists (
-        select 1
-        from work_cards wc
-        inner join agent_instances ai on ai.id = wc.assignee_instance_id
-        where ai.agent_id = ${agent.id}
-          and wc.status = 'running'
-          and wc.id <> ${workCardId}
-      )`,
-    ))
-    .returning();
+  const [claimed] = await db.batch([
+    db
+      .update(workCards)
+      .set({ status: "running", updatedAt: now() })
+      .where(and(
+        eq(workCards.id, workCardId),
+        missionIdFilter ? eq(workCards.missionId, missionIdFilter) : sql`1 = 1`,
+        sql`${workCards.status} in ('proposed', 'approved', 'queued', 'pending')`,
+        sql`not exists (
+          select 1
+          from work_cards wc
+          inner join agent_instances ai on ai.id = wc.assignee_instance_id
+          where ai.agent_id = ${agent.id}
+            and wc.status = 'running'
+            and wc.id <> ${workCardId}
+        )`,
+      ))
+      .returning(),
+  ]);
   if (claimed.length !== 1) return;
 
   const missionId = card.missionId;
@@ -710,7 +755,10 @@ export async function executeWorkCard(workCardId: string) {
   await triggerWorkCardStarted(missionId, workCardId);
 
   try {
-    const finalText = await runAgentToolLoop({
+    const apiKey = forceMockAi() ? undefined : await Promise.resolve(secret.get("OPENAI_API_KEY")).catch(() => undefined);
+    const finalText = !apiKey && await e2b.useMemoryMode()
+      ? await executeWorkCardMemoryMode(card, agent.id, instance.id, sandboxAffinity)
+      : await runAgentToolLoop({
       missionId,
       agentId: agent.id,
       instanceId: instance.id,
@@ -731,7 +779,7 @@ export async function executeWorkCard(workCardId: string) {
       ],
       stubBody: "",
     });
-    if (!finalText) await executeWorkCardFallback(card, agent.id, instance.id, sandboxAffinity);
+    if (!finalText) throw new Error("error.secret.openai_missing");
     await db.update(workCards).set({ status: "done", costJson: JSON.stringify({ spentCents: 1 }), updatedAt: now() }).where(eq(workCards.id, workCardId));
     await persistMissionChatMessage({
       missionId,
@@ -749,6 +797,7 @@ export async function executeWorkCard(workCardId: string) {
       diffSummary: "status:done",
     });
     waitUntil(Promise.resolve(promoteNextPending(agent.id)));
+    return (await db.select().from(workCards).where(eq(workCards.id, workCardId)).limit(1))[0] ?? null;
   } catch (error) {
     await db.update(workCards).set({ status: "failed", updatedAt: now() }).where(eq(workCards.id, workCardId));
     await recordAudit({
@@ -759,31 +808,26 @@ export async function executeWorkCard(workCardId: string) {
       action: "work_card_failed",
       diffSummary: error instanceof Error ? error.message : "error.work_card.execution_failed",
     });
+    return (await db.select().from(workCards).where(eq(workCards.id, workCardId)).limit(1))[0] ?? null;
   }
 }
 
-async function executeWorkCardFallback(card: typeof workCards.$inferSelect, agentId: string, instanceId: string, sandboxAffinity: SandboxAffinityInput) {
-  if (sandboxAffinity.tier === "private") {
-    const ref = await e2b.startPrivate(card.missionId, instanceId);
-    await e2b.writeFile(ref, "/workspace/work-card.txt", card.title);
-    await emitCostEvent({ missionId: card.missionId, agentId, instanceId, sandboxId: ref.sandboxId, sandboxSeconds: 1, costCents: 1, eventType: "sandbox_burn" });
-    return;
-  }
-  if (sandboxAffinity.tier === "mission") {
-    const ref = await e2b.startShared(card.missionId);
-    await e2b.runCommand(ref, "pwd");
-    await emitCostEvent({ missionId: card.missionId, agentId, instanceId, sandboxId: ref.sandboxId, sandboxSeconds: 1, costCents: 1, eventType: "sandbox_burn" });
-    return;
-  }
-  await emitCostEvent({ missionId: card.missionId, agentId, instanceId, costCents: 1, eventType: "cost_event" });
+async function executeWorkCardMemoryMode(card: typeof workCards.$inferSelect, agentId: string, instanceId: string, sandboxAffinity: SandboxAffinityInput) {
+  const ref = sandboxAffinity.tier === "private" ? await e2b.startPrivate(card.missionId, instanceId) : await e2b.startShared(card.missionId);
+  const path = `/workspace/work-cards/${card.id}.md`;
+  const body = [`# ${card.title}`, "", card.description ?? "No description.", "", `Status: executed in memory mode`, `Sandbox: ${ref.sandboxId}`].join("\n");
+  await e2b.writeFile(ref, path, body);
+  await emitCostEvent({ missionId: card.missionId, agentId, instanceId, sandboxId: ref.sandboxId, sandboxSeconds: 1, costCents: 1, eventType: "sandbox_burn" });
+  return `Completed in memory mode. Wrote ${path}.`;
 }
 
-async function createMission(input: { title: string; objective: string; ownerType: "user" | "agent"; ownerAgentId?: string; dailyBudgetCents?: number; requestUserId: string }) {
+async function createMission(input: { title: string; objective: string; ownerType: "user" | "agent"; ownerAgentId?: string; leaderAgentId?: string; dailyBudgetCents?: number; requestUserId: string }) {
   const missionId = `mis_${crypto.randomUUID().slice(0, 10)}`;
   const state = defaultMissionState(missionId);
   const timestamp = now();
   let ownerInstanceId: string | null = null;
   if (input.ownerAgentId) assertSafeId(input.ownerAgentId, "agent_id");
+  const leaderAgentId = await resolveCreateLeaderAgentId(input);
   await db.insert(missions).values({
     id: missionId,
     title: input.title,
@@ -804,44 +848,110 @@ async function createMission(input: { title: string; objective: string; ownerTyp
     updatedAt: timestamp,
   });
   await reserveMissionSandboxSlot(missionId);
-  if (input.ownerType === "agent" && input.ownerAgentId) {
-    ownerInstanceId = await attachInstance(missionId, input.ownerAgentId, "owner");
-    await db.update(missions).set({ ownerInstanceId, updatedAt: now() }).where(eq(missions.id, missionId));
-  }
+  const leaderInstanceId = await attachInstance(missionId, leaderAgentId, input.ownerType === "agent" && input.ownerAgentId === leaderAgentId ? "owner" : "leader");
+  ownerInstanceId = leaderInstanceId;
+  await setMissionLeader(missionId, leaderInstanceId, input.requestUserId);
+  await db.update(missions).set({ ownerInstanceId, updatedAt: now() }).where(eq(missions.id, missionId));
   const [mission] = await db.select().from(missions).where(eq(missions.id, missionId)).limit(1);
   if (!mission) throw new Error("error.mission.not_found");
-  return { mission, missionId, ownerInstanceId };
+  return { mission, missionId, ownerInstanceId, leaderAgentId, leaderInstanceId };
+}
+
+type ProposedCard = {
+  title: string;
+  description?: string;
+  suggestedAssignee?: string;
+  sandboxAffinity?: SandboxAffinityInput;
+};
+
+function deterministicProposedCards(objective: string): ProposedCard[] {
+  return [
+    { title: "Clarify execution plan", description: `Turn the mission objective into concrete execution steps: ${objective}`, sandboxAffinity: { tier: "tier0", reason: "planning" } },
+    { title: "Prepare workspace evidence file", description: "Create a short implementation note inside the mission workspace so the user can verify execution.", sandboxAffinity: { tier: "mission", reason: "write verifiable output" } },
+    { title: "Run workspace smoke", description: "Run a simple command in the mission sandbox and report the result.", sandboxAffinity: { tier: "mission", reason: "execution smoke" } },
+  ];
+}
+
+function parseProposedCards(text: string): ProposedCard[] {
+  const trimmed = text.trim();
+  const jsonText = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/)?.[1] ?? trimmed;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(jsonText);
+  } catch {
+    return trimmed.split(/\n+/).map((line) => line.replace(/^[-*\d.\s]+/, "").trim()).filter(Boolean).slice(0, 4).map((title) => ({ title }));
+  }
+  const rawCards = Array.isArray(parsed) ? parsed : Array.isArray((parsed as any)?.cards) ? (parsed as any).cards : [];
+  return rawCards.slice(0, 6).map((card: any) => ({
+    title: String(card.title ?? "").trim(),
+    description: typeof card.description === "string" ? card.description.trim() : undefined,
+    suggestedAssignee: typeof card.suggestedAssignee === "string" ? card.suggestedAssignee.trim() : typeof card.assignee === "string" ? card.assignee.trim() : undefined,
+    sandboxAffinity: card.sandboxAffinity?.tier === "mission" || card.sandboxAffinity?.tier === "private" || card.sandboxAffinity?.tier === "tier0"
+      ? { tier: card.sandboxAffinity.tier, reason: String(card.sandboxAffinity.reason ?? "proposed") }
+      : undefined,
+  })).filter((card: ProposedCard) => card.title);
+}
+
+function resolveProposedAssignee(card: ProposedCard, rows: MissionAgentInstanceRow[], fallbackInstanceId: string) {
+  const wanted = card.suggestedAssignee?.toLowerCase();
+  if (!wanted) return fallbackInstanceId;
+  const match = rows.find((row) =>
+    row.instance.id.toLowerCase() === wanted ||
+    row.agent.id.toLowerCase() === wanted ||
+    row.agent.displayName.toLowerCase() === wanted ||
+    (row.instance.displayAlias ?? "").toLowerCase() === wanted
+  );
+  return match?.instance.id ?? fallbackInstanceId;
 }
 
 async function decomposeMission(missionId: string) {
   missionId = assertSafeId(missionId, "mission_id");
   const mission = await getMission(missionId);
-  if (mission.ownerType !== "agent" || !mission.ownerInstanceId || !mission.ownerAgentId) return { created: [] as Array<{ workCardId: string; status: string }> };
-  const apiKey = await Promise.resolve(secret.get("OPENAI_API_KEY")).catch(() => undefined);
+  let leader = await resolveMissionLeader(mission);
+  if (!leader) {
+    const leaderAgentId = await ensureDefaultLeaderAgent();
+    const leaderInstanceId = await attachInstance(missionId, leaderAgentId, "leader");
+    await setMissionLeader(missionId, leaderInstanceId, "system");
+    leader = await loadMissionAgentRowByInstance(missionId, leaderInstanceId);
+  }
+  if (!leader) return { created: [] as Array<{ workCardId: string; status: string; mock?: boolean }>, mock: true };
+  const apiKey = forceMockAi() ? undefined : await Promise.resolve(secret.get("OPENAI_API_KEY")).catch(() => undefined);
+  let proposed: ProposedCard[];
+  let mock = false;
   if (apiKey) {
     const openai = createOpenAI({ apiKey });
-    ctx.runInBackground(
-      generateText({
-        model: openai("gpt-5.5"),
-        prompt: `Decompose this Missionry objective into 2-4 concise work cards. Return terse titles only.\nObjective: ${mission.objective}`,
-      }).then(() => undefined).catch(() => undefined),
-    );
+    const result = await generateText({
+      model: openai("gpt-5.5"),
+      prompt: [
+        "Decompose this Missionry objective into 2-4 executable work cards.",
+        "Return JSON only as {\"cards\":[{\"title\":\"...\",\"description\":\"...\",\"suggestedAssignee\":\"agent display name or instance id\",\"sandboxAffinity\":{\"tier\":\"tier0|mission|private\",\"reason\":\"...\"}}]}.",
+        `Mission title: ${mission.title}`,
+        `Objective: ${mission.objective}`,
+      ].join("\n"),
+    });
+    proposed = parseProposedCards(result.text);
+  } else {
+    mock = true;
+    proposed = deterministicProposedCards(mission.objective);
   }
-  const cards = [
-    await createQueuedWorkCard(missionId, {
-      title: "Define execution plan",
-      assigneeInstanceId: mission.ownerInstanceId,
-      sandboxAffinity: { tier: "tier0", reason: "planning" },
+  if (proposed.length === 0) {
+    mock = true;
+    proposed = deterministicProposedCards(mission.objective);
+  }
+  const rows = await loadMissionAgentRows(missionId);
+  const cards = [];
+  for (const card of proposed) {
+    cards.push(await createQueuedWorkCard(missionId, {
+      title: card.title,
+      description: card.description,
+      assigneeInstanceId: resolveProposedAssignee(card, rows, leader.instance.id),
+      sandboxAffinity: card.sandboxAffinity ?? { tier: "mission", reason: "proposed execution" },
+      status: "proposed",
       activate: false,
-    }),
-    await createQueuedWorkCard(missionId, {
-      title: "Run shared workspace smoke",
-      assigneeInstanceId: mission.ownerInstanceId,
-      sandboxAffinity: { tier: "mission", reason: "shared execution" },
-      activate: false,
-    }),
-  ];
-  return { created: cards };
+      mock,
+    }));
+  }
+  return { created: cards, mock };
 }
 
 async function persistMissionChatMessage(input: {
@@ -924,7 +1034,7 @@ async function runAgentToolLoop(input: {
   clientActionId?: string;
   workCardId?: string;
 }) {
-  const apiKey = await Promise.resolve(secret.get("OPENAI_API_KEY")).catch(() => undefined);
+  const apiKey = forceMockAi() ? undefined : await Promise.resolve(secret.get("OPENAI_API_KEY")).catch(() => undefined);
   const boot = await loadAgentBootFiles(input.agentId).catch(() => null);
   const modelName = boot?.baseConfig.model ?? "gpt-5.5";
   if (!apiKey) {
@@ -1387,6 +1497,7 @@ app.post("/api/public/missions", async (c) => {
   const ownerType = body.ownerType ?? body.owner?.type ?? "user";
   if (ownerType !== "user" && ownerType !== "agent") return jsonError(c, "error.request.invalid", 400);
   const ownerAgentId = body.ownerAgentId ?? body.owner?.agentId;
+  const leaderAgentId = body.leaderAgentId ? assertSafeId(body.leaderAgentId, "agent_id") : undefined;
   if (ownerType === "agent" && !ownerAgentId) return jsonError(c, "error.request.invalid", 400);
   if (ownerAgentId) {
     const agentId = assertSafeId(ownerAgentId, "agent_id");
@@ -1398,11 +1509,12 @@ app.post("/api/public/missions", async (c) => {
     objective: body.objective,
     ownerType,
     ownerAgentId,
+    leaderAgentId,
     dailyBudgetCents: body.dailyBudgetCents,
     requestUserId: currentUserProfile(c).userId,
   });
   const missionJson = rowMission(created.mission);
-  return c.json({ ...missionJson, missionId: created.missionId, ownerInstanceId: created.ownerInstanceId }, 201);
+  return c.json({ ...missionJson, missionId: created.missionId, ownerInstanceId: created.ownerInstanceId, leaderAgentId: created.leaderAgentId, leaderInstanceId: created.leaderInstanceId }, 201);
 });
 
 app.get("/api/public/missions/:id", async (c) => {
@@ -1770,7 +1882,7 @@ app.post("/api/public/missions/:id/work-cards", async (c) => {
     pmInstanceId: assigneeInstanceId,
     assigneeInstanceId,
     reviewerInstanceId: null,
-    status: "pending",
+    status: "approved",
     priority: "medium",
     sandboxAffinityJson: JSON.stringify(sandboxAffinityFromTarget(body.sandboxTarget)),
     dependenciesJson: JSON.stringify([]),
@@ -1790,6 +1902,28 @@ app.post("/api/public/missions/:id/work-cards", async (c) => {
   return c.json({ actionId: crypto.randomUUID(), status: "completed", workCard: workCardJson(workCard), auditEventId }, 201);
 });
 
+app.post("/api/public/missions/:id/work-cards/:workCardId/start", async (c) => {
+  const denied = await assertMissionAccess(c);
+  if (denied) return denied;
+  const missionId = assertSafeId(c.req.param("id"), "mission_id");
+  const workCardId = assertSafeId(c.req.param("workCardId"), "work_card_id");
+  const updated = await startWorkCard(workCardId, missionId);
+  if (!updated) return jsonError(c, "error.work_card.not_started", 409);
+  const mission = await reconcileMissionSandboxRefs(missionId);
+  const instanceRows = await loadMissionAgentRows(missionId);
+  const cardRows = await db.select().from(workCards).where(eq(workCards.missionId, missionId)).orderBy(asc(workCards.createdAt));
+  return c.json({
+    actionId: crypto.randomUUID(),
+    status: "completed",
+    workCard: workCardJson(updated),
+    workroom: {
+      mission: missionRowJson(mission),
+      workCards: cardRows.map(workCardJson),
+      agentInstances: instanceRows.map((row) => missionAgentInstanceResponse(row, mission)),
+    },
+  });
+});
+
 app.patch("/api/public/missions/:id/work-cards/:workCardId", async (c) => {
   const denied = await assertMissionAccess(c);
   if (denied) return denied;
@@ -1798,11 +1932,11 @@ app.patch("/api/public/missions/:id/work-cards/:workCardId", async (c) => {
   const workCardId = assertSafeId(c.req.param("workCardId"), "work_card_id");
   const [before] = await db.select().from(workCards).where(and(eq(workCards.id, workCardId), eq(workCards.missionId, missionId))).limit(1);
   if (!before) return jsonError(c, "error.work_card.not_found", 404);
-  const nextStatus = body.status === "running" && before.status !== "running" ? "pending" : body.status ?? before.status;
+  const nextStatus = body.status === "running" && before.status !== "running" ? "queued" : body.status ?? before.status;
   await db.update(workCards).set({ status: nextStatus, updatedAt: now() }).where(eq(workCards.id, workCardId));
   let promoted: string | null = null;
   if (body.status === "done" || body.status === "failed") promoted = await promoteNextPending(await agentForInstance(before.assigneeInstanceId ?? ""));
-  if (body.status === "running" && before.status !== "running") waitUntil(executeWorkCard(workCardId));
+  if (body.status === "running" && before.status !== "running") waitUntil(startWorkCard(workCardId));
   return c.json({ actionId: crypto.randomUUID(), status: "completed", workCardId, promoted });
 });
 
@@ -1907,7 +2041,7 @@ app.post("/api/public/direct-threads/:threadId/messages", async (c) => {
 });
 
 async function generateDirectAgentReply(agentId: string, instanceId: string, missionId: string, userBody: string, clientActionId?: string) {
-  const apiKey = await Promise.resolve(secret.get("OPENAI_API_KEY")).catch(() => undefined);
+  const apiKey = forceMockAi() ? undefined : await Promise.resolve(secret.get("OPENAI_API_KEY")).catch(() => undefined);
   if (!apiKey) {
     await emitCostEvent({ missionId, agentId, instanceId, costCents: 1, eventType: "cost_event" });
     return `Acknowledged. I will handle: ${userBody}`;

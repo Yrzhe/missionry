@@ -60,8 +60,6 @@ async function ensureMemorySandbox(id: string): Promise<MemorySandbox> {
   let sandbox = memorySandboxes.get(id);
   if (!sandbox) {
     sandbox = { id, files: new Map(), state: "running" };
-    sandbox.files.set("/workspace/README.md", `# ${id}\n`);
-    sandbox.files.set("workspace/README.md", `# ${id}\n`);
     memorySandboxes.set(id, sandbox);
   }
   sandbox.state = "running";
@@ -512,7 +510,7 @@ export async function readWorkspaceFile(ref: SandboxRef, path: string, maxBytes 
     const sandbox = memorySandboxes.get(ref.sandboxId);
     if (!sandbox || sandbox.state !== "running") return { state: "none", content: "" };
     const content = sandbox.files.get(path) ?? sandbox.files.get(path.replace(/^\//, ""));
-    if (content === undefined) throw new Error("error.file.not_found");
+    if (content === undefined) return { state: "running", content: "" };
     return { state: "running", content: content.slice(0, maxBytes) };
   }
   if (!ref.e2bSandboxId) return { state: "none", content: "" };

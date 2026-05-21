@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { api } from '../../../lib/api';
@@ -54,7 +54,11 @@ export function Workroom() {
   const [chatError, setChatError] = useState<string | null>(null);
   const [isSendingChat, setIsSendingChat] = useState(false);
   const [sandboxAction, setSandboxAction] = useState<string | null>(null);
+  const [planAction, setPlanAction] = useState(false);
+  const [workCardAction, setWorkCardAction] = useState<string | null>(null);
+  const [directThreadAction, setDirectThreadAction] = useState<string | null>(null);
   const [remoteEvents, setRemoteEvents] = useState<MissionEvent[]>(EMPTY_EVENTS);
+  const lastRefreshEvent = useRef<string | null>(null);
 
   const defaultAssignee = workroom?.agentInstances[0]?.instance.id ?? '';
   const selectedAssignee = form.assigneeInstanceId || defaultAssignee;
@@ -98,10 +102,62 @@ export function Workroom() {
     };
   }, [activeTab, id]);
 
-  async function refreshWorkroom() {
+  const refreshWorkroom = useCallback(async () => {
     if (!id) return;
     const next = await api.workroom(id);
     setWorkroom(id, next);
+  }, [id, setWorkroom]);
+
+  useEffect(() => {
+    if (!id) return;
+    const event = storeEvents.find((item) => item.missionId === id && shouldRefreshWorkroom(item.type));
+    if (!event) return;
+    const eventKey = `${event.auditEventId ?? event.type}:${event.occurredAt ?? ''}:${event.payload?.subjectId ?? ''}`;
+    if (lastRefreshEvent.current === eventKey) return;
+    lastRefreshEvent.current = eventKey;
+    void refreshWorkroom().catch(() => undefined);
+  }, [id, refreshWorkroom, storeEvents]);
+
+  async function generatePlan() {
+    if (!id) return;
+    setPlanAction(true);
+    setError(null);
+    try {
+      await api.decomposeMission(id);
+      await refreshWorkroom();
+    } catch (planError) {
+      setError(planError instanceof Error ? planError.message : t('workroom.generatePlan.error'));
+    } finally {
+      setPlanAction(false);
+    }
+  }
+
+  async function startWorkCard(workCardId: string) {
+    if (!id) return;
+    setWorkCardAction(workCardId);
+    setError(null);
+    try {
+      await api.startWorkCard(id, workCardId);
+      await refreshWorkroom();
+    } catch (startError) {
+      setError(startError instanceof Error ? startError.message : t('workroom.startCard.error'));
+    } finally {
+      setWorkCardAction(null);
+    }
+  }
+
+  async function openDirectThread(instanceId: string) {
+    if (!id) return;
+    setDirectThreadAction(instanceId);
+    setError(null);
+    try {
+      const response = await api.createDirectThread(id, instanceId);
+      navigate(`/chat/${response.chatThreadId}`);
+    } catch (threadError) {
+      setError(threadError instanceof Error ? threadError.message : t('workroom.directThread.error'));
+    } finally {
+      setDirectThreadAction(null);
+    }
   }
 
   async function submitWorkCard(event: FormEvent<HTMLFormElement>) {
@@ -233,7 +289,7 @@ export function Workroom() {
             </div>
           </div>
         </div>
-        <FileBrowser missionId={workroom.mission.id} workCards={workroom.workCards} />
+        <FileBrowser missionId={workroom.mission.id} />
       </section>
 
       <section className="mp-card mp-agent-sandbox-compact">
@@ -252,6 +308,8 @@ export function Workroom() {
               isBusy={sandboxAction === row.instance.id}
               onStart={() => void runSandboxAction(row.instance.id, () => api.startAgentSandbox(workroom.mission.id, row.instance.id))}
               onPause={() => void runSandboxAction(row.instance.id, () => api.pauseAgentSandbox(workroom.mission.id, row.instance.id))}
+              isOpeningChat={directThreadAction === row.instance.id}
+              onOpenChat={() => void openDirectThread(row.instance.id)}
             />
           )) : <EmptyCta title={t('workroom.emptyAgents.title')} body={t('workroom.emptyAgents.body')} action={t('workroom.emptyAgents.action')} onAction={() => navigate('/agents')} />}
         </div>
@@ -264,9 +322,9 @@ export function Workroom() {
               <button key={tab} className={`mp-tab ${activeTab === tab ? 'active' : ''}`} onClick={() => setActiveTab(tab)}>{t(`workroom.${tab}`)}</button>
             ))}
           </div>
-          {activeTab === 'plan' ? <PlanTab workroom={workroom} onNewCard={() => setModalOpen(true)} /> : null}
+          {activeTab === 'plan' ? <PlanTab workroom={workroom} isGeneratingPlan={planAction} activeWorkCardId={workCardAction} onGeneratePlan={() => void generatePlan()} onStartWorkCard={(workCardId) => void startWorkCard(workCardId)} onNewCard={() => setModalOpen(true)} /> : null}
           {activeTab === 'activity' ? <ActivityTab events={missionEvents} /> : null}
-          {activeTab === 'artifacts' ? <FileBrowser missionId={workroom.mission.id} workCards={workroom.workCards} expanded /> : null}
+          {activeTab === 'artifacts' ? <FileBrowser missionId={workroom.mission.id} expanded /> : null}
         </section>
 
         <section className="mp-card mp-chat-panel">
@@ -322,16 +380,23 @@ function Stat({ label, value, sub }: { label: string; value: string; sub: string
   return <div className="mp-card mp-stat"><div className="mp-label">{label}</div><div className="mp-value">{value}</div><div className="mp-muted mp-small">{sub}</div></div>;
 }
 
-function PlanTab({ workroom, onNewCard }: { workroom: WorkroomReadModel; onNewCard: () => void }) {
+function PlanTab({ workroom, isGeneratingPlan, activeWorkCardId, onGeneratePlan, onStartWorkCard, onNewCard }: { workroom: WorkroomReadModel; isGeneratingPlan: boolean; activeWorkCardId: string | null; onGeneratePlan: () => void; onStartWorkCard: (workCardId: string) => void; onNewCard: () => void }) {
   const { t } = useTranslation();
   return (
     <div className="mp-tab-panel">
+      <section className="mp-plan-cta">
+        <div>
+          <strong>{t('workroom.generatePlan.title')}</strong>
+          <p className="mp-muted">{t('workroom.generatePlan.body')}</p>
+        </div>
+        <button className="mp-button dark" disabled={isGeneratingPlan || !workroom.agentInstances.length} onClick={onGeneratePlan}>{isGeneratingPlan ? t('common.saving') : t('workroom.generatePlan.action')}</button>
+      </section>
       <div className="mp-section-title">
         <strong>{t('workroom.cards')}</strong>
         <button className="mp-button" onClick={onNewCard}>{t('workroom.newCard')}</button>
       </div>
       <div className="mp-workcard-list">
-        {workroom.workCards.length ? workroom.workCards.map((card) => <WorkCardRow key={card.id} card={card} workroom={workroom} />) : <EmptyCta title={t('workroom.emptyCards.title')} body={t('workroom.emptyCards.body')} action={t('workroom.emptyCards.action')} onAction={onNewCard} />}
+        {workroom.workCards.length ? workroom.workCards.map((card) => <WorkCardRow key={card.id} card={card} workroom={workroom} isStarting={activeWorkCardId === card.id} onStart={() => onStartWorkCard(card.id)} />) : <EmptyCta title={t('workroom.emptyCards.title')} body={t('workroom.emptyCards.body')} action={t('workroom.generatePlan.action')} onAction={onGeneratePlan} />}
       </div>
     </div>
   );
@@ -367,23 +432,32 @@ function eventLabel(type: string) {
   return type.replace(/_/g, ' ');
 }
 
-function FileBrowser({ missionId, workCards, expanded = false }: { missionId: string; workCards: WorkCard[]; expanded?: boolean }) {
+function shouldRefreshWorkroom(type: string) {
+  return ['work_card_allocated', 'work_card_updated', 'work_card_started', 'work_card_completed', 'work_card_failed', 'mission_spend_updated', 'sandbox_burn', 'cost_event'].includes(type);
+}
+
+function FileBrowser({ missionId, expanded = false }: { missionId: string; expanded?: boolean }) {
   const { t } = useTranslation();
   const [path, setPath] = useState(ROOT_PATH);
   const [entries, setEntries] = useState<MissionFileEntry[]>([]);
   const [selected, setSelected] = useState<MissionFileContent | null>(null);
   const [loading, setLoading] = useState(false);
-  const fallbackEntries = useMemo(() => buildFallbackFiles(workCards), [workCards]);
+  const [error, setError] = useState<string | null>(null);
+  const [contentError, setContentError] = useState<string | null>(null);
 
   useEffect(() => {
     let alive = true;
     setLoading(true);
+    setError(null);
     api.missionFiles(missionId, path)
       .then((response) => {
         if (alive) setEntries(response.items);
       })
-      .catch(() => {
-        if (alive) setEntries([]);
+      .catch((fileError) => {
+        if (alive) {
+          setEntries([]);
+          setError(fileError instanceof Error ? fileError.message : t('workroom.files.error'));
+        }
       })
       .finally(() => {
         if (alive) setLoading(false);
@@ -391,21 +465,22 @@ function FileBrowser({ missionId, workCards, expanded = false }: { missionId: st
     return () => {
       alive = false;
     };
-  }, [missionId, path]);
-
-  const visibleEntries = entries.length ? entries : fallbackEntries;
+  }, [missionId, path, t]);
 
   async function openEntry(entry: MissionFileEntry) {
     if (entry.type === 'directory') {
       setPath(entry.path);
       setSelected(null);
+      setContentError(null);
       return;
     }
+    setContentError(null);
     try {
       const content = await api.missionFileContent(missionId, entry.path);
-      setSelected(content.content ? content : fallbackFileContent(entry, workCards));
-    } catch {
-      setSelected(fallbackFileContent(entry, workCards));
+      setSelected(content);
+    } catch (openError) {
+      setSelected(null);
+      setContentError(openError instanceof Error ? openError.message : t('workroom.files.previewError'));
     }
   }
 
@@ -418,10 +493,11 @@ function FileBrowser({ missionId, workCards, expanded = false }: { missionId: st
         </div>
         {path ? <button className="mp-button" onClick={() => { setPath(ROOT_PATH); setSelected(null); }}>{t('workroom.files.root')}</button> : null}
       </div>
+      {error ? <div className="mp-denied">{t('workroom.files.error')} · {error}</div> : null}
       <div className="mp-file-grid">
         <div className="mp-file-list">
           {loading ? <div className="mp-muted">{t('common.loading')}</div> : null}
-          {visibleEntries.length ? visibleEntries.map((entry) => (
+          {entries.length ? entries.map((entry) => (
             <button className="mp-file-row" key={entry.path} onClick={() => void openEntry(entry)}>
               <span>{t(entry.type === 'directory' ? 'workroom.files.kind.directory' : 'workroom.files.kind.file')}</span>
               <strong>{entry.name}</strong>
@@ -435,37 +511,14 @@ function FileBrowser({ missionId, workCards, expanded = false }: { missionId: st
               <div className="mp-label">{selected.path}</div>
               {selected.path.endsWith('.md') || selected.mimeType?.includes('markdown') ? <Markdown value={selected.content} /> : <pre>{selected.content}</pre>}
             </>
-          ) : <p className="mp-muted">{t('workroom.files.select')}</p>}
+          ) : contentError ? <p className="mp-denied">{t('workroom.files.previewError')} · {contentError}</p> : <p className="mp-muted">{t('workroom.files.select')}</p>}
         </div>
       </div>
     </div>
   );
 }
 
-function buildFallbackFiles(workCards: WorkCard[]): MissionFileEntry[] {
-  return [
-    { name: 'README.md', path: 'README.md', type: 'file' },
-    ...workCards.slice(0, 6).map((card, index) => ({
-      name: `${String(index + 1).padStart(2, '0')}-${slug(card.title)}.md`,
-      path: `work-cards/${String(index + 1).padStart(2, '0')}-${slug(card.title)}.md`,
-      type: 'file' as const,
-    })),
-  ];
-}
-
-function fallbackFileContent(entry: MissionFileEntry, workCards: WorkCard[]): MissionFileContent {
-  if (entry.path === 'README.md') {
-    return { path: entry.path, content: '# Mission workspace\n\nFiles from the mission sandbox will appear here when the file endpoint is available.\n\n- Work cards are listed as preview files for now.\n- Markdown files render directly in the Workroom.' };
-  }
-  const card = workCards.find((item) => entry.path.includes(slug(item.title)));
-  return { path: entry.path, content: `# ${card?.title ?? entry.name}\n\n${card?.description ?? 'No description yet.'}` };
-}
-
-function slug(value: string) {
-  return value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 48) || 'note';
-}
-
-function AgentSandboxLine({ row, isBusy, onStart, onPause }: { row: MissionAgentRow; isBusy: boolean; onStart: () => void; onPause: () => void }) {
+function AgentSandboxLine({ row, isBusy, isOpeningChat, onStart, onPause, onOpenChat }: { row: MissionAgentRow; isBusy: boolean; isOpeningChat: boolean; onStart: () => void; onPause: () => void; onOpenChat: () => void }) {
   const { t } = useTranslation();
   const sandbox: MissionSandboxReadModel = { state: 'none', ...row.instance.sandboxSummary };
   const canStart = sandbox.state === 'none' || sandbox.state === 'paused';
@@ -477,6 +530,7 @@ function AgentSandboxLine({ row, isBusy, onStart, onPause }: { row: MissionAgent
       <span className="mp-muted">{(sandbox.burnRateCentsPerMinute ?? 0).toFixed(1)}{t('common.centsPerMinute')}</span>
       <span className="mp-muted">{row.role}</span>
       <div className="mp-row-tight">
+        <button className="mp-button" disabled={isOpeningChat} onClick={onOpenChat}>{isOpeningChat ? t('common.saving') : t('workroom.openChat')}</button>
         {canStart ? <button className="mp-button" disabled={isBusy} onClick={onStart}>{isBusy ? t('common.saving') : t('workroom.startSandbox')}</button> : null}
         {canPause ? <button className="mp-button" disabled={isBusy} onClick={onPause}>{isBusy ? t('common.saving') : t('workroom.pauseSandbox')}</button> : null}
       </div>
@@ -501,16 +555,17 @@ function ChatMessage({ message, workroom, leaderInstanceId }: { message: Mission
   );
 }
 
-function WorkCardRow({ card, workroom }: { card: WorkCard; workroom: WorkroomReadModel }) {
+function WorkCardRow({ card, workroom, isStarting, onStart }: { card: WorkCard; workroom: WorkroomReadModel; isStarting: boolean; onStart: () => void }) {
   const { t } = useTranslation();
   const assignee = workroom.agentInstances.find((row) => row.instance.id === card.assigneeInstanceId);
   const tier = card.sandboxAffinity?.tier ?? 'tier0';
+  const canStart = ['proposed', 'approved', 'queued', 'pending', 'failed'].includes(card.status);
   return (
     <article className="mp-workcard-item">
       <div className="mp-workcard-main">
         <div className="mp-section-title">
           <strong>{card.title}</strong>
-          <span className="mp-chip">{t(`status.${card.status}`, card.status)}</span>
+          <span className={`mp-chip ${card.status === 'running' ? 'dark' : ''}`}>{t(`status.${card.status}`, card.status)}</span>
         </div>
         <Markdown value={card.description ?? t('workroom.cardNoDescription')} compact />
       </div>
@@ -518,6 +573,7 @@ function WorkCardRow({ card, workroom }: { card: WorkCard; workroom: WorkroomRea
         <Info label={t('workroom.assignee')} value={assignee?.agent.displayName ?? '-'} />
         <Info label={t('workroom.affinity')} value={t(tier === 'mission' ? 'workroom.tierMission' : tier === 'private' ? 'workroom.tierPrivate' : 'workroom.tier0')} />
         <Info label={t('workroom.cost')} value={money(card.cost?.spentCents)} />
+        {canStart ? <button className="mp-button dark" disabled={isStarting} onClick={onStart}>{isStarting ? t('common.saving') : t('workroom.startCard')}</button> : null}
       </div>
     </article>
   );

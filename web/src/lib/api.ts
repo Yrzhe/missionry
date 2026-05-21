@@ -10,7 +10,6 @@ import type {
   MissionChatMessage,
   MissionEvent,
   MissionFileContent,
-  MissionFileEntry,
   MissionSpendBreakdown,
   MissionSummary,
   Session,
@@ -79,18 +78,6 @@ async function optional<T>(path: string, empty: T): Promise<T> {
     if (error instanceof ApiError && error.status === 404) return empty;
     throw error;
   }
-}
-
-async function requestAny<T>(paths: string[], empty: T): Promise<T> {
-  for (const path of paths) {
-    try {
-      return await request<T>(path);
-    } catch (error) {
-      if (error instanceof ApiError && error.status === 404) continue;
-      throw error;
-    }
-  }
-  return empty;
 }
 
 export async function login(email: string, password: string) {
@@ -182,6 +169,14 @@ type RawMissionChatMessage = {
   createdAt: string;
 };
 
+type RawMissionFileEntry = {
+  name?: string;
+  path: string;
+  type: 'file' | 'dir' | 'directory' | string;
+  size?: number;
+  updatedAt?: string;
+};
+
 function normalizeMissionChatMessage(row: RawMissionChatMessage): MissionChatMessage {
   const authorType = row.author?.type ?? row.authorType ?? 'system';
   const authorId = row.author?.id ?? row.authorName ?? 'system';
@@ -211,12 +206,18 @@ export const api = {
       title: input.title,
       objective: input.objective,
       dailyBudgetCents: input.dailyBudgetCents,
-      owner: { type: 'user' },
+      leaderMode: input.leaderMode,
+      leaderAgentId: input.leaderAgentId,
+      ...(input.leaderMode === 'human'
+        ? { owner: { type: 'user' }, ownerType: 'user' }
+        : input.leaderAgentId
+          ? { owner: { type: 'agent', agentId: input.leaderAgentId }, ownerType: 'agent', ownerAgentId: input.leaderAgentId }
+          : {}),
     }),
   }),
   createWorkCard: (missionId: string, input: CreateWorkCardInput) => request<{ workCardId: string; status?: string }>(`/missions/${missionId}/work-cards`, {
     method: 'POST',
-    body: JSON.stringify(input),
+    body: JSON.stringify({ ...input, sandboxTarget: input.sandboxAffinity.tier }),
   }),
   agents: () => request<{ items: AgentLibraryItem[] }>('/agents'),
   createAgent: (input: CreateAgentInput) => request<{ agent?: AgentLibraryItem; agentId?: string }>('/agents', {
@@ -231,17 +232,22 @@ export const api = {
   pauseMissionSandbox: (missionId: string) => request<{ status?: string }>(`/missions/${missionId}/sandbox/pause`, { method: 'POST', body: '{}' }),
   startAgentSandbox: (missionId: string, instanceId: string) => request<{ status?: string }>(`/missions/${missionId}/agent-instances/${instanceId}/sandbox/start`, { method: 'POST', body: '{}' }),
   pauseAgentSandbox: (missionId: string, instanceId: string) => request<{ status?: string }>(`/missions/${missionId}/agent-instances/${instanceId}/sandbox/pause`, { method: 'POST', body: '{}' }),
-  missionEvents: (missionId: string) => optional<{ items: MissionEvent[] }>(`/missions/${missionId}/events.json`, { items: [] }),
-  missionFiles: (missionId: string, path = '') => requestAny<{ items: MissionFileEntry[] }>([
-    `/missions/${missionId}/files?path=${encodeURIComponent(path)}`,
-    `/missions/${missionId}/sandbox/files?path=${encodeURIComponent(path)}`,
-    `/missions/${missionId}/artifacts/files?path=${encodeURIComponent(path)}`,
-  ], { items: [] }),
-  missionFileContent: (missionId: string, path: string) => requestAny<MissionFileContent>([
-    `/missions/${missionId}/files/content?path=${encodeURIComponent(path)}`,
-    `/missions/${missionId}/sandbox/files/content?path=${encodeURIComponent(path)}`,
-    `/missions/${missionId}/artifacts/files/content?path=${encodeURIComponent(path)}`,
-  ], { path, content: '' }),
+  missionEvents: (missionId: string) => optional<{ items: MissionEvent[] }>(`/missions/${missionId}/events`, { items: [] }),
+  missionFiles: async (missionId: string, path = '') => {
+    const response = await request<{ path: string; state?: string; entries?: RawMissionFileEntry[] }>(`/missions/${missionId}/sandbox/files?path=${encodeURIComponent(path)}`);
+    return {
+      items: (response.entries ?? []).map((entry) => ({
+        name: entry.name ?? entry.path.split('/').filter(Boolean).at(-1) ?? entry.path,
+        path: entry.path,
+        type: entry.type === 'dir' ? 'directory' as const : entry.type === 'directory' ? 'directory' as const : 'file' as const,
+        size: entry.size,
+        updatedAt: entry.updatedAt,
+      })),
+    };
+  },
+  missionFileContent: (missionId: string, path: string) => request<MissionFileContent>(`/missions/${missionId}/sandbox/file?path=${encodeURIComponent(path)}`),
+  decomposeMission: (missionId: string) => request<{ actionId?: string; status?: string; created?: Array<{ workCardId: string; status: string }> }>(`/missions/${missionId}/decompose`, { method: 'POST', body: '{}' }),
+  startWorkCard: (missionId: string, workCardId: string) => request<{ actionId?: string; status?: string; workCard?: unknown; workCardId?: string }>(`/missions/${missionId}/work-cards/${workCardId}/start`, { method: 'POST', body: '{}' }),
   missionChat: async (missionId: string) => {
     const response = await request<{ items: RawMissionChatMessage[] }>(`/missions/${missionId}/chat`);
     return { items: response.items.map(normalizeMissionChatMessage) };
@@ -257,6 +263,7 @@ export const api = {
     };
   },
   directThread: (threadId: string) => request<DirectThreadReadModel>(`/direct-threads/${threadId}/messages`),
+  createDirectThread: (missionId: string, instanceId: string) => request<{ chatThreadId: string; created?: boolean }>(`/missions/${missionId}/agent-instances/${instanceId}/direct-thread`, { method: 'POST', body: '{}' }),
   sendDirectThreadMessage: (threadId: string, body: string) => request<{ message?: DirectThreadReadModel['messages'][number]; agentReply?: DirectThreadReadModel['messages'][number] }>(`/direct-threads/${threadId}/messages`, {
     method: 'POST',
     body: JSON.stringify({ body, clientActionId: `web_${Date.now()}` }),

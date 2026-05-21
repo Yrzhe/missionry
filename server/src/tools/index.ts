@@ -167,7 +167,7 @@ export function missionryToolKit(ctx: ToolContext) {
     }),
     report_progress: tool({
       description: "Update work-card status.",
-      inputSchema: z.object({ workCardId: z.string(), status: z.string() }),
+      inputSchema: z.object({ workCardId: z.string(), status: z.enum(["running", "blocked", "done", "failed"]) }),
       execute: (input) =>
         withUsageAndSpend("report_progress", ctx, async () => {
           await db
