@@ -27,6 +27,7 @@ import { buckets } from "./defs/storage_schema";
 import { assertSafeId, assertSafeRelativePath } from "./lib/safe-paths";
 import { seedDemo } from "./seed";
 import * as e2b from "./sandbox/e2b";
+import { AGENT_RUNNER_PY } from "./runtime/agentRunner";
 import { emitCostEvent, recentMissionEvents } from "./sse/events";
 import {
   defaultMissionState,
@@ -79,6 +80,19 @@ type MissionCreateInput = {
   leaderAgentId?: string;
   owner?: OwnerInput;
 };
+type RunnerCostJson = {
+  spentCents?: number;
+  mock?: boolean;
+  runner?: {
+    callbackToken?: string;
+    startedAt?: string;
+    completedAt?: string;
+    sandboxId?: string;
+    mode?: "e2b" | "memory";
+    status?: "running" | "done" | "failed";
+    resultFiles?: Array<{ path: string; size?: number }>;
+  };
+};
 
 const app = new Hono();
 const now = () => new Date().toISOString();
@@ -86,6 +100,7 @@ const DEV_ADMIN_EMAIL = "dev-admin@missionry.local";
 const DAY_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_IDLE_MS = 120000;
 const FILE_TEXT_CAP_BYTES = 256 * 1024;
+const RUNNER_DIR = ".missionry";
 let startupSeedPromise: Promise<unknown> | null = null;
 const storageBodyCache = new Map<string, string>();
 
@@ -481,6 +496,8 @@ async function missionRuntimeRowJson(row: Awaited<ReturnType<typeof getMission>>
 }
 
 function workCardJson(row: typeof workCards.$inferSelect) {
+  const cost = parseWorkCardCost(row);
+  if (cost.runner?.callbackToken) cost.runner = { ...cost.runner, callbackToken: undefined };
   return {
     id: row.id,
     missionId: row.missionId,
@@ -493,7 +510,7 @@ function workCardJson(row: typeof workCards.$inferSelect) {
     sandboxAffinity: JSON.parse(row.sandboxAffinityJson),
     dependencies: JSON.parse(row.dependenciesJson),
     issueIds: JSON.parse(row.issueIdsJson),
-    cost: JSON.parse(row.costJson),
+    cost,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -692,6 +709,24 @@ function missionAgentInstanceResponse(row: MissionAgentInstanceRow, mission?: Aw
 function sandboxAffinityFromTarget(sandboxTarget: unknown): SandboxAffinityInput {
   const tier = sandboxTarget === "mission" || sandboxTarget === "private" || sandboxTarget === "tier0" ? sandboxTarget : "tier0";
   return { tier, reason: "manual" };
+}
+
+function parseWorkCardCost(row: typeof workCards.$inferSelect): RunnerCostJson {
+  try {
+    return JSON.parse(row.costJson) as RunnerCostJson;
+  } catch {
+    return { spentCents: 0 };
+  }
+}
+
+function publicOrigin() {
+  const configured = vars.get("MISSIONRY_PUBLIC_ORIGIN")?.trim().replace(/\/+$/, "");
+  if (configured) return configured;
+  throw new Error("error.runtime.public_origin_missing");
+}
+
+function runnerCallbackUrl() {
+  return `${publicOrigin()}/api/webhooks/work-card-callback`;
 }
 
 function normalizeMentionHandle(value: string) {
@@ -901,6 +936,42 @@ export async function executeWorkCard(workCardId: string) {
   return startWorkCard(workCardId);
 }
 
+async function launchE2bWorkCardRunner(input: {
+  card: typeof workCards.$inferSelect;
+  agent: typeof agents.$inferSelect;
+  instance: typeof agentInstances.$inferSelect;
+  sandboxAffinity: SandboxAffinityInput;
+  callbackToken: string;
+}) {
+  const ref = input.sandboxAffinity.tier === "private"
+    ? await e2b.startPrivate(input.card.missionId, input.instance.id)
+    : await e2b.startShared(input.card.missionId);
+  const mission = await getMissionWithRuntimeSandboxes(input.card.missionId);
+  const boot = await loadAgentBootFiles(input.agent.id).catch(() => null);
+  const apiKey = await Promise.resolve(secret.get("OPENAI_API_KEY")).catch(() => undefined);
+  if (!apiKey) throw new Error("error.secret.openai_missing");
+  const task = {
+    cardId: input.card.id,
+    missionId: input.card.missionId,
+    instanceId: input.instance.id,
+    agentId: input.agent.id,
+    title: input.card.title,
+    description: input.card.description ?? "",
+    model: boot?.baseConfig.model ?? "gpt-5.5",
+    soul: boot?.soul ?? "",
+    identity: boot?.identity ?? "",
+    objective: mission.objective,
+    openaiApiKey: apiKey,
+    callbackUrl: runnerCallbackUrl(),
+    callbackToken: input.callbackToken,
+  };
+  await e2b.writeFile(ref, `${RUNNER_DIR}/task.json`, JSON.stringify(task, null, 2));
+  await e2b.writeFile(ref, `${RUNNER_DIR}/runner.py`, AGENT_RUNNER_PY);
+  await e2b.writeFile(ref, `${RUNNER_DIR}/status.json`, JSON.stringify({ state: "starting", step: 0, lastAction: "runner staged" }, null, 2));
+  await e2b.runCommand(ref, `chmod +x /workspace/${RUNNER_DIR}/runner.py && nohup python3 /workspace/${RUNNER_DIR}/runner.py > /workspace/${RUNNER_DIR}/runner.log 2>&1 < /dev/null &`);
+  return ref;
+}
+
 async function startWorkCard(workCardId: string, missionIdFilter?: string) {
   workCardId = assertSafeId(workCardId, "work_card_id");
   if (missionIdFilter) missionIdFilter = assertSafeId(missionIdFilter, "mission_id");
@@ -935,56 +1006,51 @@ async function startWorkCard(workCardId: string, missionIdFilter?: string) {
 
   const missionId = card.missionId;
   const sandboxAffinity = JSON.parse(card.sandboxAffinityJson) as SandboxAffinityInput;
-  const turnId = `turn_${crypto.randomUUID().slice(0, 8)}`;
   await triggerWorkCardStarted(missionId, workCardId);
 
   try {
-    const apiKey = forceMockAi() ? undefined : await Promise.resolve(secret.get("OPENAI_API_KEY")).catch(() => undefined);
-    const finalText = !apiKey && await e2b.useMemoryMode()
-      ? await executeWorkCardMemoryMode(card, agent.id, instance.id, sandboxAffinity)
-      : await runAgentToolLoop({
-      missionId,
-      agentId: agent.id,
-      instanceId: instance.id,
-      turnId,
-      workCardId,
-      systemFallback: "You are executing a Missionry work card. Use tools to make real progress and then report what changed.",
-      missionContext: "Work-card execution. Follow the card objective, choose the requested sandbox target, call report_progress as useful, and do not use canned demo actions.",
-      messages: [
-        {
-          role: "user",
-          content: [
-            `WorkCard ${card.id}: ${card.title}`,
-            card.description ? `Description: ${card.description}` : "",
-            `Sandbox affinity: ${JSON.stringify(sandboxAffinity)}`,
-            "Complete the actual work requested by this card. Run commands or read/write files when that is needed, then summarize exact actions and outcomes.",
-          ].filter(Boolean).join("\n"),
-        },
-      ],
-      stubBody: "",
-    });
-    if (!finalText) throw new Error("error.secret.openai_missing");
-    await db.update(workCards).set({ status: "done", costJson: JSON.stringify({ spentCents: 1 }), updatedAt: now() }).where(eq(workCards.id, workCardId));
-    await persistMissionChatMessage({
-      missionId,
-      authorType: "agent_instance",
-      authorId: instance.id,
-      body: finalText || `Completed work card: ${card.title}`,
-      mentions: [],
-    });
+    if (forceMockAi() || await e2b.useMemoryMode()) {
+      const finalText = await executeWorkCardMemoryMode(card, agent.id, instance.id, sandboxAffinity);
+      await db.update(workCards).set({ status: "done", costJson: JSON.stringify({ spentCents: 1, runner: { mode: "memory", status: "done", completedAt: now() } }), updatedAt: now() }).where(eq(workCards.id, workCardId));
+      await persistMissionChatMessage({
+        missionId,
+        authorType: "agent_instance",
+        authorId: instance.id,
+        body: finalText || `Completed work card: ${card.title}`,
+        mentions: [],
+      });
+      await recordAudit({
+        missionId,
+        subjectType: "work_card",
+        subjectId: workCardId,
+        actor: { type: "agent", id: agent.id },
+        action: "work_card_completed",
+        diffSummary: "status:done mode:memory",
+      });
+      const billedMission = await getMissionWithRuntimeSandboxes(missionId);
+      const billRef = sandboxAffinity.tier === "private" ? billedMission.stateJson.privateSandboxes[instance.id] : sandboxAffinity.tier === "mission" ? billedMission.stateJson.sharedSandbox : null;
+      if (billRef) await billSandboxActiveInterval({ missionId, ref: billRef, agentId: agent.id, instanceId: instance.id, resetClock: true });
+      waitUntil(Promise.resolve(dequeueNextForAgent(agent.id)));
+      return (await db.select().from(workCards).where(eq(workCards.id, workCardId)).limit(1))[0] ?? null;
+    }
+    const callbackToken = crypto.randomUUID();
+    const initialCost = parseWorkCardCost(card);
+    initialCost.runner = { ...(initialCost.runner ?? {}), mode: "e2b", status: "running", callbackToken, startedAt: now() };
+    await db.update(workCards).set({ costJson: JSON.stringify(initialCost), updatedAt: now() }).where(eq(workCards.id, workCardId));
+    const ref = await launchE2bWorkCardRunner({ card, agent, instance, sandboxAffinity, callbackToken });
+    const [freshCard] = await db.select().from(workCards).where(eq(workCards.id, workCardId)).limit(1);
+    const cost = parseWorkCardCost(freshCard ?? card);
+    cost.runner = { ...(cost.runner ?? {}), mode: "e2b", status: "running", callbackToken, startedAt: cost.runner?.startedAt ?? now(), sandboxId: ref.sandboxId };
+    const [running] = await db.update(workCards).set({ costJson: JSON.stringify(cost), updatedAt: now() }).where(eq(workCards.id, workCardId)).returning();
     await recordAudit({
       missionId,
       subjectType: "work_card",
       subjectId: workCardId,
       actor: { type: "agent", id: agent.id },
-      action: "work_card_completed",
-      diffSummary: "status:done",
+      action: "work_card_runner_started",
+      diffSummary: `sandbox:${ref.sandboxId}`,
     });
-    const billedMission = await getMissionWithRuntimeSandboxes(missionId);
-    const billRef = sandboxAffinity.tier === "private" ? billedMission.stateJson.privateSandboxes[instance.id] : sandboxAffinity.tier === "mission" ? billedMission.stateJson.sharedSandbox : null;
-    if (billRef) await billSandboxActiveInterval({ missionId, ref: billRef, agentId: agent.id, instanceId: instance.id, resetClock: true });
-    waitUntil(Promise.resolve(dequeueNextForAgent(agent.id)));
-    return (await db.select().from(workCards).where(eq(workCards.id, workCardId)).limit(1))[0] ?? null;
+    return running ?? (await db.select().from(workCards).where(eq(workCards.id, workCardId)).limit(1))[0] ?? null;
   } catch (error) {
     await db.update(workCards).set({ status: "failed", updatedAt: now() }).where(eq(workCards.id, workCardId));
     await recordAudit({
@@ -1536,11 +1602,9 @@ function reconcileMissionSandboxRefsInBackground(missionId: string) {
   );
 }
 
-// A work card runs inside a single Worker invocation (multi-step LLM tool loop + E2B).
-// If that invocation is killed by the platform wall-clock limit mid-run, startWorkCard's
-// try/catch never executes and the card is left 'running' forever. This sweep fails any
-// card stuck in 'running' past STUCK_WORK_CARD_MS so it stops hanging and the agent frees up.
-const STUCK_WORK_CARD_MS = 5 * 60 * 1000;
+// Live work cards run inside E2B and callback when complete. This remains as a
+// fallback for lost callbacks or runner crashes; E2B runs can legitimately take longer.
+const STUCK_WORK_CARD_MS = 15 * 60 * 1000;
 export async function reapStuckWorkCards() {
   const cutoff = new Date(Date.now() - STUCK_WORK_CARD_MS).toISOString();
   const stuck = await db.select().from(workCards).where(and(eq(workCards.status, "running"), lte(workCards.updatedAt, cutoff)));
@@ -1610,6 +1674,71 @@ app.use("/api/public/*", async (c, next) => {
 });
 
 app.get("/api/public/health", (c) => c.json({ ok: true, service: "missionry-api", runtime: "edgespark", contract: "v0.6" }));
+
+app.post("/api/webhooks/work-card-callback", async (c) => {
+  const token = c.req.header("x-callback-token") ?? "";
+  const body = (await c.req.json().catch(() => ({}))) as {
+    cardId?: string;
+    status?: "done" | "failed";
+    summary?: string;
+    files?: Array<{ path?: string; size?: number }>;
+    trace?: string;
+  };
+  const cardId = body.cardId ? assertSafeId(body.cardId, "work_card_id") : "";
+  if (!cardId || !token) return jsonError(c, "error.webhook.invalid", 400);
+  const [card] = await db.select().from(workCards).where(eq(workCards.id, cardId)).limit(1);
+  if (!card) return jsonError(c, "error.work_card.not_found", 404);
+  const cost = parseWorkCardCost(card);
+  if (!cost.runner?.callbackToken || cost.runner.callbackToken !== token) return jsonError(c, "error.webhook.unauthorized", 401);
+  if (["done", "failed", "cancelled", "blocked"].includes(card.status)) return c.json({ status: "ignored", cardId, currentStatus: card.status });
+  const [instance] = card.assigneeInstanceId ? await db.select().from(agentInstances).where(eq(agentInstances.id, card.assigneeInstanceId)).limit(1) : [];
+  if (!instance) return jsonError(c, "error.agent_instance.not_found", 404);
+  const [agent] = await db.select().from(agents).where(eq(agents.id, instance.agentId)).limit(1);
+  if (!agent) return jsonError(c, "error.agent.not_found", 404);
+  const nextStatus = body.status === "failed" ? "failed" : "done";
+  const timestamp = now();
+  const files = (body.files ?? [])
+    .filter((file) => typeof file.path === "string")
+    .slice(0, 200)
+    .map((file) => ({ path: String(file.path), ...(Number.isFinite(file.size) ? { size: Number(file.size) } : {}) }));
+  cost.runner = {
+    ...(cost.runner ?? {}),
+    callbackToken: cost.runner.callbackToken,
+    status: nextStatus,
+    completedAt: timestamp,
+    resultFiles: files,
+  };
+  const messageId = `mcm_${crypto.randomUUID().slice(0, 10)}`;
+  const summary = String(body.summary || (nextStatus === "done" ? `Completed work card: ${card.title}` : `Work card failed: ${card.title}`)).slice(0, 12000);
+  await db.batch([
+    db.update(workCards).set({ status: nextStatus, costJson: JSON.stringify(cost), updatedAt: timestamp }).where(eq(workCards.id, cardId)),
+    db.insert(missionChatMessages).values({
+      id: messageId,
+      missionId: card.missionId,
+      authorType: "agent_instance",
+      authorId: instance.id,
+      body: summary,
+      mentionsJson: JSON.stringify([]),
+      isSilent: 0,
+      replyToMessageId: null,
+      createdAt: timestamp,
+    }),
+  ]);
+  await recordAudit({
+    missionId: card.missionId,
+    subjectType: "work_card",
+    subjectId: cardId,
+    actor: nextStatus === "done" ? { type: "agent", id: agent.id } : { type: "system", id: "runner" },
+    action: nextStatus === "done" ? "work_card_completed" : "work_card_failed",
+    diffSummary: nextStatus === "done" ? `status:done files:${files.length}` : `status:failed ${summary}`,
+  });
+  const mission = await getMissionWithRuntimeSandboxes(card.missionId);
+  const sandboxAffinity = JSON.parse(card.sandboxAffinityJson) as SandboxAffinityInput;
+  const billRef = sandboxAffinity.tier === "private" ? mission.stateJson.privateSandboxes[instance.id] : sandboxAffinity.tier === "mission" ? mission.stateJson.sharedSandbox : null;
+  if (billRef) await billSandboxActiveInterval({ missionId: card.missionId, ref: billRef, agentId: agent.id, instanceId: instance.id, resetClock: true });
+  waitUntil(Promise.resolve(dequeueNextForAgent(agent.id)));
+  return c.json({ status: "completed", cardId, workCardStatus: nextStatus });
+});
 
 app.get("/api/public/me", async (c) => {
   const profile = currentUserProfile(c);

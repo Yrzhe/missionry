@@ -20,11 +20,15 @@ const env = {
 };
 
 function sqlite(args, options = {}) {
-  const result = spawnSync("sqlite3", args, { cwd, encoding: "utf8", ...options });
-  if (result.status !== 0) {
-    throw new Error(`sqlite3 ${args.join(" ")} failed\n${result.stdout}\n${result.stderr}`);
+  let lastResult;
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const result = spawnSync("sqlite3", args, { cwd, encoding: "utf8", ...options });
+    lastResult = result;
+    if (result.status === 0) return result.stdout.trim();
+    if (!/database is locked/i.test(`${result.stdout}\n${result.stderr}`)) break;
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100 * (attempt + 1));
   }
-  return result.stdout.trim();
+  throw new Error(`sqlite3 ${args.join(" ")} failed\n${lastResult?.stdout ?? ""}\n${lastResult?.stderr ?? ""}`);
 }
 
 function localD1Files() {
