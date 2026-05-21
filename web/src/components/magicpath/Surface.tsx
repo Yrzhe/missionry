@@ -83,7 +83,8 @@ function SandboxPanel({ sandbox }: { sandbox: MissionSandboxReadModel }) {
 
 function AgentsPage() {
   const { t } = useTranslation();
-  const workrooms = useAppStore((state) => Object.values(state.workrooms));
+  const workroomsMap = useAppStore((state) => state.workrooms);
+  const workrooms = Object.values(workroomsMap);
   const agents = new Map<string, MissionAgentRow>();
   workrooms.forEach((workroom) => workroom.agentInstances.forEach((row) => agents.set(row.agent.id, row)));
   return (
@@ -167,7 +168,8 @@ function BudgetPage() {
 function EnvironmentPage() {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const workroom = useAppStore((state) => Object.values(state.workrooms)[0]);
+  const workroomsMap = useAppStore((state) => state.workrooms);
+  const workroom = Object.values(workroomsMap)[0];
   const sandbox = workroom?.missionSandbox;
   return (
     <>

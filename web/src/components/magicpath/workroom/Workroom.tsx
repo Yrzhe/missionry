@@ -15,6 +15,7 @@ type NewWorkCardForm = {
 };
 
 const money = (cents = 0) => `$${(cents / 100).toFixed(2)}`;
+const EMPTY_MESSAGES: MissionChatMessage[] = [];
 
 export function Workroom() {
   const { id } = useParams();
@@ -22,7 +23,8 @@ export function Workroom() {
   const { t } = useTranslation();
   const workroom = useAppStore((state) => (id ? state.workrooms[id] : undefined));
   const setWorkroom = useAppStore((state) => state.setWorkroom);
-  const chatMessages = useAppStore((state) => (id ? state.missionChats[id] ?? [] : []));
+  const missionChatsMap = useAppStore((state) => state.missionChats);
+  const chatMessages = id ? missionChatsMap[id] ?? EMPTY_MESSAGES : EMPTY_MESSAGES;
   const setMissionChat = useAppStore((state) => state.setMissionChat);
   const appendMissionChat = useAppStore((state) => state.appendMissionChat);
   const [modalOpen, setModalOpen] = useState(false);
