@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../../../lib/api';
 import { queryKeys } from '../../../lib/query';
 import type { AgentLibraryItem, MissionAgentRow, MissionSummary } from '../../../lib/types';
@@ -33,21 +33,10 @@ export function MissionsHome() {
   const queryClient = useQueryClient();
   const missionsQuery = useQuery({ queryKey: queryKeys.missions, queryFn: api.missions });
   const missions = missionsQuery.data?.items ?? [];
-  const workroomQueries = useQueries({
-    queries: missions.slice(0, 25).map((mission) => ({
-      queryKey: queryKeys.workroom(mission.id),
-      queryFn: () => api.workroom(mission.id),
-      enabled: Boolean(mission.id),
-      staleTime: 15_000,
-    })),
-  });
-  const workrooms = useMemo(() => {
-    const rows: Record<string, NonNullable<(typeof workroomQueries)[number]['data']>> = {};
-    workroomQueries.forEach((query) => {
-      if (query.data) rows[query.data.mission.id] = query.data;
-    });
-    return rows;
-  }, [workroomQueries]);
+  // NOTE: the list intentionally does NOT prefetch each mission's full workroom.
+  // Doing that fired one /workroom request per mission (×N) and, combined with the
+  // SSE invalidate→refetch loop, exhausted browser connections (ERR_INSUFFICIENT_RESOURCES
+  // → white screen). The list renders from the mission summary only.
   const [query, setQuery] = useState('');
   const [agentFilter, setAgentFilter] = useState('all');
   const [statusFilter, setStatusFilter] = useState<(typeof STATUS_FILTERS)[number]>('all');
@@ -57,28 +46,25 @@ export function MissionsHome() {
   const agentsQuery = useQuery({
     queryKey: queryKeys.agents,
     queryFn: api.agents,
-    enabled: modalOpen && form.leaderMode === 'pick',
   });
   const libraryAgents: AgentLibraryItem[] = agentsQuery.data?.items ?? [];
 
-  const agentOptions = useMemo(() => {
-    const rows = new Map<string, MissionAgentRow['agent']>();
-    Object.values(workrooms).forEach((workroom) => {
-      workroom.agentInstances.forEach((row) => rows.set(row.agent.id, row.agent));
-    });
-    return Array.from(rows.values()).sort((a, b) => a.displayName.localeCompare(b.displayName));
-  }, [workrooms]);
+  // Filter options come from the lightweight global agents list (one request),
+  // not from every mission's workroom.
+  const agentOptions = useMemo(
+    () => libraryAgents.map((agent) => ({ id: agent.id, displayName: agent.displayName })).sort((a, b) => a.displayName.localeCompare(b.displayName)),
+    [libraryAgents],
+  );
 
   const rows = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
     return missions.filter((mission) => {
-      const workroom = workrooms[mission.id];
       const matchesStatus = statusFilter === 'all' || mission.status === statusFilter;
-      const matchesAgent = agentFilter === 'all' || workroom?.agentInstances.some((row) => row.agent.id === agentFilter);
+      const matchesAgent = agentFilter === 'all' || mission.owner?.agentId === agentFilter;
       const matchesQuery = !normalizedQuery || [mission.title, mission.objective, mission.owner?.displayName].some((value) => value?.toLowerCase().includes(normalizedQuery));
       return matchesStatus && matchesAgent && matchesQuery;
     });
-  }, [agentFilter, missions, query, statusFilter, workrooms]);
+  }, [agentFilter, missions, query, statusFilter]);
 
   const stats = useMemo(() => {
     const active = missions.filter((mission) => ['active', 'running', 'planning'].includes(mission.status)).length;
@@ -197,7 +183,7 @@ export function MissionsHome() {
 
       <div className="mp-card mp-list">
         {rows.length ? rows.map((mission) => (
-          <MissionRow key={mission.id} mission={mission} agents={workrooms[mission.id]?.agentInstances ?? []} isDeleting={deleteMissionMutation.variables === mission.id && deleteMissionMutation.isPending} onDelete={() => void deleteMission(mission)} onOpen={() => navigate(`/missions/${mission.id}`)} />
+          <MissionRow key={mission.id} mission={mission} agents={[]} isDeleting={deleteMissionMutation.variables === mission.id && deleteMissionMutation.isPending} onDelete={() => void deleteMission(mission)} onOpen={() => navigate(`/missions/${mission.id}`)} />
         )) : <EmptyCta title={t('missions.empty.title')} body={t('missions.empty.body')} action={t('missions.empty.action')} secondaryAction={t('missions.empty.demoAction')} onAction={() => setModalOpen(true)} onSecondaryAction={() => void createDemoMission()} />}
       </div>
 
