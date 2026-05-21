@@ -1,0 +1,16 @@
+# yaml-language-server: $schema=https://schemas.edgespark.dev/v1/auth-config.schema.json
+
+disableSignUp: true
+
+session:
+  expiresIn: 604800
+  updateAge: 86400
+  disableSessionRefresh: false
+
+providerEmailPassword:
+  enabled: true
+  config:
+    minPasswordLength: 10
+    requireEmailVerification: true
+    requirePasswordResetEmailVerification: true
+    revokeSessionsOnPasswordReset: true

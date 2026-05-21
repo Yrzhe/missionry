@@ -30,6 +30,7 @@ import { emitCostEvent, recentMissionEvents } from "./sse/events";
 import {
   defaultMissionState,
   getMission,
+  assertUserBudgetForMission,
   listIdleSandboxes,
   privateSandboxSlot,
   recordAudit,
@@ -75,7 +76,7 @@ type MissionCreateInput = {
 
 const app = new Hono();
 const now = () => new Date().toISOString();
-const SUPER_ADMIN_EMAIL = "qq1514337391@gmail.com";
+const DEV_ADMIN_EMAIL = "dev-admin@missionry.local";
 const DAY_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_IDLE_MS = 120000;
 const FILE_TEXT_CAP_BYTES = 256 * 1024;
@@ -83,7 +84,7 @@ let startupSeedPromise: Promise<unknown> | null = null;
 const storageBodyCache = new Map<string, string>();
 
 function runtimeEnv() {
-  return (vars.get("EDGESPARK_ENV") || vars.get("NODE_ENV") || "development").toLowerCase();
+  return (vars.get("EDGESPARK_ENV") || vars.get("NODE_ENV") || "production").toLowerCase();
 }
 
 function isProdLike() {
@@ -190,12 +191,14 @@ function isDevAdminOverride() {
 }
 
 const processEnv = (globalThis as unknown as { process?: { env?: Record<string, string | undefined> } }).process?.env;
-if (processEnv?.EDGESPARK_DEV_AS_ADMIN === "true" && (processEnv.EDGESPARK_ENV || processEnv.NODE_ENV || "development").toLowerCase() !== "development") {
+if (processEnv?.EDGESPARK_DEV_AS_ADMIN === "true" && (processEnv.EDGESPARK_ENV || processEnv.NODE_ENV || "production").toLowerCase() !== "development") {
   throw new Error("error.runtime.dev_admin_forbidden");
 }
 
-function devHeaderSession(c: any) {
+async function devHeaderSession(c: any) {
   if (runtimeEnv() !== "development") return null;
+  const expected = await Promise.resolve(secret.get("MISSIONRY_DEV_HEADER_SECRET")).catch(() => undefined);
+  if (!expected || c.req.header("x-missionry-dev-secret") !== expected) return null;
   const userId = c.req.header("x-missionry-dev-user-id");
   const email = c.req.header("x-missionry-dev-email");
   if (!userId || !email) return null;
@@ -203,11 +206,11 @@ function devHeaderSession(c: any) {
 }
 
 async function resolveSessionUser(c?: any) {
-  const devSession = c ? devHeaderSession(c) : null;
+  const devSession = c ? await devHeaderSession(c) : null;
   if (devSession) return devSession;
   // EdgeSpark dev curl smoke has no browser login, so EDGESPARK_DEV_AS_ADMIN
   // intentionally treats the request as the hardcoded super-admin.
-  if (isDevAdminOverride()) return { userId: "dev_super_admin", email: SUPER_ADMIN_EMAIL };
+  if (isDevAdminOverride()) return { userId: "dev_super_admin", email: DEV_ADMIN_EMAIL };
   const authAny = auth as any;
   const raw = typeof authAny.user === "function" ? await authAny.user() : authAny.user;
   const user = raw?.user ?? raw;
@@ -220,7 +223,6 @@ async function resolveSessionUser(c?: any) {
 async function resolveRole(email: string) {
   const normalized = normalizeEmail(email);
   if (!normalized) return null;
-  if (normalized === SUPER_ADMIN_EMAIL) return "admin";
   return (await isWhitelistedEmail(normalized)) ? "user" : null;
 }
 
@@ -237,7 +239,6 @@ function assertSafeAuthUserId(value: string) {
 }
 
 async function isWhitelistedEmail(email: string) {
-  if (email === SUPER_ADMIN_EMAIL) return true;
   const entries = await db.select().from(whitelistEntries).where(eq(whitelistEntries.enabled, 1));
   return entries.some((entry: typeof whitelistEntries.$inferSelect) => {
     const value = entry.value.trim().toLowerCase();
@@ -281,7 +282,12 @@ async function upsertUserProfile(userId: string, email: string, role: "admin" | 
 async function resolveRequestProfile(c: any) {
   const session = await resolveSessionUser(c);
   if (!session) return null;
-  const role = await resolveRole(session.email);
+  const existingRows = await db.select().from(usersProfile).where(eq(usersProfile.userId, session.userId)).limit(1);
+  const existing = existingRows[0] ?? (await db.select().from(usersProfile).where(eq(usersProfile.email, session.email)).limit(1))[0];
+  const trustedAdminIds = await Promise.resolve(secret.get("MISSIONRY_SUPER_ADMIN_USER_IDS")).catch(() => "");
+  const isTrustedAdmin = session.userId === "dev_super_admin" || String(trustedAdminIds ?? "").split(",").map((value) => value.trim()).filter(Boolean).includes(session.userId);
+  const whitelistRole = await resolveRole(session.email);
+  const role = isTrustedAdmin || existing?.role === "admin" ? "admin" : whitelistRole;
   if (!role) return null;
   return upsertUserProfile(session.userId, session.email, role);
 }
@@ -325,8 +331,26 @@ async function assertThreadAccess(c: any, threadId: string) {
   return { thread };
 }
 
+function publicSandboxRef(ref: SandboxRef) {
+  const { envdAccessToken: _envdAccessToken, envdHost: _envdHost, ...safe } = ref;
+  return safe;
+}
+
+function redactMissionStateJson(stateJson: any) {
+  return {
+    ...stateJson,
+    sharedSandbox: publicSandboxRef(stateJson.sharedSandbox),
+    privateSandboxes: Object.fromEntries(Object.entries(stateJson.privateSandboxes ?? {}).map(([key, value]) => [key, publicSandboxRef(value as SandboxRef)])),
+  };
+}
+
 function rowMission(row: typeof missions.$inferSelect) {
-  return { ...row, stateJson: JSON.parse(row.stateJson) };
+  const stateJson = JSON.parse(row.stateJson);
+  return { ...row, stateJson: redactMissionStateJson(stateJson) };
+}
+
+function missionRowJson(row: Awaited<ReturnType<typeof getMission>>) {
+  return { ...row, stateJson: redactMissionStateJson(row.stateJson) };
 }
 
 function workCardJson(row: typeof workCards.$inferSelect) {
@@ -471,12 +495,19 @@ function missionAgentInstanceResponse(row: MissionAgentInstanceRow, mission?: Aw
       workState: JSON.parse(row.instance.workStateJson),
       ...(mission
         ? {
-            sandboxSummary: mission.stateJson.privateSandboxes[row.instance.id] ?? {
-              sandboxId: `agent:${mission.id}:${row.instance.id}`,
-              state: "none",
-              active: false,
-              burnRateCentsPerMinute: 0,
-            },
+            sandboxSummary: publicSandboxRef(
+              mission.stateJson.privateSandboxes[row.instance.id] ?? {
+                sandboxId: `agent:${mission.id}:${row.instance.id}`,
+                tier: "private",
+                ownerInstanceId: row.instance.id,
+                state: "none",
+                burnRateCentsPerMinute: 0,
+                environmentVersionId: "env_v0",
+                injectedCredentialIds: [],
+                injectedVariableKeys: [],
+                environmentAccessMode: "inherit",
+              },
+            ),
           }
         : {}),
     },
@@ -679,65 +710,36 @@ export async function executeWorkCard(workCardId: string) {
   await triggerWorkCardStarted(missionId, workCardId);
 
   try {
-    const apiKey = await Promise.resolve(secret.get("OPENAI_API_KEY")).catch(() => undefined);
-    const boot = await loadAgentBootFiles(agent.id);
-    const modelName = boot.baseConfig.model ?? "gpt-5.5";
-    if (apiKey) {
-      const openai = createOpenAI({ apiKey });
-      const result = streamText({
-        model: openai(modelName),
-        stopWhen: stepCountIs(3),
-        system: [
-          boot.soul,
-          boot.identity,
-          `Equipped skills: ${JSON.stringify(boot.skillsIndex)}`,
-          "You are executing exactly one Missionry work card. Use available tools when the card has mission/private sandbox affinity, then finish concisely.",
-        ].join("\n\n"),
-        messages: [
-          {
-            role: "user",
-            content: [
-              `WorkCard ${card.id}: ${card.title}`,
-              card.description ? `Description: ${card.description}` : "",
-              `Sandbox affinity: ${JSON.stringify(sandboxAffinity)}`,
-              sandboxAffinity.tier === "mission" ? "Call run_command in the mission sandbox with command pwd." : "",
-              sandboxAffinity.tier === "private" ? "Call escalate_to_private_sandbox, then write_file in the private sandbox." : "",
-              agent.id === "agt_forge" ? "If useful, call use_skill with skill_id prd-template-v2." : "",
-            ].filter(Boolean).join("\n"),
-          },
-        ],
-        tools: missionryToolKit({ missionId, agentId: agent.id, instanceId: instance.id, turnId, workCardId }),
-        onChunk: async ({ chunk }) => {
-          if (chunk.type === "tool-call" || chunk.type === "tool-result") {
-            await recordAudit({
-              missionId,
-              subjectType: "work_card",
-              subjectId: workCardId,
-              actor: { type: "agent", id: agent.id },
-              action: chunk.type,
-              diffSummary: JSON.stringify({ toolName: (chunk as { toolName?: string }).toolName }),
-            });
-          }
+    const finalText = await runAgentToolLoop({
+      missionId,
+      agentId: agent.id,
+      instanceId: instance.id,
+      turnId,
+      workCardId,
+      systemFallback: "You are executing a Missionry work card. Use tools to make real progress and then report what changed.",
+      missionContext: "Work-card execution. Follow the card objective, choose the requested sandbox target, call report_progress as useful, and do not use canned demo actions.",
+      messages: [
+        {
+          role: "user",
+          content: [
+            `WorkCard ${card.id}: ${card.title}`,
+            card.description ? `Description: ${card.description}` : "",
+            `Sandbox affinity: ${JSON.stringify(sandboxAffinity)}`,
+            "Complete the actual work requested by this card. Run commands or read/write files when that is needed, then summarize exact actions and outcomes.",
+          ].filter(Boolean).join("\n"),
         },
-        onFinish: async ({ usage }) => {
-          const usageRecord = usage as unknown as Record<string, unknown>;
-          await emitCostEvent({
-            missionId,
-            agentId: agent.id,
-            instanceId: instance.id,
-            model: modelName,
-            promptTokens: Number(usageRecord.promptTokens ?? usageRecord.inputTokens ?? 0),
-            completionTokens: Number(usageRecord.completionTokens ?? usageRecord.outputTokens ?? 0),
-            costCents: estimateLlmCostCents(modelName, usageRecord),
-            eventType: "cost_event",
-          });
-        },
-      });
-      await result.text;
-    } else {
-      await executeWorkCardFallback(card, agent.id, instance.id, sandboxAffinity);
-    }
+      ],
+      stubBody: "",
+    });
+    if (!finalText) await executeWorkCardFallback(card, agent.id, instance.id, sandboxAffinity);
     await db.update(workCards).set({ status: "done", costJson: JSON.stringify({ spentCents: 1 }), updatedAt: now() }).where(eq(workCards.id, workCardId));
+    await persistMissionChatMessage({
+      missionId,
+      authorType: "agent_instance",
+      authorId: instance.id,
+      body: finalText || `Completed work card: ${card.title}`,
+      mentions: [],
+    });
     await recordAudit({
       missionId,
       subjectType: "work_card",
@@ -910,27 +912,25 @@ function chatRowsToAiMessages(rows: Array<typeof missionChatMessages.$inferSelec
   }));
 }
 
-async function loadAgentSoulOrFallback(agentId: string, fallback: string) {
-  agentId = assertSafeId(agentId, "agent_id");
-  const obj = await storage.from(buckets.missionryWorkspaces).get(`agents/${agentId}/soul.md`);
-  if (!obj) return fallback;
-  const text = (await storageObjectText(obj)).trim();
-  return text || fallback;
-}
-
-async function generateMissionChatReply(input: {
+async function runAgentToolLoop(input: {
   missionId: string;
   agentId: string;
   instanceId: string;
+  turnId: string;
+  messages: Array<{ role: "user" | "assistant" | "system"; content: string }>;
+  missionContext: string;
   systemFallback: string;
-  history: Array<typeof missionChatMessages.$inferSelect>;
   stubBody: string;
+  clientActionId?: string;
+  workCardId?: string;
 }) {
   const apiKey = await Promise.resolve(secret.get("OPENAI_API_KEY")).catch(() => undefined);
-  const modelName = "gpt-5.5";
+  const boot = await loadAgentBootFiles(input.agentId).catch(() => null);
+  const modelName = boot?.baseConfig.model ?? "gpt-5.5";
   if (!apiKey) {
     await emitCostEvent({
       missionId: input.missionId,
+      clientActionId: input.clientActionId,
       agentId: input.agentId,
       instanceId: input.instanceId,
       model: modelName,
@@ -941,16 +941,45 @@ async function generateMissionChatReply(input: {
     });
     return input.stubBody;
   }
+  await assertUserBudgetForMission(input.missionId, 1);
   const openai = createOpenAI({ apiKey });
-  const system = await loadAgentSoulOrFallback(input.agentId, input.systemFallback);
   const result = streamText({
     model: openai(modelName),
-    system,
-    messages: chatRowsToAiMessages(input.history),
+    stopWhen: stepCountIs(20),
+    system: [
+      boot?.soul ?? input.systemFallback,
+      boot?.identity ?? "",
+      boot ? `Equipped skills: ${JSON.stringify(boot.skillsIndex)}` : "",
+      input.missionContext,
+      "You are an execution agent. Use tools to inspect, run commands, read/write files, and report concrete progress. Finish with a concise summary of what you actually did.",
+    ].filter(Boolean).join("\n\n"),
+    messages: input.messages,
+    tools: missionryToolKit({
+      missionId: input.missionId,
+      agentId: input.agentId,
+      instanceId: input.instanceId,
+      turnId: input.turnId,
+      clientActionId: input.clientActionId,
+      workCardId: input.workCardId,
+    }),
+    onChunk: async ({ chunk }) => {
+      if (chunk.type !== "tool-call" && chunk.type !== "tool-result") return;
+      const row = chunk as { toolName?: string; type: string };
+      await recordAudit({
+        missionId: input.missionId,
+        subjectType: input.workCardId ? "work_card" : "mission_chat_message",
+        subjectId: input.workCardId ?? input.turnId,
+        actor: { type: "agent", id: input.agentId },
+        action: row.type,
+        clientActionId: input.clientActionId,
+        diffSummary: JSON.stringify({ toolName: row.toolName ?? "unknown" }),
+      });
+    },
     onFinish: async ({ usage }) => {
       const usageRecord = usage as unknown as Record<string, unknown>;
       await emitCostEvent({
         missionId: input.missionId,
+        clientActionId: input.clientActionId,
         agentId: input.agentId,
         instanceId: input.instanceId,
         model: modelName,
@@ -963,6 +992,26 @@ async function generateMissionChatReply(input: {
   });
   const text = (await result.text).trim();
   return text || "[NO]";
+}
+
+async function generateMissionChatReply(input: {
+  missionId: string;
+  agentId: string;
+  instanceId: string;
+  systemFallback: string;
+  history: Array<typeof missionChatMessages.$inferSelect>;
+  stubBody: string;
+}) {
+  return runAgentToolLoop({
+    missionId: input.missionId,
+    agentId: input.agentId,
+    instanceId: input.instanceId,
+    turnId: `turn_${crypto.randomUUID().slice(0, 8)}`,
+    systemFallback: input.systemFallback,
+    messages: chatRowsToAiMessages(input.history),
+    missionContext: "Mission chat turn. If the user asks for work, use tools rather than only describing the work.",
+    stubBody: input.stubBody,
+  });
 }
 
 async function dispatchMissionChatReplies(missionId: string, source: typeof missionChatMessages.$inferSelect, mentions: ChatMention[]) {
@@ -1081,6 +1130,11 @@ app.use("/api/public/*", async (c, next) => {
 });
 
 app.get("/api/public/health", (c) => c.json({ ok: true, service: "missionry-api", runtime: "edgespark", contract: "v0.6" }));
+
+app.get("/api/public/me", (c) => {
+  const profile = currentUserProfile(c);
+  return c.json({ userId: profile.userId, email: profile.email, role: profile.role });
+});
 
 app.post("/api/public/auth/whitelist-check", async (c) => {
   const body = (await c.req.json().catch(() => ({}))) as { email?: unknown };
@@ -1354,7 +1408,7 @@ app.post("/api/public/missions", async (c) => {
 app.get("/api/public/missions/:id", async (c) => {
   const denied = await assertMissionAccess(c);
   if (denied) return denied;
-  return c.json(await getMission(assertSafeId(c.req.param("id"), "mission_id")));
+  return c.json(missionRowJson(await getMission(assertSafeId(c.req.param("id"), "mission_id"))));
 });
 
 app.patch("/api/public/missions/:id", async (c) => {
@@ -1496,7 +1550,7 @@ app.post("/api/public/missions/:id/sandbox/start", async (c) => {
     action: "sandbox_started",
     diffSummary: "mission",
   });
-  return c.json({ actionId: crypto.randomUUID(), status: "completed", sandbox: ref, auditEventId });
+  return c.json({ actionId: crypto.randomUUID(), status: "completed", sandbox: publicSandboxRef(ref), auditEventId });
 });
 
 app.post("/api/public/missions/:id/sandbox/pause", async (c) => {
@@ -1513,7 +1567,7 @@ app.post("/api/public/missions/:id/sandbox/pause", async (c) => {
     action: "sandbox_paused",
     diffSummary: "mission",
   });
-  return c.json({ actionId: crypto.randomUUID(), status: "completed", sandbox: ref, auditEventId });
+  return c.json({ actionId: crypto.randomUUID(), status: "completed", sandbox: publicSandboxRef(ref), auditEventId });
 });
 
 app.post("/api/public/missions/:id/agent-instances/:instanceId/sandbox/start", async (c) => {
@@ -1531,7 +1585,7 @@ app.post("/api/public/missions/:id/agent-instances/:instanceId/sandbox/start", a
     action: "sandbox_started",
     diffSummary: `private:${instanceId}`,
   });
-  return c.json({ actionId: crypto.randomUUID(), status: "completed", sandbox: ref, auditEventId });
+  return c.json({ actionId: crypto.randomUUID(), status: "completed", sandbox: publicSandboxRef(ref), auditEventId });
 });
 
 app.post("/api/public/missions/:id/agent-instances/:instanceId/sandbox/pause", async (c) => {
@@ -1550,7 +1604,7 @@ app.post("/api/public/missions/:id/agent-instances/:instanceId/sandbox/pause", a
     action: "sandbox_paused",
     diffSummary: `private:${instanceId}`,
   });
-  return c.json({ actionId: crypto.randomUUID(), status: "completed", sandbox: ref, auditEventId });
+  return c.json({ actionId: crypto.randomUUID(), status: "completed", sandbox: publicSandboxRef(ref), auditEventId });
 });
 
 app.post("/api/public/missions/:id/agent-instances/:instanceId/direct-thread", async (c) => {
@@ -1612,7 +1666,7 @@ app.get("/api/public/missions/:id/workroom", async (c) => {
       issues: { ...mission.stateJson.issues, completedRatio: mission.stateJson.issues.total ? mission.stateJson.issues.completed / mission.stateJson.issues.total : 0 },
       budgetCapCents: mission.dailyBudgetCents,
       spentCents: mission.missionSpendCents,
-      sandboxSummary: mission.stateJson.sharedSandbox,
+      sandboxSummary: publicSandboxRef(mission.stateJson.sharedSandbox),
     },
     metricStrip: {
       activeSandboxCount: (mission.stateJson.sharedSandbox.state === "running" ? 1 : 0) + activePrivateSandboxes,
@@ -1623,7 +1677,7 @@ app.get("/api/public/missions/:id/workroom", async (c) => {
     },
     workCards: workCardsJson,
     missionSandbox: {
-      ...mission.stateJson.sharedSandbox,
+      ...publicSandboxRef(mission.stateJson.sharedSandbox),
       active: mission.stateJson.sharedSandbox.state === "running",
       repoPath: "/workspace/repos/demo",
       r2SnapshotKey: mission.stateJson.snapshots.sharedLatestR2Key,

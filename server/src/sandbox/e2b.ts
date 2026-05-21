@@ -17,11 +17,13 @@ type E2BCreateResponse = {
   sandboxID?: string;
   sandboxId?: string;
   envdAccessToken?: string | null;
+  domain?: string | null;
   state?: string;
   lastActivityAt?: string;
 };
 
 const E2B_API_BASE = "https://api.e2b.app";
+const DEFAULT_ENVD_PORT = 49983;
 const memorySandboxes = new Map<string, MemorySandbox>();
 
 function keyFor(missionId: string, target: SandboxTarget, instanceId?: string) {
@@ -87,6 +89,114 @@ async function e2bFetch(path: string, init: RequestInit = {}) {
   return body;
 }
 
+function envdHostFor(sandboxID: string) {
+  return `https://${DEFAULT_ENVD_PORT}-${sandboxID}.e2b.app`;
+}
+
+function basicUserHeader(username = "user") {
+  const value = `${username}:`;
+  if (typeof btoa === "function") return `Basic ${btoa(value)}`;
+  const buffer = (globalThis as unknown as { Buffer?: { from(input: string): { toString(encoding: string): string } } }).Buffer;
+  return `Basic ${buffer?.from(value).toString("base64") ?? value}`;
+}
+
+function decodeBase64Text(value: unknown) {
+  if (typeof value !== "string") return "";
+  try {
+    const binary = typeof atob === "function" ? atob(value) : (globalThis as any).Buffer?.from(value, "base64").toString("binary");
+    if (typeof binary !== "string") return value;
+    const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+    return new TextDecoder().decode(bytes);
+  } catch {
+    return value;
+  }
+}
+
+function normalizeEnvdPath(path: string) {
+  const normalized = (path.startsWith("/") ? path : `/workspace/${path}`).replace(/\/+/g, "/");
+  return normalized === "/" ? "/workspace" : normalized;
+}
+
+function requireEnvd(ref: SandboxRef) {
+  if (!ref.e2bSandboxId) throw new Error("error.e2b.sandbox_id_missing");
+  if (!ref.envdAccessToken) throw new Error("error.e2b.envd_access_token_missing");
+  return {
+    host: ref.envdHost || envdHostFor(ref.e2bSandboxId),
+    token: ref.envdAccessToken,
+  };
+}
+
+async function envdFetch(ref: SandboxRef, path: string, init: RequestInit = {}) {
+  const envd = requireEnvd(ref);
+  const response = await fetch(`${envd.host}${path}`, {
+    ...init,
+    headers: {
+      "X-Access-Token": envd.token,
+      ...(init.body && !(init.body instanceof FormData) ? { "Content-Type": "application/json" } : {}),
+      ...(init.headers ?? {}),
+    },
+  });
+  const contentType = response.headers.get("content-type") ?? "";
+  if (!response.ok) {
+    const body = await response.text().catch(() => "");
+    throw new Error(`error.e2b.envd_request_failed:${response.status}:${body || response.statusText}`);
+  }
+  if (contentType.includes("application/json") || contentType.includes("application/connect+json")) return response.json().catch(() => ({}));
+  return response.text();
+}
+
+function parseConnectJsonFrames(buffer: ArrayBuffer): unknown[] {
+  const bytes = new Uint8Array(buffer);
+  const out: unknown[] = [];
+  for (let offset = 0; offset + 5 <= bytes.length;) {
+    const length = (bytes[offset + 1] << 24) | (bytes[offset + 2] << 16) | (bytes[offset + 3] << 8) | bytes[offset + 4];
+    offset += 5;
+    if (length < 0 || offset + length > bytes.length) break;
+    const payload = new TextDecoder().decode(bytes.slice(offset, offset + length));
+    offset += length;
+    if (!payload.trim()) continue;
+    try {
+      out.push(JSON.parse(payload));
+    } catch {
+      // Ignore malformed keepalive/error trailers; status is handled by HTTP.
+    }
+  }
+  if (out.length > 0) return out;
+  const text = new TextDecoder().decode(bytes).trim();
+  if (!text) return [];
+  try {
+    return [JSON.parse(text)];
+  } catch {
+    return text.split(/\n+/).flatMap((line) => {
+      try {
+        return [JSON.parse(line)];
+      } catch {
+        return [];
+      }
+    });
+  }
+}
+
+function collectProcessEvent(frame: unknown, acc: { stdout: string; stderr: string; exitCode: number }) {
+  const event = (frame as any)?.event;
+  const variant = event?.event ?? event;
+  const data = variant?.case === "data" ? variant.value : variant?.data;
+  const end = variant?.case === "end" ? variant.value : variant?.end;
+  if (data) {
+    const output = data.output;
+    const stdout = output?.case === "stdout" ? output.value : data.stdout ?? output?.stdout;
+    const stderr = output?.case === "stderr" ? output.value : data.stderr ?? output?.stderr;
+    const pty = output?.case === "pty" ? output.value : data.pty ?? output?.pty;
+    if (stdout) acc.stdout += decodeBase64Text(stdout);
+    if (stderr) acc.stderr += decodeBase64Text(stderr);
+    if (pty) acc.stdout += decodeBase64Text(pty);
+  }
+  if (end) {
+    acc.exitCode = Number(end.exitCode ?? end.exit_code ?? acc.exitCode);
+    if (end.error) acc.stderr += `${String(end.error)}\n`;
+  }
+}
+
 export async function reconcileLiveRef(ref: SandboxRef): Promise<SandboxRef> {
   await assertRefAccess(ref);
   if (await useMemoryMode()) return ref;
@@ -97,8 +207,14 @@ export async function reconcileLiveRef(ref: SandboxRef): Promise<SandboxRef> {
     return next;
   }
   try {
-    await e2bFetch(`/sandboxes/${encodeURIComponent(ref.e2bSandboxId)}`, { method: "GET" });
-    return ref;
+    const live = await e2bFetch(`/sandboxes/${encodeURIComponent(ref.e2bSandboxId)}`, { method: "GET" }) as E2BCreateResponse | null;
+    const refreshed = {
+      ...ref,
+      envdAccessToken: live?.envdAccessToken ?? ref.envdAccessToken ?? null,
+      envdHost: ref.envdHost ?? envdHostFor(ref.e2bSandboxId),
+    };
+    if (refreshed.envdAccessToken !== ref.envdAccessToken || refreshed.envdHost !== ref.envdHost) await persistRef(missionIdFor(ref), refreshed);
+    return refreshed;
   } catch (error) {
     if (!isE2bNotFound(error)) throw error;
     const paused = { ...ref, state: "paused" as const, burnRateCentsPerMinute: 0 };
@@ -107,20 +223,26 @@ export async function reconcileLiveRef(ref: SandboxRef): Promise<SandboxRef> {
   }
 }
 
-async function loadPersistedE2bSandboxId(refSandboxId: string) {
+async function loadPersistedLiveRouting(refSandboxId: string): Promise<LiveSandboxRouting | null> {
   const [row] = await db.select().from(sandboxRuntime).where(eq(sandboxRuntime.sandboxId, refSandboxId)).limit(1);
-  return row?.e2bSandboxId ?? null;
+  if (!row?.e2bSandboxId) return null;
+  return {
+    sandboxID: row.e2bSandboxId,
+    envdAccessToken: row.envdAccessToken ?? null,
+    envdHost: row.envdHost ?? envdHostFor(row.e2bSandboxId),
+  };
 }
 
 async function createRealSandbox(input: { missionId: string; target: SandboxTarget; instanceId?: string }) {
   const templateID = vars.get("E2B_TEMPLATE_ID") || "base";
   const body = {
-    // 5-minute hard cap as a cost safety net: even if our opportunistic reaper
-    // fails to run, E2B pauses the VM after 5 min idle (pause = no compute billing).
+    // E2B lifecycle is platform API only; exec/files route to envd using
+    // envdAccessToken persisted below.
     templateID,
-    timeout: 300,
+    timeout: 3600,
+    autoPause: true,
     secure: true,
-    lifecycle: { onTimeout: "pause", autoResume: false },
+    allow_internet_access: true,
     metadata: {
       app: "missionry",
       missionId: input.missionId,
@@ -136,7 +258,7 @@ async function createRealSandbox(input: { missionId: string; target: SandboxTarg
   const created = await e2bFetch("/sandboxes", { method: "POST", body: JSON.stringify(body) }) as E2BCreateResponse;
   const sandboxID = created.sandboxID ?? created.sandboxId;
   if (!sandboxID) throw new Error("error.e2b.sandbox_id_missing");
-  return { sandboxID, envdAccessToken: created.envdAccessToken ?? null };
+  return { sandboxID, envdAccessToken: created.envdAccessToken ?? null, domain: created.domain ?? null };
 }
 
 async function connectRealSandbox(sandboxID: string) {
@@ -146,14 +268,18 @@ async function connectRealSandbox(sandboxID: string) {
   }) as Promise<E2BCreateResponse | null>;
 }
 
-function refFor(input: { missionId: string; instanceId?: string; target: SandboxTarget }, e2bSandboxId: string, state: "running" | "paused" = "running"): SandboxRef {
+type LiveSandboxRouting = { sandboxID: string; envdAccessToken?: string | null; envdHost?: string | null };
+
+function refFor(input: { missionId: string; instanceId?: string; target: SandboxTarget }, routing: LiveSandboxRouting, state: "running" | "paused" = "running"): SandboxRef {
   const timestamp = new Date().toISOString();
   return {
     sandboxId: keyFor(input.missionId, input.target, input.instanceId),
     tier: input.target,
     ownerInstanceId: input.instanceId,
     state,
-    e2bSandboxId,
+    e2bSandboxId: routing.sandboxID,
+    envdAccessToken: routing.envdAccessToken ?? null,
+    envdHost: routing.envdHost ?? envdHostFor(routing.sandboxID),
     lastActivityAt: timestamp,
     activeSince: state === "running" ? timestamp : undefined,
     burnRateCentsPerMinute: state === "running" ? 0.45 : 0,
@@ -197,23 +323,29 @@ async function startOrResume(input: { missionId: string; instanceId?: string; ta
 
   if (await useMemoryMode()) {
     await ensureMemorySandbox(sandboxId);
-    const ref = refFor(input, sandboxId);
+    const ref = refFor(input, { sandboxID: sandboxId });
     await persistRef(input.missionId, ref);
     return ref;
   }
 
-  let e2bSandboxId = await loadPersistedE2bSandboxId(sandboxId);
-  if (e2bSandboxId) {
+  let routing: LiveSandboxRouting | null = await loadPersistedLiveRouting(sandboxId);
+  if (routing?.sandboxID) {
     try {
-      await connectRealSandbox(e2bSandboxId);
+      const connected = await connectRealSandbox(routing.sandboxID);
+      routing = {
+        sandboxID: connected?.sandboxID ?? connected?.sandboxId ?? routing.sandboxID,
+        envdAccessToken: connected?.envdAccessToken ?? routing.envdAccessToken ?? null,
+        envdHost: envdHostFor(connected?.sandboxID ?? connected?.sandboxId ?? routing.sandboxID),
+      };
     } catch {
-      e2bSandboxId = null;
+      routing = null;
     }
   }
-  if (!e2bSandboxId) {
-    e2bSandboxId = (await createRealSandbox(input)).sandboxID;
+  if (!routing) {
+    const created = await createRealSandbox(input);
+    routing = { sandboxID: created.sandboxID, envdAccessToken: created.envdAccessToken ?? null, envdHost: envdHostFor(created.sandboxID) };
   }
-  const ref = refFor(input, e2bSandboxId);
+  const ref = refFor(input, routing);
   await persistRef(input.missionId, ref);
   return ref;
 }
@@ -238,14 +370,32 @@ export async function runCommand(ref: SandboxRef, command: string) {
       stderr: "",
     };
   }
-  const e2bSandboxId = running.e2bSandboxId;
-  if (!e2bSandboxId) throw new Error("error.e2b.sandbox_id_missing");
-  const result = await e2bFetch(`/sandboxes/${encodeURIComponent(e2bSandboxId)}/exec`, {
+  const envd = requireEnvd(running);
+  const response = await fetch(`${envd.host}/process.Process/Start`, {
     method: "POST",
-    body: JSON.stringify({ cmd: command, cwd: "/workspace" }),
-  }) as { stdout?: string; stderr?: string; exitCode?: number };
+    headers: {
+      "X-Access-Token": envd.token,
+      "Authorization": basicUserHeader(),
+      "Connect-Protocol-Version": "1",
+      "Connect-Timeout-Ms": "600000",
+      "Content-Type": "application/connect+json",
+      "Accept": "application/connect+json",
+    },
+    body: JSON.stringify({
+      process: {
+        cmd: "/bin/sh",
+        args: ["-lc", `mkdir -p /workspace && cd /workspace && ${command}`],
+        envs: {},
+        cwd: "/home/user",
+      },
+      stdin: false,
+    }),
+  });
+  if (!response.ok) throw new Error(`error.e2b.envd_request_failed:${response.status}:${await response.text().catch(() => response.statusText)}`);
+  const result = { stdout: "", stderr: "", exitCode: 0 };
+  for (const frame of parseConnectJsonFrames(await response.arrayBuffer())) collectProcessEvent(frame, result);
   await touchSandbox(running);
-  return { stdout: result.stdout ?? "", stderr: result.stderr ?? "", exitCode: Number(result.exitCode ?? 0) };
+  return result;
 }
 
 export async function writeFile(ref: SandboxRef, path: string, content: string) {
@@ -256,10 +406,12 @@ export async function writeFile(ref: SandboxRef, path: string, content: string) 
     await touchSandbox(running);
     return;
   }
-  if (!running.e2bSandboxId) throw new Error("error.e2b.sandbox_id_missing");
-  await e2bFetch(`/sandboxes/${encodeURIComponent(running.e2bSandboxId)}/files/write`, {
+  const filePath = normalizeEnvdPath(path);
+  const form = new FormData();
+  form.append("file", new Blob([content], { type: "text/plain;charset=utf-8" }), filePath.split("/").filter(Boolean).at(-1) ?? "file.txt");
+  await envdFetch(running, `/files?path=${encodeURIComponent(filePath)}&username=user`, {
     method: "POST",
-    body: JSON.stringify({ path, content }),
+    body: form,
   });
   await touchSandbox(running);
 }
@@ -273,8 +425,7 @@ export async function readFile(ref: SandboxRef, path: string) {
     if (value === undefined) throw new Error("error.file.not_found");
     return value;
   }
-  if (!running.e2bSandboxId) throw new Error("error.e2b.sandbox_id_missing");
-  const response = await e2bFetch(`/sandboxes/${encodeURIComponent(running.e2bSandboxId)}/files/read?path=${encodeURIComponent(path)}`, { method: "GET" });
+  const response = await envdFetch(running, `/files?path=${encodeURIComponent(normalizeEnvdPath(path))}&username=user`, { method: "GET" });
   await touchSandbox(running);
   return typeof response === "string" ? response : String((response as { content?: unknown })?.content ?? "");
 }
@@ -328,8 +479,15 @@ export async function listFiles(ref: SandboxRef, path: string): Promise<{ state:
     if (!sandbox || sandbox.state !== "running") return { state: "none", entries: [] };
     return { state: "running", entries: memoryChildEntries(sandbox.files, path) };
   }
-  if (!ref.e2bSandboxId) return { state: "none", entries: [] };
-  const response = await e2bFetch(`/sandboxes/${encodeURIComponent(ref.e2bSandboxId)}/files/list?path=${encodeURIComponent(path)}`, { method: "GET" }) as unknown;
+  const response = await envdFetch(ref, "/filesystem.Filesystem/ListDir", {
+    method: "POST",
+    headers: {
+      "Authorization": basicUserHeader(),
+      "Connect-Protocol-Version": "1",
+      "Connect-Timeout-Ms": "30000",
+    },
+    body: JSON.stringify({ path: normalizeEnvdPath(path), depth: 1 }),
+  }) as unknown;
   const rawEntries = Array.isArray(response)
     ? response
     : Array.isArray((response as { entries?: unknown[] })?.entries)
@@ -358,7 +516,7 @@ export async function readWorkspaceFile(ref: SandboxRef, path: string, maxBytes 
     return { state: "running", content: content.slice(0, maxBytes) };
   }
   if (!ref.e2bSandboxId) return { state: "none", content: "" };
-  const response = await e2bFetch(`/sandboxes/${encodeURIComponent(ref.e2bSandboxId)}/files/read?path=${encodeURIComponent(path)}`, { method: "GET" });
+  const response = await envdFetch(ref, `/files?path=${encodeURIComponent(normalizeEnvdPath(path))}&username=user`, { method: "GET" });
   const content = typeof response === "string" ? response : String((response as { content?: unknown })?.content ?? "");
   return { state: "running", content: content.slice(0, maxBytes) };
 }
@@ -380,6 +538,8 @@ async function touchSandbox(ref: SandboxRef) {
   const mission = await getMission(missionId);
   const current = next.tier === "mission" ? mission.stateJson.sharedSandbox : next.ownerInstanceId ? mission.stateJson.privateSandboxes[next.ownerInstanceId] : next;
   next.e2bSandboxId = current?.e2bSandboxId ?? next.e2bSandboxId;
+  next.envdAccessToken = current?.envdAccessToken ?? next.envdAccessToken ?? null;
+  next.envdHost = current?.envdHost ?? next.envdHost ?? (next.e2bSandboxId ? envdHostFor(next.e2bSandboxId) : null);
   await persistRef(missionId, next);
 }
 

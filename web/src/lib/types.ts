@@ -2,6 +2,7 @@ export type Role = 'admin' | 'user';
 export type SandboxState = 'none' | 'starting' | 'running' | 'paused' | 'resuming' | 'killed' | 'error';
 
 export type Session = {
+  userId: string;
   email: string;
   role: Role;
 };

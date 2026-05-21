@@ -11,6 +11,8 @@ export type SandboxRef = {
   ownerInstanceId?: string;
   state: SandboxState;
   e2bSandboxId?: string;
+  envdAccessToken?: string | null;
+  envdHost?: string | null;
   lastActivityAt?: string;
   activeSince?: string;
   burnRateCentsPerMinute: number;
@@ -288,6 +290,8 @@ export async function upsertSandboxRuntime(ref: SandboxRef, missionId: string) {
     tier: ref.tier,
     state: ref.state,
     e2bSandboxId: ref.e2bSandboxId ?? null,
+    envdAccessToken: ref.envdAccessToken ?? null,
+    envdHost: ref.envdHost ?? null,
     lastActivityAt: ref.lastActivityAt ?? null,
     activeSince: ref.activeSince ?? null,
     burnRateCentsPerMinute: ref.burnRateCentsPerMinute,

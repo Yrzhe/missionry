@@ -17,13 +17,19 @@ import { subscribeMissionEvents } from './lib/sse';
 import { useAppStore } from './lib/store';
 import { SignUp } from './pages/SignUp';
 
+const VISIBLE_MISSION_LIMIT = 25;
+
+function isLoggedOutError(error: unknown) {
+  return error instanceof ApiError && [401, 403, 404].includes(error.status);
+}
+
 function App() {
   const [authState, setAuthState] = useState<'checking' | 'ready' | 'login'>('checking');
   const setSession = useAppStore((state) => state.setSession);
   const location = useLocation();
 
   useEffect(() => {
-    if (location.pathname === '/signup') {
+    if (location.pathname === '/signup' || location.pathname === '/login') {
       setAuthState('login');
       return;
     }
@@ -37,7 +43,7 @@ function App() {
       .catch((error) => {
         if (!alive) return;
         setSession(null);
-        setAuthState(error instanceof ApiError && error.status === 403 ? 'login' : 'ready');
+        setAuthState(isLoggedOutError(error) ? 'login' : 'ready');
       });
     return () => {
       alive = false;
@@ -55,6 +61,7 @@ function AppDataGate() {
   const missions = useAppStore((state) => state.missions);
   const setMissions = useAppStore((state) => state.setMissions);
   const setWorkroom = useAppStore((state) => state.setWorkroom);
+  const setWorkroomLoading = useAppStore((state) => state.setWorkroomLoading);
   const setBudget = useAppStore((state) => state.setBudget);
   const setSpend = useAppStore((state) => state.setSpend);
   const setAdmin = useAppStore((state) => state.setAdmin);
@@ -72,9 +79,14 @@ function AppDataGate() {
         if (!alive) return;
         setMissions(missionItems);
         await Promise.all(
-          missionItems.slice(0, 3).map(async (mission) => {
-            const workroom = await api.workroom(mission.id);
-            if (alive) setWorkroom(mission.id, workroom);
+          missionItems.slice(0, VISIBLE_MISSION_LIMIT).map(async (mission) => {
+            if (alive) setWorkroomLoading(mission.id, true);
+            try {
+              const workroom = await api.workroom(mission.id);
+              if (alive) setWorkroom(mission.id, workroom);
+            } catch {
+              if (alive) setWorkroomLoading(mission.id, false);
+            }
           }),
         );
         if (!alive) return;
@@ -116,7 +128,7 @@ function AppDataGate() {
     return () => {
       alive = false;
     };
-  }, [session?.role, setAdmin, setBudget, setMissions, setSpend, setWorkroom]);
+  }, [session?.role, setAdmin, setBudget, setMissions, setSpend, setWorkroom, setWorkroomLoading]);
 
   if (error && !missions.length) return <FullPageState label="common.error" detail={error} />;
   return <MissionEventBridge />;
@@ -125,7 +137,7 @@ function AppDataGate() {
 function MissionEventBridge() {
   const missions = useAppStore((state) => state.missions);
   useEffect(() => {
-    const unsubscribers = missions.slice(0, 2).map((mission) => subscribeMissionEvents(mission.id));
+    const unsubscribers = missions.slice(0, VISIBLE_MISSION_LIMIT).map((mission) => subscribeMissionEvents(mission.id));
     return () => unsubscribers.forEach((unsubscribe) => unsubscribe());
   }, [missions]);
   return <RouterRoutes />;
@@ -156,10 +168,22 @@ function RouterRoutes() {
 function WorkroomLoader() {
   const { id } = useParams();
   const setWorkroom = useAppStore((state) => state.setWorkroom);
+  const setWorkroomLoading = useAppStore((state) => state.setWorkroomLoading);
   useEffect(() => {
     if (!id) return;
-    void api.workroom(id).then((workroom) => setWorkroom(id, workroom));
-  }, [id, setWorkroom]);
+    let alive = true;
+    setWorkroomLoading(id, true);
+    void api.workroom(id)
+      .then((workroom) => {
+        if (alive) setWorkroom(id, workroom);
+      })
+      .catch(() => {
+        if (alive) setWorkroomLoading(id, false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [id, setWorkroom, setWorkroomLoading]);
   return <Workroom />;
 }
 
@@ -176,8 +200,10 @@ function LoginScreen({ onReady }: { onReady: () => void }) {
     event.preventDefault();
     try {
       await login(email, password);
+      const session = await resolveSession();
+      useAppStore.getState().setSession(session);
       onReady();
-      navigate(location.pathname === '/' ? '/missions' : location.pathname);
+      navigate(location.pathname === '/' || location.pathname === '/login' ? '/missions' : location.pathname);
     } catch (loginError) {
       setError(loginError instanceof Error ? loginError.message : t('auth.error'));
     }

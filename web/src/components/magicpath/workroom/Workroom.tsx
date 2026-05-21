@@ -37,6 +37,7 @@ export function Workroom() {
   const navigate = useNavigate();
   const { t } = useTranslation();
   const workroom = useAppStore((state) => (id ? state.workrooms[id] : undefined));
+  const isWorkroomLoading = useAppStore((state) => (id ? state.workroomLoading[id] === true : false));
   const setWorkroom = useAppStore((state) => state.setWorkroom);
   const missionChatsMap = useAppStore((state) => state.missionChats);
   const chatMessages = id ? missionChatsMap[id] ?? EMPTY_MESSAGES : EMPTY_MESSAGES;
@@ -158,6 +159,14 @@ export function Workroom() {
   function insertMention(row: MissionAgentRow) {
     const handle = row.agent.displayName.toLowerCase().replace(/[\s_]+/g, '-');
     setChatBody((current) => current.replace(/@[\w.-]*$/, `@${handle} `));
+  }
+
+  if (!workroom && isWorkroomLoading) {
+    return (
+      <Shell title={t('workroom.route')} meta={<span className="mp-muted">{t('workroom.loadingMeta')}</span>}>
+        <div className="mp-empty"><h2>{t('common.loading')}</h2><p>{t('workroom.loadingMeta')}</p></div>
+      </Shell>
+    );
   }
 
   if (!workroom) {

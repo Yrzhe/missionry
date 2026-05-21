@@ -65,3 +65,4 @@ experiments/magicpath/
 docs/implementation/notes.html
 **/.edgespark/state/
 **/.edgespark/staleness.json
+.dev.vars

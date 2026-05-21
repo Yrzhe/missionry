@@ -125,6 +125,8 @@ export const sandboxRuntime = sqliteTable("sandbox_runtime", {
   tier: text("tier").notNull(),
   state: text("state").notNull(),
   e2bSandboxId: text("e2b_sandbox_id"),
+  envdAccessToken: text("envd_access_token"),
+  envdHost: text("envd_host"),
   lastActivityAt: text("last_activity_at"),
   activeSince: text("active_since"),
   burnRateCentsPerMinute: real("burn_rate_cents_per_minute").notNull().default(0),

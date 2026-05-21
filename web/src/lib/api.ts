@@ -56,7 +56,15 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     ...init,
   });
   const text = await response.text();
-  const body = text ? JSON.parse(text) : undefined;
+  let body: { error?: { code?: string; messageKey?: string } } | undefined;
+  try {
+    body = text ? JSON.parse(text) : undefined;
+  } catch {
+    if (!response.ok) {
+      throw new ApiError(response.status, response.statusText);
+    }
+    throw new ApiError(response.status, 'invalid_json_response');
+  }
   if (!response.ok) {
     const code = body?.error?.code ?? body?.error?.messageKey;
     throw new ApiError(response.status, code ?? response.statusText, code, body?.error?.messageKey);
@@ -92,7 +100,7 @@ export async function login(email: string, password: string) {
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ email, password }),
   });
-  if (!response.ok && response.status !== 404) {
+  if (!response.ok) {
     const body = await response.json().catch(() => undefined);
     throw parseAuthError(response.status, body, response.statusText);
   }
@@ -136,17 +144,12 @@ export async function signUp(email: string, password: string, name: string) {
 }
 
 export async function resolveSession(): Promise<Session> {
-  await request('/health');
-  try {
-    await request<AdminOverview>('/admin/overview');
-    return { email: 'qq1514337391@gmail.com', role: 'admin' };
-  } catch (error) {
-    if (error instanceof ApiError && error.status === 403) {
-      await request('/missions');
-      return { email: 'user', role: 'user' };
-    }
-    throw error;
-  }
+  const session = await request<Session>('/me');
+  return {
+    userId: session.userId,
+    email: session.email,
+    role: session.role,
+  };
 }
 
 function normalizeMission(row: MissionSummary & Record<string, unknown>): MissionSummary {

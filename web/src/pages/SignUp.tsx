@@ -1,7 +1,8 @@
 import { useMemo, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { ApiError, login, signUp } from '../lib/api';
+import { ApiError, login, resolveSession, signUp } from '../lib/api';
+import { useAppStore } from '../lib/store';
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -14,6 +15,7 @@ function resolveErrorKey(error: ApiError) {
 export function SignUp({ onSignedIn }: { onSignedIn?: () => void }) {
   const { t, i18n } = useTranslation();
   const navigate = useNavigate();
+  const setSession = useAppStore((state) => state.setSession);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
@@ -47,6 +49,8 @@ export function SignUp({ onSignedIn }: { onSignedIn?: () => void }) {
     try {
       await signUp(email.trim(), password, name.trim());
       await login(email.trim(), password);
+      const session = await resolveSession();
+      setSession(session);
       onSignedIn?.();
       navigate('/missions', { replace: true });
     } catch (signupError) {
