@@ -976,14 +976,18 @@ strong { font-weight: 650; }
 }
 
 .mp-private-line {
-  display: grid;
-  grid-template-columns: minmax(120px, 1fr) minmax(90px, auto) minmax(74px, auto) minmax(78px, auto) minmax(92px, auto);
-  gap: 10px;
+  /* Lives in the narrow (~320px) details right column, so wrap instead of a fixed
+     5-column grid that would overflow the column and clip at the viewport edge. */
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
   align-items: center;
   padding: 9px 0;
   border-top: 1px solid #eee7d8;
   font-size: 13px;
+  min-width: 0;
 }
+.mp-private-line > :first-child { flex: 1 1 100%; min-width: 0; overflow-wrap: anywhere; }
 
 .mp-activity-list {
   display: grid;
