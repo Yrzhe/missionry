@@ -25,6 +25,7 @@ export function Shell({ title, meta, actions, children }: ShellProps) {
   });
   const location = useLocation();
   const settingsOpen = location.pathname.startsWith('/settings');
+  const displayName = session?.name?.trim() || session?.email;
 
   const toggleLanguage = () => {
     const next = i18n.language === 'zh' ? 'en' : 'zh';
@@ -63,6 +64,7 @@ export function Shell({ title, meta, actions, children }: ShellProps) {
           <strong>{title}</strong>
           {meta ?? <span className="mp-muted mp-mono">{session?.email ?? t('common.loading')}</span>}
           <div className="mp-topbar-actions">
+            <span className="mp-session-name">{displayName ?? t('common.loading')}</span>
             <button className="mp-button mp-lang" onClick={toggleLanguage}>{t('common.language')}</button>
             {actions}
           </div>

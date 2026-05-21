@@ -4,6 +4,7 @@ export type SandboxState = 'none' | 'starting' | 'running' | 'paused' | 'resumin
 export type Session = {
   userId: string;
   email: string;
+  name?: string;
   role: Role;
 };
 

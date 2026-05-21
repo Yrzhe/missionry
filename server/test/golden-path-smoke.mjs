@@ -166,6 +166,15 @@ try {
   const file = await request(`/missions/${mission.missionId}/sandbox/file?path=work-cards/${workCardId}.md`);
   assert.equal(file.state, "running");
   assert.match(file.content, /Golden path|Clarify execution plan|workspace/i);
+
+  const deleted = await request(`/missions/${mission.missionId}`, { method: "DELETE" });
+  assert.equal(deleted.deleted, true);
+  assert.equal(deleted.status, "completed");
+  const deletedWorkroom = await request(`/missions/${mission.missionId}/workroom`);
+  assert.equal(deletedWorkroom.mission.status, "deleted");
+  assert.ok(deletedWorkroom.workCards.every((item) => item.status === "cancelled"));
+  const listAfterDelete = await request("/missions");
+  assert.ok(!listAfterDelete.items.some((item) => item.id === mission.missionId || item.missionId === mission.missionId));
 } finally {
   child.kill("SIGTERM");
 }

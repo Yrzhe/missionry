@@ -426,6 +426,54 @@ function missionRowJson(row: Awaited<ReturnType<typeof getMission>>) {
   return { ...row, stateJson: redactMissionStateJson(row.stateJson) };
 }
 
+type MissionOwnerSource = Pick<typeof missions.$inferSelect, "ownerType" | "ownerUserId" | "ownerAgentId" | "ownerInstanceId">;
+
+async function resolveUserDisplayName(userId: string | null | undefined, fallbackEmail?: string | null) {
+  if (userId) {
+    const [authUser] = await db.select({ name: esSystemAuthUser.name, email: esSystemAuthUser.email }).from(esSystemAuthUser).where(eq(esSystemAuthUser.id, userId)).limit(1);
+    if (authUser?.name?.trim()) return authUser.name.trim();
+    if (authUser?.email?.trim()) return authUser.email.trim();
+    const [profile] = await db.select({ email: usersProfile.email }).from(usersProfile).where(eq(usersProfile.userId, userId)).limit(1);
+    if (profile?.email?.trim()) return profile.email.trim();
+  }
+  return fallbackEmail?.trim() || userId || "user";
+}
+
+async function missionOwnerJson(row: MissionOwnerSource) {
+  if (row.ownerType === "agent") {
+    const agentId = row.ownerAgentId;
+    const [agent] = agentId ? await db.select({ displayName: agents.displayName }).from(agents).where(eq(agents.id, agentId)).limit(1) : [];
+    const displayName = agent?.displayName || agentId || "agent";
+    return {
+      type: "agent",
+      userId: row.ownerUserId,
+      agentId,
+      agentInstanceId: row.ownerInstanceId,
+      displayName,
+      avatar: { avatarSource: "random", avatarSeed: agentId ?? "agent" },
+    };
+  }
+  const displayName = await resolveUserDisplayName(row.ownerUserId);
+  return {
+    type: "user",
+    userId: row.ownerUserId,
+    agentId: row.ownerAgentId,
+    agentInstanceId: row.ownerInstanceId,
+    displayName,
+    avatar: { avatarSource: "random", avatarSeed: row.ownerUserId ?? "user" },
+  };
+}
+
+async function missionDbRowJson(row: typeof missions.$inferSelect) {
+  const owner = await missionOwnerJson(row);
+  return { ...rowMission(row), owner, ownerDisplayName: owner.displayName };
+}
+
+async function missionRuntimeRowJson(row: Awaited<ReturnType<typeof getMission>>) {
+  const owner = await missionOwnerJson(row);
+  return { ...missionRowJson(row), owner, ownerDisplayName: owner.displayName };
+}
+
 function workCardJson(row: typeof workCards.$inferSelect) {
   return {
     id: row.id,
@@ -513,10 +561,7 @@ function maskedEnvironment(environment: MissionStateJson["environment"] | undefi
 
 async function resolveChatAuthorName(row: typeof missionChatMessages.$inferSelect) {
   if (row.authorType === "user") {
-    const [profile] = await db.select().from(usersProfile).where(eq(usersProfile.userId, row.authorId)).limit(1);
-    if (profile?.email) return profile.email;
-    const [authUser] = await db.select({ email: esSystemAuthUser.email, name: esSystemAuthUser.name }).from(esSystemAuthUser).where(eq(esSystemAuthUser.id, row.authorId)).limit(1);
-    return authUser?.name || authUser?.email || row.authorId;
+    return resolveUserDisplayName(row.authorId);
   }
   if (row.authorType === "agent_instance") {
     const [instance] = await db.select().from(agentInstances).where(eq(agentInstances.id, row.authorId)).limit(1);
@@ -1352,9 +1397,27 @@ app.use("/api/public/*", async (c, next) => {
 
 app.get("/api/public/health", (c) => c.json({ ok: true, service: "missionry-api", runtime: "edgespark", contract: "v0.6" }));
 
-app.get("/api/public/me", (c) => {
+app.get("/api/public/me", async (c) => {
   const profile = currentUserProfile(c);
-  return c.json({ userId: profile.userId, email: profile.email, role: profile.role });
+  return c.json({ userId: profile.userId, email: profile.email, name: await resolveUserDisplayName(profile.userId, profile.email), role: profile.role });
+});
+
+app.patch("/api/public/me", async (c) => {
+  const profile = currentUserProfile(c);
+  const body = (await c.req.json().catch(() => ({}))) as { name?: string };
+  const name = body.name?.trim();
+  if (!name || name.length > 80) return jsonError(c, "error.user.name_invalid", 400);
+  const timestamp = now();
+  const timestampMs = Date.now();
+  const [authUser] = await db.select({ id: esSystemAuthUser.id }).from(esSystemAuthUser).where(eq(esSystemAuthUser.id, profile.userId)).limit(1);
+  const authWrite = authUser
+    ? db.update(esSystemAuthUser).set({ name, updatedAt: timestampMs }).where(eq(esSystemAuthUser.id, profile.userId))
+    : db.insert(esSystemAuthUser).values({ id: profile.userId, name, email: profile.email, updatedAt: timestampMs });
+  await db.batch([
+    authWrite,
+    db.update(usersProfile).set({ updatedAt: timestamp }).where(eq(usersProfile.userId, profile.userId)),
+  ]);
+  return c.json({ actionId: crypto.randomUUID(), status: "completed", user: { userId: profile.userId, email: profile.email, name, role: profile.role } });
 });
 
 app.get("/api/public/settings/budget", async (c) => {
@@ -1460,11 +1523,11 @@ app.get("/api/public/admin/missions", async (c) => {
     .leftJoin(usersProfile, eq(usersProfile.userId, missions.ownerUserId))
     .orderBy(desc(missions.updatedAt));
   return c.json({
-    items: rows.map(({ mission, owner }: any) => ({
-      ...rowMission(mission),
+    items: await Promise.all(rows.map(async ({ mission, owner }: any) => ({
+      ...(await missionDbRowJson(mission)),
       ownerEmail: owner?.email ?? null,
       spendCents: mission.missionSpendCents,
-    })),
+    }))),
   });
 });
 
@@ -1707,7 +1770,7 @@ app.get("/api/public/missions", async (c) => {
     : ownerAgentId
       ? await db.select().from(missions).where(eq(missions.ownerAgentId, ownerAgentId)).orderBy(desc(missions.updatedAt))
       : await db.select().from(missions).orderBy(desc(missions.updatedAt));
-  const allItems = rows.map((row: any) => row.mission ? rowMission(row.mission) : rowMission(row));
+  const allItems = await Promise.all(rows.map((row: any) => row.mission ? missionDbRowJson(row.mission) : missionDbRowJson(row)));
   const visibleItems = allItems.filter((item: any) => item.status !== "deleted");
   const items = profile.role === "admin" ? visibleItems : [];
   if (profile.role !== "admin") {
@@ -1747,7 +1810,7 @@ app.post("/api/public/missions", async (c) => {
     dailyBudgetCents: body.dailyBudgetCents,
     requestUserId: currentUserProfile(c).userId,
   });
-  const missionJson = rowMission(created.mission);
+  const missionJson = await missionDbRowJson(created.mission);
   waitUntil(
     decomposeMission(created.missionId)
       .then(() => tryDequeue())
@@ -1759,7 +1822,7 @@ app.post("/api/public/missions", async (c) => {
 app.get("/api/public/missions/:id", async (c) => {
   const denied = await assertMissionAccess(c);
   if (denied) return denied;
-  return c.json(missionRowJson(await getMissionWithRuntimeSandboxes(assertSafeId(c.req.param("id"), "mission_id"))));
+  return c.json(await missionRuntimeRowJson(await getMissionWithRuntimeSandboxes(assertSafeId(c.req.param("id"), "mission_id"))));
 });
 
 app.patch("/api/public/missions/:id", async (c) => {
@@ -2079,6 +2142,7 @@ app.get("/api/public/missions/:id/workroom", async (c) => {
   const workCardsJson = cardRows.map(workCardJson);
   const activePrivateSandboxes = Object.values(mission.stateJson.privateSandboxes).filter((ref) => ref.state === "running").length;
   const leader = await resolveMissionLeader(mission);
+  const owner = await missionOwnerJson(mission);
   return c.json({
     mission: {
       id: mission.id,
@@ -2087,14 +2151,7 @@ app.get("/api/public/missions/:id/workroom", async (c) => {
       status: mission.status,
       updatedAt: mission.updatedAt,
       leaderInstanceId: leader?.instance.id ?? null,
-      owner: {
-        type: mission.ownerType,
-        userId: mission.ownerUserId,
-        agentId: mission.ownerAgentId,
-        agentInstanceId: mission.ownerInstanceId,
-        displayName: mission.ownerAgentId ?? mission.ownerUserId ?? "owner",
-        avatar: { avatarSource: "random", avatarSeed: mission.ownerAgentId ?? "user" },
-      },
+      owner,
       agentCount: instanceRows.length,
       pendingCount: workCardsJson.filter((card: { status: string }) => card.status !== "done").length,
       artifactCount: 0,
@@ -2255,7 +2312,7 @@ app.post("/api/public/missions/:id/work-cards/:workCardId/start", async (c) => {
     status: "completed",
     workCard: workCardJson(updated),
     workroom: {
-      mission: missionRowJson(mission),
+      mission: await missionRuntimeRowJson(mission),
       workCards: cardRows.map(workCardJson),
       agentInstances: instanceRows.map((row) => missionAgentInstanceResponse(row, mission)),
     },

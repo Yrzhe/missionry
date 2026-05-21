@@ -20,6 +20,7 @@ const STATUS_FILTERS = ['all', 'active', 'running', 'planning', 'blocked', 'comp
 
 const money = (cents = 0) => `$${(cents / 100).toFixed(2)}`;
 const initials = (name?: string) => (name ?? '-').split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]?.toUpperCase()).join('') || '-';
+type MissionsPayload = Awaited<ReturnType<typeof api.missions>>;
 
 function issuePercent(mission: MissionSummary) {
   const total = mission.issues?.total ?? 0;
@@ -41,6 +42,7 @@ export function MissionsHome() {
   const [agentFilter, setAgentFilter] = useState('all');
   const [statusFilter, setStatusFilter] = useState<(typeof STATUS_FILTERS)[number]>('all');
   const [modalOpen, setModalOpen] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [form, setForm] = useState<NewMissionForm>({ title: '', objective: '', dailyBudgetCents: '2500', leaderMode: 'default', leaderAgentId: '' });
   const agentsQuery = useQuery({
@@ -97,13 +99,18 @@ export function MissionsHome() {
   });
   const deleteMissionMutation = useMutation({
     mutationFn: api.deleteMission,
-    onSuccess: async () => {
+    onSuccess: async (_result, missionId) => {
+      queryClient.setQueryData<MissionsPayload>(queryKeys.missions, (current) => (
+        current ? { ...current, items: current.items.filter((mission) => mission.id !== missionId) } : current
+      ));
+      setMessage(t('missions.delete.success'));
       await queryClient.invalidateQueries({ queryKey: queryKeys.missions });
     },
   });
 
   async function submitMission(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    setMessage(null);
     setError(null);
     try {
       await createMissionMutation.mutateAsync({
@@ -119,6 +126,7 @@ export function MissionsHome() {
   }
 
   async function createDemoMission() {
+    setMessage(null);
     setError(null);
     try {
       await createDemoMutation.mutateAsync();
@@ -129,6 +137,7 @@ export function MissionsHome() {
 
   async function deleteMission(mission: MissionSummary) {
     if (!window.confirm(t('missions.delete.confirm', { title: mission.title }))) return;
+    setMessage(null);
     setError(null);
     try {
       await deleteMissionMutation.mutateAsync(mission.id);
@@ -180,6 +189,9 @@ export function MissionsHome() {
           </select>
         </label>
       </div>
+
+      {message ? <div className="mp-success">{message}</div> : null}
+      {error && !modalOpen ? <div className="mp-denied">{error}</div> : null}
 
       <div className="mp-card mp-list">
         {rows.length ? rows.map((mission) => (

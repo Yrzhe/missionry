@@ -110,6 +110,13 @@ export async function changePassword(currentPassword: string, newPassword: strin
   }
 }
 
+export async function updateMe(input: { name: string }): Promise<Session> {
+  return request<Session>('/me', {
+    method: 'PATCH',
+    body: JSON.stringify(input),
+  });
+}
+
 export async function signUp(email: string, password: string, name: string) {
   const gate = await fetch(`${publicBase}/auth/whitelist-check`, {
     method: 'POST',
@@ -139,12 +146,14 @@ export async function resolveSession(): Promise<Session> {
   return {
     userId: session.userId,
     email: session.email,
+    name: session.name,
     role: session.role,
   };
 }
 
 function normalizeMission(row: MissionSummary & Record<string, unknown>): MissionSummary {
   const stateJson = row.stateJson as { sharedSandbox?: Record<string, unknown>; issues?: MissionSummary['issues'] } | undefined;
+  const ownerDisplayName = row.ownerDisplayName ?? row.ownerName ?? row.ownerEmail ?? row.ownerUserEmail ?? row.ownerAgentName ?? row.ownerAgentDisplayName;
   return {
     ...row,
     owner: row.owner ?? {
@@ -152,7 +161,7 @@ function normalizeMission(row: MissionSummary & Record<string, unknown>): Missio
       userId: row.ownerUserId as string | undefined,
       agentId: row.ownerAgentId as string | undefined,
       agentInstanceId: row.ownerInstanceId as string | undefined,
-      displayName: String(row.ownerAgentId ?? row.ownerUserId ?? '-'),
+      displayName: String(ownerDisplayName ?? '-'),
     },
     issues: row.issues ?? stateJson?.issues,
     sandboxSummary: row.sandboxSummary ?? stateJson?.sharedSandbox,
@@ -233,8 +242,11 @@ export const api = {
     const response = await request<{ items: Array<MissionSummary & Record<string, unknown>> }>('/missions');
     return { items: response.items.map(normalizeMission) };
   },
-  mission: (missionId: string) => request<MissionSummary>(`/missions/${missionId}`),
-  workroom: (missionId: string) => request<WorkroomReadModel>(`/missions/${missionId}/workroom`),
+  mission: async (missionId: string) => normalizeMission(await request<MissionSummary & Record<string, unknown>>(`/missions/${missionId}`)),
+  workroom: async (missionId: string) => {
+    const response = await request<WorkroomReadModel & { mission: MissionSummary & Record<string, unknown> }>(`/missions/${missionId}/workroom`);
+    return { ...response, mission: normalizeMission(response.mission) };
+  },
   deleteMission: (missionId: string) => request<{ status?: string }>(`/missions/${missionId}`, { method: 'DELETE' }),
   createMission: (input: CreateMissionInput) => request<{ missionId: string; ownerInstanceId?: string | null }>('/missions', {
     method: 'POST',
