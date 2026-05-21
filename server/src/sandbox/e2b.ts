@@ -1,9 +1,9 @@
 import { secret, vars } from "edgespark";
 import { db } from "edgespark";
 import { and, eq } from "drizzle-orm";
-import { agentInstances } from "../defs/db_schema";
+import { agentInstances, sandboxRuntime } from "../defs/db_schema";
 import { assertSafeId } from "../lib/safe-paths";
-import { assertUserBudgetForMission, updateMission, upsertSandboxRuntime, type SandboxRef } from "../state/missionState";
+import { assertUserBudgetForMission, getMission, updateMission, upsertSandboxRuntime, type SandboxRef } from "../state/missionState";
 
 type SandboxTarget = "mission" | "private";
 
@@ -13,6 +13,15 @@ type MemorySandbox = {
   state: "running" | "paused";
 };
 
+type E2BCreateResponse = {
+  sandboxID?: string;
+  sandboxId?: string;
+  envdAccessToken?: string | null;
+  state?: string;
+  lastActivityAt?: string;
+};
+
+const E2B_API_BASE = "https://api.e2b.app";
 const memorySandboxes = new Map<string, MemorySandbox>();
 
 function keyFor(missionId: string, target: SandboxTarget, instanceId?: string) {
@@ -30,15 +39,14 @@ export async function assertInstanceInMission(missionId: string, instanceId: str
   if (!row) throw new Error("error.mission.access_denied");
 }
 
-async function useMemoryMode() {
-  const mode = vars.get("DEMO_E2B_MODE");
-  const apiKey = await secret.get("E2B_API_KEY");
-  return mode === "memory" || !apiKey;
+async function e2bApiKey() {
+  return Promise.resolve(secret.get("E2B_API_KEY")).catch(() => undefined);
 }
 
-async function assertRunnableWorkerMode() {
-  if (await useMemoryMode()) return;
-  throw new Error("error.e2b.real_path_not_implemented_use_REST_API_via_fetch_in_phase2");
+async function useMemoryMode() {
+  const mode = vars.get("DEMO_E2B_MODE");
+  const apiKey = await e2bApiKey();
+  return mode === "memory" || !apiKey;
 }
 
 async function ensureMemorySandbox(id: string): Promise<MemorySandbox> {
@@ -46,10 +54,96 @@ async function ensureMemorySandbox(id: string): Promise<MemorySandbox> {
   if (!sandbox) {
     sandbox = { id, files: new Map(), state: "running" };
     sandbox.files.set("/workspace/README.md", `# ${id}\n`);
+    sandbox.files.set("workspace/README.md", `# ${id}\n`);
     memorySandboxes.set(id, sandbox);
   }
   sandbox.state = "running";
   return sandbox;
+}
+
+async function e2bFetch(path: string, init: RequestInit = {}) {
+  const apiKey = await e2bApiKey();
+  if (!apiKey) throw new Error("error.e2b.api_key_missing");
+  const response = await fetch(`${E2B_API_BASE}${path}`, {
+    ...init,
+    headers: {
+      "X-API-Key": apiKey,
+      ...(init.body ? { "Content-Type": "application/json" } : {}),
+      ...(init.headers ?? {}),
+    },
+  });
+  if (response.status === 204) return null;
+  const contentType = response.headers.get("content-type") ?? "";
+  const body = contentType.includes("application/json") ? await response.json().catch(() => ({})) : await response.text().catch(() => "");
+  if (!response.ok) {
+    const message = typeof body === "object" && body && "message" in body ? String((body as { message?: unknown }).message) : String(body || response.status);
+    throw new Error(`error.e2b.request_failed:${response.status}:${message}`);
+  }
+  return body;
+}
+
+async function loadPersistedE2bSandboxId(refSandboxId: string) {
+  const [row] = await db.select().from(sandboxRuntime).where(eq(sandboxRuntime.sandboxId, refSandboxId)).limit(1);
+  return row?.e2bSandboxId ?? null;
+}
+
+async function createRealSandbox(input: { missionId: string; target: SandboxTarget; instanceId?: string }) {
+  const templateID = vars.get("E2B_TEMPLATE_ID") || "base";
+  const body = {
+    templateID,
+    timeout: 3600,
+    secure: true,
+    lifecycle: { onTimeout: "pause", autoResume: false },
+    metadata: {
+      app: "missionry",
+      missionId: input.missionId,
+      target: input.target,
+      instanceId: input.instanceId ?? "",
+    },
+    envVars: {
+      MISSION_ID: input.missionId,
+      MISSIONRY_TARGET: input.target,
+      ...(input.instanceId ? { AGENT_INSTANCE_ID: input.instanceId } : {}),
+    },
+  };
+  const created = await e2bFetch("/sandboxes", { method: "POST", body: JSON.stringify(body) }) as E2BCreateResponse;
+  const sandboxID = created.sandboxID ?? created.sandboxId;
+  if (!sandboxID) throw new Error("error.e2b.sandbox_id_missing");
+  return { sandboxID, envdAccessToken: created.envdAccessToken ?? null };
+}
+
+async function connectRealSandbox(sandboxID: string) {
+  return e2bFetch(`/sandboxes/${encodeURIComponent(sandboxID)}/connect`, {
+    method: "POST",
+    body: JSON.stringify({ timeout: 3600 }),
+  }) as Promise<E2BCreateResponse | null>;
+}
+
+function refFor(input: { missionId: string; instanceId?: string; target: SandboxTarget }, e2bSandboxId: string, state: "running" | "paused" = "running"): SandboxRef {
+  const timestamp = new Date().toISOString();
+  return {
+    sandboxId: keyFor(input.missionId, input.target, input.instanceId),
+    tier: input.target,
+    ownerInstanceId: input.instanceId,
+    state,
+    e2bSandboxId,
+    lastActivityAt: timestamp,
+    activeSince: state === "running" ? timestamp : undefined,
+    burnRateCentsPerMinute: state === "running" ? 0.45 : 0,
+    environmentVersionId: "env_v1",
+    injectedCredentialIds: [],
+    injectedVariableKeys: ["MISSION_ID"],
+    environmentAccessMode: "inherit",
+  };
+}
+
+async function persistRef(missionId: string, ref: SandboxRef) {
+  await updateMission(missionId, (mission) => {
+    if (ref.tier === "mission") mission.stateJson.sharedSandbox = ref;
+    else if (ref.ownerInstanceId) mission.stateJson.privateSandboxes[ref.ownerInstanceId] = ref;
+    return mission;
+  });
+  await upsertSandboxRuntime(ref, missionId);
 }
 
 export async function startShared(missionId: string): Promise<SandboxRef> {
@@ -59,7 +153,7 @@ export async function startShared(missionId: string): Promise<SandboxRef> {
 
 export async function startPrivate(missionId: string, instanceId: string): Promise<SandboxRef> {
   await assertInstanceInMission(missionId, instanceId);
-  return startOrResume({ missionId, instanceId, target: "private" });
+  return startOrResume({ missionId: assertSafeId(missionId, "mission_id"), instanceId: assertSafeId(instanceId, "instance_id"), target: "private" });
 }
 
 export async function resume(missionId: string, target: SandboxTarget, instanceId?: string): Promise<SandboxRef> {
@@ -72,85 +166,123 @@ async function startOrResume(input: { missionId: string; instanceId?: string; ta
   input.missionId = assertSafeId(input.missionId, "mission_id");
   if (input.instanceId) input.instanceId = assertSafeId(input.instanceId, "instance_id");
   await assertUserBudgetForMission(input.missionId, 1);
-  await assertRunnableWorkerMode();
   const sandboxId = keyFor(input.missionId, input.target, input.instanceId);
-  await ensureMemorySandbox(sandboxId);
-  const timestamp = new Date().toISOString();
-  const ref: SandboxRef = {
-    sandboxId,
-    tier: input.target,
-    ownerInstanceId: input.instanceId,
-    state: "running",
-    e2bSandboxId: sandboxId,
-    lastActivityAt: timestamp,
-    activeSince: timestamp,
-    burnRateCentsPerMinute: 0.45,
-    environmentVersionId: "env_v1",
-    injectedCredentialIds: [],
-    injectedVariableKeys: ["MISSION_ID"],
-    environmentAccessMode: "inherit",
-  };
 
-  await updateMission(input.missionId, (mission) => {
-    if (input.target === "mission") mission.stateJson.sharedSandbox = ref;
-    else mission.stateJson.privateSandboxes[input.instanceId ?? "unknown"] = ref;
-    return mission;
-  });
-  await upsertSandboxRuntime(ref, input.missionId);
+  if (await useMemoryMode()) {
+    await ensureMemorySandbox(sandboxId);
+    const ref = refFor(input, sandboxId);
+    await persistRef(input.missionId, ref);
+    return ref;
+  }
+
+  let e2bSandboxId = await loadPersistedE2bSandboxId(sandboxId);
+  if (e2bSandboxId) {
+    try {
+      await connectRealSandbox(e2bSandboxId);
+    } catch {
+      e2bSandboxId = null;
+    }
+  }
+  if (!e2bSandboxId) {
+    e2bSandboxId = (await createRealSandbox(input)).sandboxID;
+  }
+  const ref = refFor(input, e2bSandboxId);
+  await persistRef(input.missionId, ref);
   return ref;
 }
 
-export async function runCommand(ref: SandboxRef, command: string) {
+async function ensureRunningRef(ref: SandboxRef) {
   await assertRefAccess(ref);
-  await assertRunnableWorkerMode();
-  await ensureMemorySandbox(ref.sandboxId);
-  await touchSandbox(ref);
-  if (command.trim() === "false") return { exitCode: 1, stdout: "", stderr: "command exited with 1\n" };
-  return {
-    exitCode: 0,
-    stdout: command === "pwd" ? "/workspace\n" : `demo:${ref.sandboxId}$ ${command}\n`,
-    stderr: "",
-  };
+  if (await useMemoryMode()) {
+    await ensureMemorySandbox(ref.sandboxId);
+    return ref;
+  }
+  return startOrResume({ missionId: missionIdFor(ref), target: ref.tier, instanceId: ref.ownerInstanceId });
+}
+
+export async function runCommand(ref: SandboxRef, command: string) {
+  const running = await ensureRunningRef(ref);
+  if (await useMemoryMode()) {
+    await touchSandbox(running);
+    if (command.trim() === "false") return { exitCode: 1, stdout: "", stderr: "command exited with 1\n" };
+    return {
+      exitCode: 0,
+      stdout: command === "pwd" ? "/workspace\n" : `demo:${running.sandboxId}$ ${command}\n`,
+      stderr: "",
+    };
+  }
+  const e2bSandboxId = running.e2bSandboxId;
+  if (!e2bSandboxId) throw new Error("error.e2b.sandbox_id_missing");
+  const result = await e2bFetch(`/sandboxes/${encodeURIComponent(e2bSandboxId)}/exec`, {
+    method: "POST",
+    body: JSON.stringify({ cmd: command, cwd: "/workspace" }),
+  }) as { stdout?: string; stderr?: string; exitCode?: number };
+  await touchSandbox(running);
+  return { stdout: result.stdout ?? "", stderr: result.stderr ?? "", exitCode: Number(result.exitCode ?? 0) };
 }
 
 export async function writeFile(ref: SandboxRef, path: string, content: string) {
-  await assertRefAccess(ref);
-  await assertRunnableWorkerMode();
-  const sandbox = await ensureMemorySandbox(ref.sandboxId);
-  sandbox.files.set(path, content);
-  await touchSandbox(ref);
+  const running = await ensureRunningRef(ref);
+  if (await useMemoryMode()) {
+    const sandbox = await ensureMemorySandbox(running.sandboxId);
+    sandbox.files.set(path, content);
+    await touchSandbox(running);
+    return;
+  }
+  if (!running.e2bSandboxId) throw new Error("error.e2b.sandbox_id_missing");
+  await e2bFetch(`/sandboxes/${encodeURIComponent(running.e2bSandboxId)}/files/write`, {
+    method: "POST",
+    body: JSON.stringify({ path, content }),
+  });
+  await touchSandbox(running);
 }
 
 export async function readFile(ref: SandboxRef, path: string) {
-  await assertRefAccess(ref);
-  await assertRunnableWorkerMode();
-  const sandbox = await ensureMemorySandbox(ref.sandboxId);
-  await touchSandbox(ref);
-  const value = sandbox.files.get(path);
-  if (value === undefined) throw new Error("error.file.not_found");
-  return value;
+  const running = await ensureRunningRef(ref);
+  if (await useMemoryMode()) {
+    const sandbox = await ensureMemorySandbox(running.sandboxId);
+    await touchSandbox(running);
+    const value = sandbox.files.get(path);
+    if (value === undefined) throw new Error("error.file.not_found");
+    return value;
+  }
+  if (!running.e2bSandboxId) throw new Error("error.e2b.sandbox_id_missing");
+  const response = await e2bFetch(`/sandboxes/${encodeURIComponent(running.e2bSandboxId)}/files/read?path=${encodeURIComponent(path)}`, { method: "GET" });
+  await touchSandbox(running);
+  return typeof response === "string" ? response : String((response as { content?: unknown })?.content ?? "");
 }
 
 export async function pauseIfIdle(ref: SandboxRef) {
   await assertRefAccess(ref);
-  await assertRunnableWorkerMode();
-  const sandbox = await ensureMemorySandbox(ref.sandboxId);
-  sandbox.state = "paused";
+  if (await useMemoryMode()) {
+    const sandbox = await ensureMemorySandbox(ref.sandboxId);
+    sandbox.state = "paused";
+  } else if (ref.e2bSandboxId) {
+    await e2bFetch(`/sandboxes/${encodeURIComponent(ref.e2bSandboxId)}/pause`, { method: "POST" });
+  }
   const paused = { ...ref, state: "paused" as const, burnRateCentsPerMinute: 0 };
-  await upsertSandboxRuntime(paused, missionIdFor(ref));
+  await persistRef(missionIdFor(ref), paused);
   return paused;
+}
+
+export async function kill(ref: SandboxRef) {
+  await assertRefAccess(ref);
+  if (!(await useMemoryMode()) && ref.e2bSandboxId) {
+    await e2bFetch(`/sandboxes/${encodeURIComponent(ref.e2bSandboxId)}`, { method: "DELETE" });
+  }
+  const killed = { ...ref, state: "killed" as const, burnRateCentsPerMinute: 0 };
+  await persistRef(missionIdFor(ref), killed);
+  return killed;
 }
 
 async function touchSandbox(ref: SandboxRef) {
   const missionId = missionIdFor(ref);
   const timestamp = new Date().toISOString();
   const next = { ...ref, lastActivityAt: timestamp };
-  await updateMission(missionId, (mission) => {
-    if (next.tier === "mission") mission.stateJson.sharedSandbox = next;
-    if (next.tier === "private" && next.ownerInstanceId) mission.stateJson.privateSandboxes[next.ownerInstanceId] = next;
-    return mission;
-  });
-  await upsertSandboxRuntime(next, missionId);
+  const mission = await getMission(missionId);
+  const current = next.tier === "mission" ? mission.stateJson.sharedSandbox : next.ownerInstanceId ? mission.stateJson.privateSandboxes[next.ownerInstanceId] : next;
+  next.e2bSandboxId = current?.e2bSandboxId ?? next.e2bSandboxId;
+  await persistRef(missionId, next);
 }
 
 function missionIdFor(ref: SandboxRef) {

@@ -1,4 +1,4 @@
-import { index, integer, real, sqliteTable, text } from "drizzle-orm/sqlite-core";
+import { index, integer, primaryKey, real, sqliteTable, text } from "drizzle-orm/sqlite-core";
 
 export const missions = sqliteTable("missions", {
   id: text("id").primaryKey(),
@@ -54,6 +54,7 @@ export const workCards = sqliteTable("work_cards", {
   description: text("description"),
   pmInstanceId: text("pm_instance_id"),
   assigneeInstanceId: text("assignee_instance_id"),
+  reviewerInstanceId: text("reviewer_instance_id"),
   status: text("status").notNull(),
   priority: text("priority").notNull(),
   sandboxAffinityJson: text("sandbox_affinity_json").notNull(),
@@ -62,6 +63,38 @@ export const workCards = sqliteTable("work_cards", {
   costJson: text("cost_json").notNull(),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
+});
+
+export const missionChatMessages = sqliteTable("mission_chat_messages", {
+  id: text("id").primaryKey(),
+  missionId: text("mission_id").notNull(),
+  authorType: text("author_type").notNull(),
+  authorId: text("author_id").notNull(),
+  body: text("body").notNull(),
+  mentionsJson: text("mentions_json").notNull(),
+  isSilent: integer("is_silent").notNull().default(0),
+  replyToMessageId: text("reply_to_message_id"),
+  createdAt: text("created_at").notNull(),
+});
+
+export const agentResponseCursors = sqliteTable(
+  "agent_response_cursors",
+  {
+    missionId: text("mission_id").notNull(),
+    instanceId: text("instance_id").notNull(),
+    lastRespondedMessageId: text("last_responded_message_id"),
+    lastRespondedAt: text("last_responded_at"),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.missionId, table.instanceId] }),
+  }),
+);
+
+export const missionLeader = sqliteTable("mission_leader", {
+  missionId: text("mission_id").primaryKey(),
+  leaderInstanceId: text("leader_instance_id").notNull(),
+  promotedBy: text("promoted_by").notNull(),
+  promotedAt: text("promoted_at").notNull(),
 });
 
 export const directThreads = sqliteTable("direct_threads", {
@@ -185,6 +218,7 @@ export const createIndexesSql = [
   "create index if not exists idx_agent_instances_mission on agent_instances(mission_id)",
   "create index if not exists idx_work_cards_mission on work_cards(mission_id)",
   "create index if not exists idx_work_cards_agent_status on work_cards(assignee_instance_id, status, created_at)",
+  "create index if not exists idx_mission_chat_messages_mission on mission_chat_messages(mission_id, created_at)",
   "create index if not exists idx_direct_threads_mission_instance on direct_threads(mission_id, agent_instance_id)",
   "create index if not exists idx_direct_thread_messages_thread on direct_thread_messages(thread_id, created_at)",
   "create index if not exists idx_sandbox_runtime_idle on sandbox_runtime(state, last_activity_at)",

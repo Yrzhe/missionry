@@ -3,7 +3,7 @@ import { tool } from "ai";
 import { eq, and } from "drizzle-orm";
 import { z } from "zod";
 import { loadSkill } from "../agents/files";
-import { workCards } from "../defs/db_schema";
+import { agents, workCards } from "../defs/db_schema";
 import { buckets } from "../defs/storage_schema";
 import { assertSafeId, assertSafeRelativePath } from "../lib/safe-paths";
 import * as e2b from "../sandbox/e2b";
@@ -186,6 +186,7 @@ export function missionryToolKit(ctx: ToolContext) {
           const key = `agents/${ctx.agentId}/${file}`;
           const before = await storage.from(buckets.missionryWorkspaces).get(key);
           const previousBody = before ? await storageObjectText(before) : "";
+          const [agentBeforeUpdate] = await db.select({ auditHeadId: agents.auditHeadId }).from(agents).where(eq(agents.id, ctx.agentId)).limit(1);
           await storage.from(buckets.missionryWorkspaces).put(key, input.content);
           const auditEventId = await recordAudit({
             missionId: ctx.missionId,
@@ -195,7 +196,7 @@ export function missionryToolKit(ctx: ToolContext) {
             action: "self_update",
             clientActionId: ctx.clientActionId,
             diffSummary: input.reason,
-            payloadRef: { r2Key: key, previousBody } as { r2Key: string; sha256?: string },
+            payloadRef: { r2Key: key, previousBody, authoredAgainstAuditHeadId: agentBeforeUpdate?.auditHeadId ?? null },
             reversible: true,
             rollbackAvailable: true,
           });

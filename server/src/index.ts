@@ -1,7 +1,7 @@
 import { createOpenAI } from "@ai-sdk/openai";
 import { db, storage, secret, vars, ctx } from "edgespark";
 import { auth } from "edgespark/http";
-import { and, asc, desc, eq, ne } from "drizzle-orm";
+import { and, asc, desc, eq, ne, sql } from "drizzle-orm";
 import { generateText, streamText, stepCountIs } from "ai";
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
@@ -10,9 +10,12 @@ import { esSystemAuthUser } from "./__generated__/sys_schema";
 import {
   agentInstances,
   agents,
+  agentResponseCursors,
   auditEvents,
   directThreadMessages,
   directThreads,
+  missionChatMessages,
+  missionLeader,
   missionSpend,
   missions,
   usersProfile,
@@ -50,6 +53,24 @@ type WorkCardInput = {
   activate?: boolean;
 };
 type UserProfile = typeof usersProfile.$inferSelect;
+type ChatMention = { type: "agent_instance" | "user"; id: string; displayHandle: string };
+type AgentListItem = {
+  id: string;
+  displayName: string;
+  avatarJson: unknown;
+  globalIdentity: Record<string, unknown>;
+  createdAt: string;
+  instanceCount: number;
+};
+type MissionCreateInput = {
+  missionId?: string;
+  title?: string;
+  objective?: string;
+  dailyBudgetCents?: number;
+  ownerType?: "user" | "agent";
+  ownerAgentId?: string;
+  owner?: OwnerInput;
+};
 
 const app = new Hono();
 const now = () => new Date().toISOString();
@@ -96,8 +117,14 @@ function waitUntil(task: Promise<unknown>) {
 function estimateLlmCostCents(model: string, usage: Record<string, unknown>) {
   const promptTokens = Number(usage.promptTokens ?? usage.inputTokens ?? 0);
   const completionTokens = Number(usage.completionTokens ?? usage.outputTokens ?? 0);
-  const cheapRate = model.includes("mini") ? 0.000001 : 0.00001;
-  return Math.max(1, Math.ceil((promptTokens + completionTokens) * cheapRate));
+  const pricing: Record<string, { inputPerMillion: number; outputPerMillion: number }> = {
+    "gpt-5.5": { inputPerMillion: 5, outputPerMillion: 30 },
+    "gpt-5.5-2026-04-23": { inputPerMillion: 5, outputPerMillion: 30 },
+    "gpt-4o-mini": { inputPerMillion: 0.15, outputPerMillion: 0.6 },
+  };
+  const row = pricing[model] ?? (model.includes("gpt-4o-mini") ? pricing["gpt-4o-mini"] : { inputPerMillion: 10, outputPerMillion: 30 });
+  const dollars = (promptTokens * row.inputPerMillion + completionTokens * row.outputPerMillion) / 1_000_000;
+  return Math.max(1, Math.ceil(dollars * 100));
 }
 
 async function storageObjectText(obj: unknown): Promise<string> {
@@ -288,6 +315,7 @@ function workCardJson(row: typeof workCards.$inferSelect) {
     title: row.title,
     description: row.description,
     assigneeInstanceId: row.assigneeInstanceId,
+    reviewerInstanceId: row.reviewerInstanceId,
     status: row.status,
     priority: row.priority,
     sandboxAffinity: JSON.parse(row.sandboxAffinityJson),
@@ -297,6 +325,147 @@ function workCardJson(row: typeof workCards.$inferSelect) {
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
+}
+
+function chatMessageJson(row: typeof missionChatMessages.$inferSelect) {
+  return {
+    id: row.id,
+    missionId: row.missionId,
+    author: { type: row.authorType, id: row.authorId },
+    body: row.body,
+    mentions: JSON.parse(row.mentionsJson) as ChatMention[],
+    isSilent: row.isSilent === 1,
+    replyToMessageId: row.replyToMessageId,
+    createdAt: row.createdAt,
+  };
+}
+
+function agentInstanceJson(row: typeof agentInstances.$inferSelect) {
+  return {
+    id: row.id,
+    missionId: row.missionId,
+    agentId: row.agentId,
+    role: row.role,
+    displayAlias: row.displayAlias,
+    workState: JSON.parse(row.workStateJson),
+    isolation: JSON.parse(row.isolationJson),
+    equippedSkillOverrides: JSON.parse(row.equippedSkillOverridesJson),
+    r2Prefix: row.r2Prefix,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
+}
+
+function agentListItem(row: typeof agents.$inferSelect, instanceCount: number): AgentListItem {
+  return {
+    id: row.id,
+    displayName: row.displayName,
+    avatarJson: JSON.parse(row.avatarJson),
+    globalIdentity: JSON.parse(row.globalIdentityJson),
+    createdAt: row.createdAt,
+    instanceCount,
+  };
+}
+
+type MissionAgentInstanceRow = {
+  instance: typeof agentInstances.$inferSelect;
+  agent: typeof agents.$inferSelect;
+};
+
+async function loadMissionAgentRows(missionId: string): Promise<MissionAgentInstanceRow[]> {
+  missionId = assertSafeId(missionId, "mission_id");
+  const instanceRows = (await db
+    .select()
+    .from(agentInstances)
+    .where(eq(agentInstances.missionId, missionId))
+    .orderBy(asc(agentInstances.createdAt))) as Array<typeof agentInstances.$inferSelect>;
+  const agentIds = Array.from(new Set(instanceRows.map((instance) => instance.agentId)));
+  const agentRows: Array<typeof agents.$inferSelect> = [];
+  for (const agentId of agentIds) {
+    const [agent] = await db.select().from(agents).where(eq(agents.id, assertSafeId(agentId, "agent_id"))).limit(1);
+    if (agent) agentRows.push(agent);
+  }
+  const agentMap = new Map(agentRows.map((agent) => [agent.id, agent]));
+  const rows: MissionAgentInstanceRow[] = [];
+  for (const instance of instanceRows) {
+    const agent = agentMap.get(instance.agentId);
+    if (agent) rows.push({ instance, agent });
+  }
+  return rows;
+}
+
+async function loadMissionAgentRowByInstance(missionId: string, instanceId: string): Promise<MissionAgentInstanceRow | null> {
+  missionId = assertSafeId(missionId, "mission_id");
+  instanceId = assertSafeId(instanceId, "instance_id");
+  const [instance] = await db
+    .select()
+    .from(agentInstances)
+    .where(and(eq(agentInstances.id, instanceId), eq(agentInstances.missionId, missionId)))
+    .limit(1);
+  if (!instance) return null;
+  const [agent] = await db.select().from(agents).where(eq(agents.id, assertSafeId(instance.agentId, "agent_id"))).limit(1);
+  return agent ? { instance, agent } : null;
+}
+
+function missionAgentInstanceResponse(row: MissionAgentInstanceRow, mission?: Awaited<ReturnType<typeof getMission>>) {
+  return {
+    agent: {
+      id: row.agent.id,
+      displayName: row.agent.displayName,
+      avatar: JSON.parse(row.agent.avatarJson),
+      globalIdentity: JSON.parse(row.agent.globalIdentityJson),
+    },
+    instance: {
+      id: row.instance.id,
+      missionId: row.instance.missionId,
+      agentId: row.instance.agentId,
+      displayAlias: row.instance.displayAlias,
+      workState: JSON.parse(row.instance.workStateJson),
+      ...(mission
+        ? {
+            sandboxSummary: mission.stateJson.privateSandboxes[row.instance.id] ?? {
+              sandboxId: `agent:${mission.id}:${row.instance.id}`,
+              state: "none",
+              active: false,
+              burnRateCentsPerMinute: 0,
+            },
+          }
+        : {}),
+    },
+    role: row.instance.role,
+  };
+}
+
+function sandboxAffinityFromTarget(sandboxTarget: unknown): SandboxAffinityInput {
+  const tier = sandboxTarget === "mission" || sandboxTarget === "private" || sandboxTarget === "tier0" ? sandboxTarget : "tier0";
+  return { tier, reason: "manual" };
+}
+
+function normalizeMentionHandle(value: string) {
+  return value.trim().toLowerCase().replace(/[\s_]+/g, "-");
+}
+
+async function parseMissionMentions(missionId: string, body: string): Promise<ChatMention[]> {
+  missionId = assertSafeId(missionId, "mission_id");
+  const tokens = body.match(/@[\w-]+/g) ?? [];
+  if (tokens.length === 0) return [];
+  const instanceRows = await loadMissionAgentRows(missionId);
+  const byHandle = new Map<string, ChatMention>();
+  for (const row of instanceRows) {
+    const mention = { type: "agent_instance" as const, id: row.instance.id, displayHandle: row.agent.displayName };
+    byHandle.set(normalizeMentionHandle(row.agent.displayName), mention);
+    byHandle.set(normalizeMentionHandle(row.instance.displayAlias ?? row.agent.displayName), mention);
+  }
+  const mentions: ChatMention[] = [];
+  const seen = new Set<string>();
+  for (const token of tokens) {
+    const match = byHandle.get(normalizeMentionHandle(token.slice(1)));
+    if (match && !seen.has(match.id)) {
+      mentions.push(match);
+      seen.add(match.id);
+    }
+  }
+  return mentions;
 }
 
 async function ensureAgent(agentId: string, displayName = agentId) {
@@ -377,7 +546,7 @@ async function createQueuedWorkCard(missionId: string, input: WorkCardInput) {
   missionId = assertSafeId(missionId, "mission_id");
   input.assigneeInstanceId = assertSafeId(input.assigneeInstanceId, "instance_id");
   const agentId = await agentForInstance(input.assigneeInstanceId);
-  const status = input.activate === false || (await hasRunningCard(agentId)) ? "pending" : "running";
+  const shouldStart = input.activate !== false && !(await hasRunningCard(agentId));
   const workCardId = `wc_${crypto.randomUUID().slice(0, 8)}`;
   await db.insert(workCards).values({
     id: workCardId,
@@ -386,7 +555,8 @@ async function createQueuedWorkCard(missionId: string, input: WorkCardInput) {
     description: input.description ?? null,
     pmInstanceId: input.assigneeInstanceId,
     assigneeInstanceId: input.assigneeInstanceId,
-    status,
+    reviewerInstanceId: null,
+    status: "pending",
     priority: "medium",
     sandboxAffinityJson: JSON.stringify(input.sandboxAffinity),
     dependenciesJson: JSON.stringify([]),
@@ -395,10 +565,10 @@ async function createQueuedWorkCard(missionId: string, input: WorkCardInput) {
     createdAt: now(),
     updatedAt: now(),
   });
-  if (status === "running") {
+  if (shouldStart) {
     waitUntil(executeWorkCard(workCardId));
   }
-  return { workCardId, status };
+  return { workCardId, status: "pending" };
 }
 
 async function triggerWorkCardStarted(missionId: string, workCardId: string) {
@@ -425,7 +595,6 @@ async function promoteNextPending(agentId: string) {
     .limit(1);
   const row = rows[0]?.card;
   if (!row) return null;
-  await db.update(workCards).set({ status: "running", updatedAt: now() }).where(eq(workCards.id, row.id));
   waitUntil(executeWorkCard(row.id));
   return row.id;
 }
@@ -433,11 +602,28 @@ async function promoteNextPending(agentId: string) {
 export async function executeWorkCard(workCardId: string) {
   workCardId = assertSafeId(workCardId, "work_card_id");
   const [card] = await db.select().from(workCards).where(eq(workCards.id, workCardId)).limit(1);
-  if (!card || card.status !== "running" || !card.assigneeInstanceId) return;
+  if (!card || card.status !== "pending" || !card.assigneeInstanceId) return;
   const [instance] = await db.select().from(agentInstances).where(eq(agentInstances.id, card.assigneeInstanceId)).limit(1);
   if (!instance) throw new Error("error.agent_instance.not_found");
   const [agent] = await db.select().from(agents).where(eq(agents.id, instance.agentId)).limit(1);
   if (!agent) throw new Error("error.agent.not_found");
+  const claimed = await db
+    .update(workCards)
+    .set({ status: "running", updatedAt: now() })
+    .where(and(
+      eq(workCards.id, workCardId),
+      eq(workCards.status, "pending"),
+      sql`not exists (
+        select 1
+        from work_cards wc
+        inner join agent_instances ai on ai.id = wc.assignee_instance_id
+        where ai.agent_id = ${agent.id}
+          and wc.status = 'running'
+          and wc.id <> ${workCardId}
+      )`,
+    ))
+    .returning();
+  if (claimed.length !== 1) return;
 
   const missionId = card.missionId;
   const sandboxAffinity = JSON.parse(card.sandboxAffinityJson) as SandboxAffinityInput;
@@ -447,7 +633,7 @@ export async function executeWorkCard(workCardId: string) {
   try {
     const apiKey = await Promise.resolve(secret.get("OPENAI_API_KEY")).catch(() => undefined);
     const boot = await loadAgentBootFiles(agent.id);
-    const modelName = boot.baseConfig.model ?? "gpt-4o-mini";
+    const modelName = boot.baseConfig.model ?? "gpt-5.5";
     if (apiKey) {
       const openai = createOpenAI({ apiKey });
       const result = streamText({
@@ -542,19 +728,20 @@ async function executeWorkCardFallback(card: typeof workCards.$inferSelect, agen
   await emitCostEvent({ missionId: card.missionId, agentId, instanceId, costCents: 1, eventType: "cost_event" });
 }
 
-async function createMission(input: { title: string; objective: string; owner: OwnerInput; dailyBudgetCents?: number; requestUserId?: string }) {
+async function createMission(input: { title: string; objective: string; ownerType: "user" | "agent"; ownerAgentId?: string; dailyBudgetCents?: number; requestUserId: string }) {
   const missionId = `mis_${crypto.randomUUID().slice(0, 10)}`;
   const state = defaultMissionState(missionId);
   const timestamp = now();
   let ownerInstanceId: string | null = null;
+  if (input.ownerAgentId) assertSafeId(input.ownerAgentId, "agent_id");
   await db.insert(missions).values({
     id: missionId,
     title: input.title,
     objective: input.objective,
     status: "active",
-    ownerType: input.owner.type,
-    ownerUserId: input.owner.type === "user" ? input.owner.userId ?? input.requestUserId ?? "user_local" : input.requestUserId ?? null,
-    ownerAgentId: input.owner.type === "agent" ? input.owner.agentId ?? null : null,
+    ownerType: input.ownerType,
+    ownerUserId: input.ownerType === "agent" ? null : input.requestUserId,
+    ownerAgentId: input.ownerType === "agent" ? input.ownerAgentId ?? null : null,
     ownerInstanceId: null,
     version: 0,
     stateJson: JSON.stringify(state),
@@ -567,11 +754,13 @@ async function createMission(input: { title: string; objective: string; owner: O
     updatedAt: timestamp,
   });
   await reserveMissionSandboxSlot(missionId);
-  if (input.owner.type === "agent" && input.owner.agentId) {
-    ownerInstanceId = await attachInstance(missionId, input.owner.agentId, "owner");
+  if (input.ownerType === "agent" && input.ownerAgentId) {
+    ownerInstanceId = await attachInstance(missionId, input.ownerAgentId, "owner");
     await db.update(missions).set({ ownerInstanceId, updatedAt: now() }).where(eq(missions.id, missionId));
   }
-  return { missionId, ownerInstanceId };
+  const [mission] = await db.select().from(missions).where(eq(missions.id, missionId)).limit(1);
+  if (!mission) throw new Error("error.mission.not_found");
+  return { mission, missionId, ownerInstanceId };
 }
 
 async function decomposeMission(missionId: string) {
@@ -583,7 +772,7 @@ async function decomposeMission(missionId: string) {
     const openai = createOpenAI({ apiKey });
     ctx.runInBackground(
       generateText({
-        model: openai("gpt-4o-mini"),
+        model: openai("gpt-5.5"),
         prompt: `Decompose this Missionry objective into 2-4 concise work cards. Return terse titles only.\nObjective: ${mission.objective}`,
       }).then(() => undefined).catch(() => undefined),
     );
@@ -605,12 +794,190 @@ async function decomposeMission(missionId: string) {
   return { created: cards };
 }
 
+async function persistMissionChatMessage(input: {
+  missionId: string;
+  authorType: "user" | "agent_instance" | "system";
+  authorId: string;
+  body: string;
+  mentions: ChatMention[];
+  replyToMessageId?: string | null;
+}) {
+  const timestamp = now();
+  const [message] = await db
+    .insert(missionChatMessages)
+    .values({
+      id: `mcm_${crypto.randomUUID().slice(0, 10)}`,
+      missionId: input.missionId,
+      authorType: input.authorType,
+      authorId: input.authorId,
+      body: input.body,
+      mentionsJson: JSON.stringify(input.mentions),
+      isSilent: input.body.trim() === "[NO]" ? 1 : 0,
+      replyToMessageId: input.replyToMessageId ?? null,
+      createdAt: timestamp,
+    })
+    .returning();
+  await recordAudit({
+    missionId: input.missionId,
+    subjectType: "mission_chat_message",
+    subjectId: message.id,
+    actor: input.authorType === "agent_instance" ? { type: "agent", id: input.authorId } : input.authorType === "user" ? { type: "user", id: input.authorId } : { type: "system", id: input.authorId },
+    action: "mission_chat_message_sent",
+    diffSummary: input.body,
+  });
+  return message;
+}
+
+async function resolveMissionLeader(mission: Awaited<ReturnType<typeof getMission>>) {
+  const [explicitLeader] = await db.select().from(missionLeader).where(eq(missionLeader.missionId, mission.id)).limit(1);
+  const leaderInstanceId = explicitLeader?.leaderInstanceId ?? (mission.ownerType === "agent" ? mission.ownerInstanceId : null);
+  if (!leaderInstanceId) return null;
+  return loadMissionAgentRowByInstance(mission.id, leaderInstanceId);
+}
+
+async function updateAgentResponseCursor(missionId: string, instanceId: string, message: typeof missionChatMessages.$inferSelect) {
+  await db.delete(agentResponseCursors).where(and(eq(agentResponseCursors.missionId, missionId), eq(agentResponseCursors.instanceId, instanceId)));
+  await db.insert(agentResponseCursors).values({
+    missionId,
+    instanceId,
+    lastRespondedMessageId: message.id,
+    lastRespondedAt: message.createdAt,
+  });
+}
+
+async function historyWindowSinceLastResponse(missionId: string, instanceId: string) {
+  const [cursor] = await db
+    .select()
+    .from(agentResponseCursors)
+    .where(and(eq(agentResponseCursors.missionId, missionId), eq(agentResponseCursors.instanceId, instanceId)))
+    .limit(1);
+  const rows = await db.select().from(missionChatMessages).where(eq(missionChatMessages.missionId, missionId)).orderBy(asc(missionChatMessages.createdAt));
+  return cursor?.lastRespondedAt ? rows.filter((row: typeof missionChatMessages.$inferSelect) => row.createdAt > cursor.lastRespondedAt!) : rows;
+}
+
+function chatRowsToAiMessages(rows: Array<typeof missionChatMessages.$inferSelect>) {
+  return rows.map((row) => ({
+    role: row.authorType === "user" ? "user" as const : "assistant" as const,
+    content: row.body,
+  }));
+}
+
+async function loadAgentSoulOrFallback(agentId: string, fallback: string) {
+  agentId = assertSafeId(agentId, "agent_id");
+  const obj = await storage.from(buckets.missionryWorkspaces).get(`agents/${agentId}/soul.md`);
+  if (!obj) return fallback;
+  const text = (await storageObjectText(obj)).trim();
+  return text || fallback;
+}
+
+async function generateMissionChatReply(input: {
+  missionId: string;
+  agentId: string;
+  instanceId: string;
+  systemFallback: string;
+  history: Array<typeof missionChatMessages.$inferSelect>;
+  stubBody: string;
+}) {
+  const apiKey = await Promise.resolve(secret.get("OPENAI_API_KEY")).catch(() => undefined);
+  const modelName = "gpt-5.5";
+  if (!apiKey) {
+    await emitCostEvent({
+      missionId: input.missionId,
+      agentId: input.agentId,
+      instanceId: input.instanceId,
+      model: modelName,
+      promptTokens: 0,
+      completionTokens: 0,
+      costCents: 1,
+      eventType: "cost_event",
+    });
+    return input.stubBody;
+  }
+  const openai = createOpenAI({ apiKey });
+  const system = await loadAgentSoulOrFallback(input.agentId, input.systemFallback);
+  const result = streamText({
+    model: openai(modelName),
+    system,
+    messages: chatRowsToAiMessages(input.history),
+    onFinish: async ({ usage }) => {
+      const usageRecord = usage as unknown as Record<string, unknown>;
+      await emitCostEvent({
+        missionId: input.missionId,
+        agentId: input.agentId,
+        instanceId: input.instanceId,
+        model: modelName,
+        promptTokens: Number(usageRecord.promptTokens ?? usageRecord.inputTokens ?? 0),
+        completionTokens: Number(usageRecord.completionTokens ?? usageRecord.outputTokens ?? 0),
+        costCents: estimateLlmCostCents(modelName, usageRecord),
+        eventType: "cost_event",
+      });
+    },
+  });
+  const text = (await result.text).trim();
+  return text || "[NO]";
+}
+
+async function dispatchMissionChatReplies(missionId: string, source: typeof missionChatMessages.$inferSelect, mentions: ChatMention[]) {
+  const mission = await getMission(missionId);
+  const created: Array<typeof missionChatMessages.$inferSelect> = [];
+  const leader = await resolveMissionLeader(mission);
+  const leaderInstanceId = leader?.instance.id ?? null;
+  if (leader) {
+    const leaderHistory = await db.select().from(missionChatMessages).where(eq(missionChatMessages.missionId, missionId)).orderBy(asc(missionChatMessages.createdAt));
+    const leaderBody = await generateMissionChatReply({
+      missionId,
+      agentId: leader.agent.id,
+      instanceId: leader.instance.id,
+      systemFallback: "You are the Leader agent of this Mission. Coordinate. Respond [NO] if the message is not worth answering.",
+      history: leaderHistory,
+      stubBody: `[STUB] Leader received: ${source.body}`,
+    });
+    const leaderMentions = await parseMissionMentions(missionId, leaderBody);
+    const leaderMessage = await persistMissionChatMessage({
+      missionId,
+      authorType: "agent_instance",
+      authorId: leader.instance.id,
+      body: leaderBody,
+      mentions: leaderMentions,
+      replyToMessageId: source.id,
+    });
+    await updateAgentResponseCursor(missionId, leader.instance.id, leaderMessage);
+    created.push(leaderMessage);
+  }
+  for (const mention of mentions) {
+    if (mention.type !== "agent_instance" || mention.id === leaderInstanceId) continue;
+    const instanceRow = await loadMissionAgentRowByInstance(missionId, mention.id);
+    if (!instanceRow) continue;
+    const historyWindow = await historyWindowSinceLastResponse(missionId, mention.id);
+    const agentBody = await generateMissionChatReply({
+      missionId,
+      agentId: instanceRow.agent.id,
+      instanceId: mention.id,
+      systemFallback: `You are ${instanceRow.agent.displayName}, a Missionry agent. Respond once when mentioned. Reply [NO] if no response is needed.`,
+      history: historyWindow,
+      stubBody: `[STUB] ${instanceRow.agent.displayName} received ${historyWindow.length} messages since last response: ${source.body}`,
+    });
+    const agentMentions = await parseMissionMentions(missionId, agentBody);
+    const agentMessage = await persistMissionChatMessage({
+      missionId,
+      authorType: "agent_instance",
+      authorId: mention.id,
+      body: agentBody,
+      mentions: agentMentions,
+      replyToMessageId: source.id,
+    });
+    await updateAgentResponseCursor(missionId, mention.id, agentMessage);
+    created.push(agentMessage);
+  }
+  return created;
+}
+
 app.use("/api/public/*", async (c, next) => {
   assertSafeStartupConfig();
   await scheduleStartupSeed();
   if (c.req.path === "/api/public/health") return next();
   if (c.req.path === "/api/public/internal/reap") return next();
-  if (c.req.path === "/api/public/auth/sign-up") return next();
+  if (c.req.path === "/api/public/auth/whitelist-check") return next();
   const profile = await resolveRequestProfile(c);
   if (!profile) return jsonError(c, "error.auth.not_whitelisted", 403);
   (c as any).set("userProfile", profile);
@@ -619,40 +986,24 @@ app.use("/api/public/*", async (c, next) => {
 
 app.get("/api/public/health", (c) => c.json({ ok: true, service: "missionry-api", runtime: "edgespark", contract: "v0.6" }));
 
-app.post("/api/public/auth/sign-up", async (c) => {
-  const body = (await c.req.json().catch(() => ({}))) as { email?: unknown; password?: unknown; name?: unknown };
+app.post("/api/public/auth/whitelist-check", async (c) => {
+  const body = (await c.req.json().catch(() => ({}))) as { email?: unknown };
   const email = normalizeEmail(body.email);
-  const password = typeof body.password === "string" ? body.password : "";
-  const name = typeof body.name === "string" && body.name.trim() ? body.name.trim() : email?.split("@")[0];
-  if (!email || !password) return jsonError(c, "error.request.invalid", 400);
+  if (!email) return jsonError(c, "error.request.invalid", 400);
   if (!(await isWhitelistedEmail(email))) return jsonError(c, "error.auth.not_whitelisted", 403);
+  return c.json({ ok: true });
+});
 
-  const authUrl = new URL("/api/_es/auth/sign-up/email", c.req.url);
-  const response = await fetch(authUrl.toString(), {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      accept: "application/json",
-    },
-    body: JSON.stringify({ email, password, name }),
+app.post("/api/public/auth/change-password", async (c) => {
+  const profile = currentUserProfile(c);
+  const auditEventId = await recordAudit({
+    subjectType: "user",
+    subjectId: profile.userId,
+    actor: { type: "user", id: profile.userId },
+    action: "password_change_intent",
+    diffSummary: "frontend_call_better_auth_change_password",
   });
-  const text = await response.text();
-  let payload: any = null;
-  if (text) {
-    try {
-      payload = JSON.parse(text);
-    } catch {
-      payload = null;
-    }
-  }
-  if (!response.ok) {
-    return new Response(text || JSON.stringify({ error: { code: "error.auth.signup_failed", messageKey: "error.auth.signup_failed" } }), {
-      status: response.status,
-      headers: { "content-type": response.headers.get("content-type") ?? "application/json" },
-    });
-  }
-  const userId = payload?.user?.id ?? payload?.userId ?? payload?.id ?? payload?.data?.user?.id ?? null;
-  return c.json({ ok: true, userId });
+  return c.json({ ok: true, auditEventId });
 });
 
 app.get("/api/public/admin/overview", async (c) => {
@@ -784,6 +1135,71 @@ app.delete("/api/public/admin/whitelist/:id", async (c) => {
   return c.json({ actionId: crypto.randomUUID(), status: "completed" });
 });
 
+app.get("/api/public/agents", async (c) => {
+  const profile = currentUserProfile(c);
+  const agentRows = await db.select().from(agents).orderBy(asc(agents.createdAt));
+  const instanceRows = await db
+    .select({ instance: agentInstances, mission: missions })
+    .from(agentInstances)
+    .innerJoin(missions, eq(missions.id, agentInstances.missionId));
+  const instanceCounts = new Map<string, number>();
+  for (const { instance } of instanceRows as Array<{ instance: typeof agentInstances.$inferSelect; mission: typeof missions.$inferSelect }>) {
+    instanceCounts.set(instance.agentId, (instanceCounts.get(instance.agentId) ?? 0) + 1);
+  }
+  const visibleByOwnedMission = new Set(
+    (instanceRows as Array<{ instance: typeof agentInstances.$inferSelect; mission: typeof missions.$inferSelect }>)
+      .filter(({ mission }) => mission.ownerUserId === profile.userId)
+      .map(({ instance }) => instance.agentId),
+  );
+  const items = agentRows
+    .filter((agent: typeof agents.$inferSelect) => {
+      if (profile.role === "admin") return true;
+      const identity = JSON.parse(agent.globalIdentityJson) as Record<string, unknown>;
+      return identity.ownerUserId === profile.userId || visibleByOwnedMission.has(agent.id);
+    })
+    .map((agent: typeof agents.$inferSelect) => agentListItem(agent, instanceCounts.get(agent.id) ?? 0));
+  return c.json({ items });
+});
+
+app.post("/api/public/agents", async (c) => {
+  const profile = currentUserProfile(c);
+  const body = (await c.req.json().catch(() => ({}))) as {
+    displayName?: string;
+    role?: string;
+    avatar?: { avatarSource?: string; avatarSeed?: string };
+  };
+  const displayName = body.displayName?.trim();
+  const role = body.role?.trim();
+  if (!displayName || !role) return jsonError(c, "error.request.invalid", 400);
+  const agentId = assertSafeId(`agt_${crypto.randomUUID().slice(0, 12)}`, "agent_id");
+  const timestamp = now();
+  const avatar = body.avatar ?? { avatarSource: "random", avatarSeed: agentId };
+  await ensureAgentFiles(agentId, displayName);
+  const [agent] = await db
+    .insert(agents)
+    .values({
+      id: agentId,
+      slug: agentId.replace(/^agt_/, ""),
+      displayName,
+      avatarJson: JSON.stringify(avatar),
+      globalIdentityJson: JSON.stringify({ displayName, role, version: "v1", ownerUserId: profile.userId }),
+      equippedSkillIdsJson: JSON.stringify(["demo-sandbox"]),
+      r2Prefix: `agents/${agentId}/`,
+      auditHeadId: null,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    })
+    .returning();
+  const auditEventId = await recordAudit({
+    subjectType: "agent",
+    subjectId: agentId,
+    actor: { type: "user", id: profile.userId },
+    action: "agent_created",
+    diffSummary: displayName,
+  });
+  return c.json({ actionId: crypto.randomUUID(), status: "completed", agent: agentListItem(agent, 0), auditEventId }, 201);
+});
+
 app.get("/api/public/missions", async (c) => {
   const profile = currentUserProfile(c);
   const agentId = c.req.query("agentId") ? assertSafeId(c.req.query("agentId"), "agent_id") : undefined;
@@ -815,18 +1231,28 @@ app.post("/api/public/missions/demo", async (c) => {
 
 app.post("/api/public/missions", async (c) => {
   if (c.req.query("seed") === "true") return c.json({ actionId: crypto.randomUUID(), status: "completed", ...(await seedDemo()) });
-  const body = (await c.req.json()) as { missionId?: string; title?: string; objective?: string; owner?: OwnerInput; dailyBudgetCents?: number };
+  const body = (await c.req.json()) as MissionCreateInput;
   if (body.missionId) assertSafeId(body.missionId, "mission_id");
-  if (!body.title || !body.objective || !body.owner) return jsonError(c, "error.request.invalid", 400);
-  const mission = await createMission({
+  if (!body.title || !body.objective) return jsonError(c, "error.request.invalid", 400);
+  const ownerType = body.ownerType ?? body.owner?.type ?? "user";
+  if (ownerType !== "user" && ownerType !== "agent") return jsonError(c, "error.request.invalid", 400);
+  const ownerAgentId = body.ownerAgentId ?? body.owner?.agentId;
+  if (ownerType === "agent" && !ownerAgentId) return jsonError(c, "error.request.invalid", 400);
+  if (ownerAgentId) {
+    const agentId = assertSafeId(ownerAgentId, "agent_id");
+    const [agent] = await db.select({ id: agents.id }).from(agents).where(eq(agents.id, agentId)).limit(1);
+    if (!agent) return jsonError(c, "error.agent.not_found", 404);
+  }
+  const created = await createMission({
     title: body.title,
     objective: body.objective,
-    owner: body.owner,
+    ownerType,
+    ownerAgentId,
     dailyBudgetCents: body.dailyBudgetCents,
     requestUserId: currentUserProfile(c).userId,
   });
-  if (body.owner.type === "agent") await decomposeMission(mission.missionId);
-  return c.json({ actionId: crypto.randomUUID(), status: "completed", ...mission });
+  const missionJson = rowMission(created.mission);
+  return c.json({ ...missionJson, missionId: created.missionId, ownerInstanceId: created.ownerInstanceId }, 201);
 });
 
 app.get("/api/public/missions/:id", async (c) => {
@@ -849,11 +1275,69 @@ app.patch("/api/public/missions/:id", async (c) => {
   return c.json({ actionId: crypto.randomUUID(), status: "completed", mission });
 });
 
+app.get("/api/public/missions/:id/agents", async (c) => {
+  const denied = await assertMissionAccess(c);
+  if (denied) return denied;
+  const missionId = assertSafeId(c.req.param("id"), "mission_id");
+  const rows = await loadMissionAgentRows(missionId);
+  return c.json(rows.map((row) => missionAgentInstanceResponse(row)));
+});
+
 app.post("/api/public/missions/:id/agents/:agentId/instances", async (c) => {
   const denied = await assertMissionAccess(c);
   if (denied) return denied;
   const instanceId = await attachInstance(assertSafeId(c.req.param("id"), "mission_id"), assertSafeId(c.req.param("agentId"), "agent_id"));
   return c.json({ actionId: crypto.randomUUID(), status: "completed", instanceId });
+});
+
+app.post("/api/public/missions/:id/agent-instances", async (c) => {
+  const denied = await assertMissionAccess(c);
+  if (denied) return denied;
+  const missionId = assertSafeId(c.req.param("id"), "mission_id");
+  const body = (await c.req.json().catch(() => ({}))) as { agentId?: string; displayAlias?: string };
+  if (!body.agentId) return jsonError(c, "error.request.invalid", 400);
+  const agentId = assertSafeId(body.agentId, "agent_id");
+  const [agent] = await db.select().from(agents).where(eq(agents.id, agentId)).limit(1);
+  if (!agent) return jsonError(c, "error.agent.not_found", 404);
+  const existing = await db
+    .select({ id: agentInstances.id })
+    .from(agentInstances)
+    .where(and(eq(agentInstances.missionId, missionId), eq(agentInstances.agentId, agentId)))
+    .limit(1);
+  if (existing[0]) return jsonError(c, "error.agent_instance.already_exists", 409);
+  const instanceId = assertSafeId(`ins_${missionId}_${agentId.replace(/^agt_/, "")}`, "instance_id");
+  const timestamp = now();
+  await ensureAgentInstanceFiles(missionId, instanceId);
+  const [instance] = await db
+    .insert(agentInstances)
+    .values({
+      id: instanceId,
+      missionId,
+      agentId,
+      role: "member",
+      displayAlias: body.displayAlias?.trim() || agent.displayName,
+      workStateJson: JSON.stringify({ status: "idle" }),
+      isolationJson: JSON.stringify({ defaultPolicy: "deny_cross_project", allowedReadGrantIds: [] }),
+      equippedSkillOverridesJson: JSON.stringify({ addSkillIds: [], removeSkillIds: [], effectiveSkillIds: ["demo-sandbox"] }),
+      r2Prefix: `missions/${missionId}/agent-instances/${instanceId}/`,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    })
+    .returning();
+  await updateMission(missionId, (mission) => {
+    mission.stateJson.privateSandboxes[instanceId] = privateSandboxSlot(missionId, instanceId);
+    return mission;
+  });
+  await reservePrivateSandboxSlot(missionId, instanceId);
+  const auditEventId = await recordAudit({
+    missionId,
+    subjectType: "agent_instance",
+    subjectId: instanceId,
+    actor: { type: "user", id: currentUserProfile(c).userId },
+    action: "agent_instance_created",
+    diffSummary: `agent:${agentId}`,
+  });
+  return c.json({ actionId: crypto.randomUUID(), status: "completed", agentInstance: agentInstanceJson(instance), auditEventId }, 201);
 });
 
 app.post("/api/public/agents/:agentId/tools/use_skill", async (c) => {
@@ -880,6 +1364,7 @@ app.post("/api/public/agents/:agentId/self-update", async (c) => {
   const bucket = storage.from(buckets.missionryWorkspaces);
   const before = await bucket.get(key);
   const previousBody = body.previousBody ?? storageBodyCache.get(key) ?? (before ? await storageObjectText(before) : "");
+  const [agentBeforeUpdate] = await db.select({ auditHeadId: agents.auditHeadId }).from(agents).where(eq(agents.id, agentId)).limit(1);
   await bucket.put(key, body.content);
   storageBodyCache.set(key, body.content);
   const auditEventId = await recordAudit({
@@ -889,7 +1374,7 @@ app.post("/api/public/agents/:agentId/self-update", async (c) => {
     actor: { type: "agent", id: agentId },
     action: "self_update",
     diffSummary: body.reason ?? "self_update",
-    payloadRef: { r2Key: key, previousBody } as { r2Key: string; sha256?: string },
+    payloadRef: { r2Key: key, previousBody, authoredAgainstAuditHeadId: agentBeforeUpdate?.auditHeadId ?? null },
     reversible: true,
     rollbackAvailable: true,
   });
@@ -900,6 +1385,76 @@ app.post("/api/public/missions/:id/decompose", async (c) => {
   const denied = await assertMissionAccess(c);
   if (denied) return denied;
   return c.json({ actionId: crypto.randomUUID(), status: "completed", ...(await decomposeMission(assertSafeId(c.req.param("id"), "mission_id"))) });
+});
+
+app.post("/api/public/missions/:id/sandbox/start", async (c) => {
+  const denied = await assertMissionAccess(c);
+  if (denied) return denied;
+  const missionId = assertSafeId(c.req.param("id"), "mission_id");
+  const ref = await e2b.startShared(missionId);
+  const auditEventId = await recordAudit({
+    missionId,
+    subjectType: "sandbox",
+    subjectId: ref.sandboxId,
+    actor: { type: "user", id: currentUserProfile(c).userId },
+    action: "sandbox_started",
+    diffSummary: "mission",
+  });
+  return c.json({ actionId: crypto.randomUUID(), status: "completed", sandbox: ref, auditEventId });
+});
+
+app.post("/api/public/missions/:id/sandbox/pause", async (c) => {
+  const denied = await assertMissionAccess(c);
+  if (denied) return denied;
+  const missionId = assertSafeId(c.req.param("id"), "mission_id");
+  const mission = await getMission(missionId);
+  const ref = await e2b.pauseIfIdle(mission.stateJson.sharedSandbox);
+  const auditEventId = await recordAudit({
+    missionId,
+    subjectType: "sandbox",
+    subjectId: ref.sandboxId,
+    actor: { type: "user", id: currentUserProfile(c).userId },
+    action: "sandbox_paused",
+    diffSummary: "mission",
+  });
+  return c.json({ actionId: crypto.randomUUID(), status: "completed", sandbox: ref, auditEventId });
+});
+
+app.post("/api/public/missions/:id/agent-instances/:instanceId/sandbox/start", async (c) => {
+  const denied = await assertMissionAccess(c);
+  if (denied) return denied;
+  const missionId = assertSafeId(c.req.param("id"), "mission_id");
+  const instanceId = assertSafeId(c.req.param("instanceId"), "instance_id");
+  await e2b.assertInstanceInMission(missionId, instanceId);
+  const ref = await e2b.startPrivate(missionId, instanceId);
+  const auditEventId = await recordAudit({
+    missionId,
+    subjectType: "sandbox",
+    subjectId: ref.sandboxId,
+    actor: { type: "user", id: currentUserProfile(c).userId },
+    action: "sandbox_started",
+    diffSummary: `private:${instanceId}`,
+  });
+  return c.json({ actionId: crypto.randomUUID(), status: "completed", sandbox: ref, auditEventId });
+});
+
+app.post("/api/public/missions/:id/agent-instances/:instanceId/sandbox/pause", async (c) => {
+  const denied = await assertMissionAccess(c);
+  if (denied) return denied;
+  const missionId = assertSafeId(c.req.param("id"), "mission_id");
+  const instanceId = assertSafeId(c.req.param("instanceId"), "instance_id");
+  await e2b.assertInstanceInMission(missionId, instanceId);
+  const mission = await getMission(missionId);
+  const ref = await e2b.pauseIfIdle(mission.stateJson.privateSandboxes[instanceId] ?? privateSandboxSlot(missionId, instanceId));
+  const auditEventId = await recordAudit({
+    missionId,
+    subjectType: "sandbox",
+    subjectId: ref.sandboxId,
+    actor: { type: "user", id: currentUserProfile(c).userId },
+    action: "sandbox_paused",
+    diffSummary: `private:${instanceId}`,
+  });
+  return c.json({ actionId: crypto.randomUUID(), status: "completed", sandbox: ref, auditEventId });
 });
 
 app.post("/api/public/missions/:id/agent-instances/:instanceId/direct-thread", async (c) => {
@@ -934,15 +1489,11 @@ app.get("/api/public/missions/:id/workroom", async (c) => {
   const denied = await assertMissionAccess(c);
   if (denied) return denied;
   const mission = await getMission(assertSafeId(c.req.param("id"), "mission_id"));
-  const instanceRows = await db
-    .select({ instance: agentInstances, agent: agents })
-    .from(agentInstances)
-    .innerJoin(agents, eq(agents.id, agentInstances.agentId))
-    .where(eq(agentInstances.missionId, mission.id))
-    .orderBy(asc(agentInstances.createdAt));
+  const instanceRows = await loadMissionAgentRows(mission.id);
   const cardRows = await db.select().from(workCards).where(eq(workCards.missionId, mission.id)).orderBy(asc(workCards.createdAt));
   const workCardsJson = cardRows.map(workCardJson);
   const activePrivateSandboxes = Object.values(mission.stateJson.privateSandboxes).filter((ref) => ref.state === "running").length;
+  const leader = await resolveMissionLeader(mission);
   return c.json({
     mission: {
       id: mission.id,
@@ -950,6 +1501,7 @@ app.get("/api/public/missions/:id/workroom", async (c) => {
       objective: mission.objective,
       status: mission.status,
       updatedAt: mission.updatedAt,
+      leaderInstanceId: leader?.instance.id ?? null,
       owner: {
         type: mission.ownerType,
         userId: mission.ownerUserId,
@@ -981,49 +1533,93 @@ app.get("/api/public/missions/:id/workroom", async (c) => {
       r2SnapshotKey: mission.stateJson.snapshots.sharedLatestR2Key,
       processes: [],
     },
-    agentInstances: instanceRows.map(({ instance, agent }: any) => ({
-      agent: {
-        id: agent.id,
-        displayName: agent.displayName,
-        avatar: JSON.parse(agent.avatarJson),
-        globalIdentity: JSON.parse(agent.globalIdentityJson),
-      },
-      instance: {
-        id: instance.id,
-        missionId: instance.missionId,
-        agentId: instance.agentId,
-        displayAlias: instance.displayAlias,
-        workState: JSON.parse(instance.workStateJson),
-        sandboxSummary: mission.stateJson.privateSandboxes[instance.id] ?? { sandboxId: `agent:${mission.id}:${instance.id}`, state: "none", active: false, burnRateCentsPerMinute: 0 },
-      },
-      role: instance.role,
-    })),
+    agentInstances: instanceRows.map((row) => missionAgentInstanceResponse(row, mission)),
     openIssues: mission.stateJson.issues.open,
     costGuardrailStatus: { state: mission.stateJson.costGuardrailStatus },
     updatedAt: mission.updatedAt,
   });
 });
 
+app.get("/api/public/missions/:id/chat", async (c) => {
+  const denied = await assertMissionAccess(c);
+  if (denied) return denied;
+  const missionId = assertSafeId(c.req.param("id"), "mission_id");
+  const limit = Math.min(100, Math.max(1, Number(c.req.query("limit") ?? 50)));
+  const before = c.req.query("before");
+  if (before) assertSafeId(before, "chat_message_id");
+  const allRows = await db
+    .select()
+    .from(missionChatMessages)
+    .where(eq(missionChatMessages.missionId, missionId))
+    .orderBy(desc(missionChatMessages.createdAt));
+  const rows = before ? allRows.filter((row: typeof missionChatMessages.$inferSelect) => row.id < before).slice(0, limit) : allRows.slice(0, limit);
+  return c.json({
+    items: rows.map(chatMessageJson),
+    nextCursor: rows.length === limit ? rows.at(-1)?.id : null,
+  });
+});
+
+app.post("/api/public/missions/:id/chat", async (c) => {
+  const denied = await assertMissionAccess(c);
+  if (denied) return denied;
+  const missionId = assertSafeId(c.req.param("id"), "mission_id");
+  const body = (await c.req.json().catch(() => ({}))) as { body?: string; replyToMessageId?: string };
+  if (!body.body?.trim()) return jsonError(c, "error.request.invalid", 400);
+  const replyToMessageId = body.replyToMessageId ? assertSafeId(body.replyToMessageId, "chat_message_id") : null;
+  const mentions = await parseMissionMentions(missionId, body.body);
+  const message = await persistMissionChatMessage({
+    missionId,
+    authorType: "user",
+    authorId: currentUserProfile(c).userId,
+    body: body.body,
+    mentions,
+    replyToMessageId,
+  });
+  const agentReplies = await dispatchMissionChatReplies(missionId, message, mentions);
+  return c.json({
+    actionId: crypto.randomUUID(),
+    status: "completed",
+    message: chatMessageJson(message),
+    agentReplies: agentReplies.map(chatMessageJson),
+  }, 201);
+});
+
 app.post("/api/public/missions/:id/work-cards", async (c) => {
   const denied = await assertMissionAccess(c);
   if (denied) return denied;
-  const body = (await c.req.json().catch(() => ({}))) as Partial<WorkCardInput>;
-  if (!body.assigneeInstanceId) return jsonError(c, "error.work_card.assignee_required");
+  const body = (await c.req.json().catch(() => ({}))) as { title?: string; description?: string; assigneeInstanceId?: string; sandboxTarget?: string };
+  if (!body.title) return jsonError(c, "error.request.invalid", 400);
   const missionId = assertSafeId(c.req.param("id"), "mission_id");
-  const assigneeInstanceId = assertSafeId(body.assigneeInstanceId, "instance_id");
-  await e2b.assertInstanceInMission(missionId, assigneeInstanceId);
-  const created = await createQueuedWorkCard(missionId, {
-    title: body.title ?? "Work card",
-    description: body.description,
+  const assigneeInstanceId = body.assigneeInstanceId ? assertSafeId(body.assigneeInstanceId, "instance_id") : null;
+  if (assigneeInstanceId) await e2b.assertInstanceInMission(missionId, assigneeInstanceId);
+  const timestamp = now();
+  const workCardId = `wc_${crypto.randomUUID().slice(0, 8)}`;
+  const [workCard] = await db.insert(workCards).values({
+    id: workCardId,
+    missionId,
+    title: body.title,
+    description: body.description ?? null,
+    pmInstanceId: assigneeInstanceId,
     assigneeInstanceId,
-    sandboxAffinity: body.sandboxAffinity ?? { tier: "tier0", reason: "manual" },
-    demoAction: body.demoAction,
-    path: body.path,
-    content: body.content,
-    command: body.command,
-    activate: true,
+    reviewerInstanceId: null,
+    status: "pending",
+    priority: "medium",
+    sandboxAffinityJson: JSON.stringify(sandboxAffinityFromTarget(body.sandboxTarget)),
+    dependenciesJson: JSON.stringify([]),
+    issueIdsJson: JSON.stringify([]),
+    costJson: JSON.stringify({ spentCents: 0 }),
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  }).returning();
+  const auditEventId = await recordAudit({
+    missionId,
+    subjectType: "work_card",
+    subjectId: workCardId,
+    actor: { type: "user", id: currentUserProfile(c).userId },
+    action: "work_card_created",
+    diffSummary: body.title,
   });
-  return c.json({ actionId: crypto.randomUUID(), operationStatus: "completed", ...created });
+  return c.json({ actionId: crypto.randomUUID(), status: "completed", workCard: workCardJson(workCard), auditEventId }, 201);
 });
 
 app.patch("/api/public/missions/:id/work-cards/:workCardId", async (c) => {
@@ -1034,7 +1630,8 @@ app.patch("/api/public/missions/:id/work-cards/:workCardId", async (c) => {
   const workCardId = assertSafeId(c.req.param("workCardId"), "work_card_id");
   const [before] = await db.select().from(workCards).where(and(eq(workCards.id, workCardId), eq(workCards.missionId, missionId))).limit(1);
   if (!before) return jsonError(c, "error.work_card.not_found", 404);
-  await db.update(workCards).set({ status: body.status ?? before.status, updatedAt: now() }).where(eq(workCards.id, workCardId));
+  const nextStatus = body.status === "running" && before.status !== "running" ? "pending" : body.status ?? before.status;
+  await db.update(workCards).set({ status: nextStatus, updatedAt: now() }).where(eq(workCards.id, workCardId));
   let promoted: string | null = null;
   if (body.status === "done" || body.status === "failed") promoted = await promoteNextPending(await agentForInstance(before.assigneeInstanceId ?? ""));
   if (body.status === "running" && before.status !== "running") waitUntil(executeWorkCard(workCardId));
@@ -1148,7 +1745,7 @@ async function generateDirectAgentReply(agentId: string, instanceId: string, mis
     return `Acknowledged. I will handle: ${userBody}`;
   }
   const boot = await loadAgentBootFiles(agentId);
-  const modelName = boot.baseConfig.model ?? "gpt-4o-mini";
+  const modelName = boot.baseConfig.model ?? "gpt-5.5";
   const openai = createOpenAI({ apiKey });
   const result = streamText({
     model: openai(modelName),
@@ -1231,8 +1828,13 @@ app.post("/api/public/audit-events/:auditEventId/rollback", async (c) => {
   const auditEventId = c.req.param("auditEventId");
   const [row] = await db.select().from(auditEvents).where(eq(auditEvents.eventId, auditEventId)).limit(1);
   if (!row?.payloadRefJson) return jsonError(c, "error.audit.rollback_unavailable", 404);
-  const payload = JSON.parse(row.payloadRefJson) as { r2Key?: string; previousBody?: string };
+  const payload = JSON.parse(row.payloadRefJson) as { r2Key?: string; previousBody?: string; authoredAgainstAuditHeadId?: string | null };
   if (!payload.r2Key) return jsonError(c, "error.audit.rollback_unavailable", 404);
+  if (row.subjectType === "agent") {
+    const [agent] = await db.select({ auditHeadId: agents.auditHeadId }).from(agents).where(eq(agents.id, row.subjectId)).limit(1);
+    if (!agent) return jsonError(c, "error.agent.not_found", 404);
+    if (agent.auditHeadId !== row.eventId) return jsonError(c, "error.audit.rollback_conflict", 409);
+  }
   const bucket = storage.from(buckets.missionryWorkspaces);
   const versions = bucket.listVersions ? await bucket.listVersions(payload.r2Key) : [];
   if (versions.length > 1 && bucket.restoreObjectVersion) await bucket.restoreObjectVersion(payload.r2Key, versions[1].versionId);
@@ -1247,7 +1849,7 @@ app.post("/api/public/audit-events/:auditEventId/rollback", async (c) => {
     actor: { type: "user", id: "user_local" },
     action: "rollback_completed",
     diffSummary: `rollback:${row.eventId}`,
-    payloadRef: { r2Key: payload.r2Key },
+    payloadRef: { r2Key: payload.r2Key, rollbackOfEventId: row.eventId, authoredAgainstAuditHeadId: payload.authoredAgainstAuditHeadId ?? null },
   });
   return new Response(JSON.stringify({
     actionId: crypto.randomUUID(),

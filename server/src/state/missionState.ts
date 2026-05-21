@@ -1,6 +1,6 @@
 import { db } from "edgespark";
-import { and, eq, lte } from "drizzle-orm";
-import { auditEvents, missionSpend, missions, sandboxRuntime, usersProfile } from "../defs/db_schema";
+import { and, eq, lte, sql } from "drizzle-orm";
+import { agents, auditEvents, missionSpend, missions, sandboxRuntime, usersProfile } from "../defs/db_schema";
 
 export type SandboxTier = "mission" | "private";
 export type SandboxState = "none" | "starting" | "running" | "paused" | "resuming" | "killed" | "error";
@@ -76,7 +76,7 @@ export type AuditRecord = {
   action: string;
   clientActionId?: string;
   diffSummary: string;
-  payloadRef?: { r2Key: string; sha256?: string };
+  payloadRef?: { r2Key: string; sha256?: string; previousBody?: string; authoredAgainstAuditHeadId?: string | null; rollbackOfEventId?: string };
   reversible?: boolean;
   rollbackAvailable?: boolean;
 };
@@ -176,15 +176,23 @@ export async function recordCost(event: CostRecord): Promise<MissionRow> {
     createdAt,
   });
 
-  const missionAfterSpend = await updateMission(event.missionId, (mission) => {
-    mission.missionSpendCents += event.costCents;
-    if (event.eventType === "sandbox_burn") mission.sandboxSpendCents += event.costCents;
-    if (event.eventType === "cost_event") mission.llmSpendCents += event.costCents;
-    if (mission.dailyBudgetCents > 0 && mission.missionSpendCents >= mission.dailyBudgetCents) {
+  const timestamp = now();
+  await db
+    .update(missions)
+    .set({
+      missionSpendCents: sql`${missions.missionSpendCents} + ${event.costCents}`,
+      llmSpendCents: event.eventType === "cost_event" ? sql`${missions.llmSpendCents} + ${event.costCents}` : sql`${missions.llmSpendCents}`,
+      sandboxSpendCents: event.eventType === "sandbox_burn" ? sql`${missions.sandboxSpendCents} + ${event.costCents}` : sql`${missions.sandboxSpendCents}`,
+      updatedAt: timestamp,
+    })
+    .where(eq(missions.id, event.missionId));
+  let missionAfterSpend = await getMission(event.missionId);
+  if (missionAfterSpend.dailyBudgetCents > 0 && missionAfterSpend.missionSpendCents >= missionAfterSpend.dailyBudgetCents && missionAfterSpend.stateJson.costGuardrailStatus !== "daily_cap_hit") {
+    missionAfterSpend = await updateMission(event.missionId, (mission) => {
       mission.stateJson.costGuardrailStatus = "daily_cap_hit";
-    }
-    return mission;
-  });
+      return mission;
+    });
+  }
   await addUserDailySpend(missionAfterSpend.ownerUserId ?? "system", event.costCents);
   return missionAfterSpend;
 }
@@ -223,15 +231,18 @@ export async function recordAudit(event: AuditRecord): Promise<string> {
     rollbackAvailable: event.rollbackAvailable ? 1 : 0,
     createdAt: now(),
   });
+  if (event.subjectType === "agent") {
+    await db.update(agents).set({ auditHeadId: eventId, updatedAt: now() }).where(eq(agents.id, event.subjectId));
+  }
   return eventId;
 }
 
 async function addUserDailySpend(userId: string, costCents: number) {
-  const profile = await getOrCreateBudgetProfile(userId);
+  await getOrCreateBudgetProfile(userId);
   await db
     .update(usersProfile)
     .set({
-      dailySpendCents: profile.dailySpendCents + costCents,
+      dailySpendCents: sql`${usersProfile.dailySpendCents} + ${costCents}`,
       updatedAt: now(),
     })
     .where(eq(usersProfile.userId, userId));

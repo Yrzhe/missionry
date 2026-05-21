@@ -9,6 +9,8 @@ import { GrowthCenter } from './components/magicpath/growth-center/GrowthCenter'
 import { MissionsHome } from './components/magicpath/missions-home/MissionsHome';
 import { SettingsBudget } from './components/magicpath/settings-budget/SettingsBudget';
 import { SettingsEnvironment } from './components/magicpath/settings-environment/SettingsEnvironment';
+import { SettingsAccount } from './components/magicpath/settings-account/SettingsAccount';
+import { MagicPathSurface } from './components/magicpath/Surface';
 import { Workroom } from './components/magicpath/workroom/Workroom';
 import { ApiError, api, login, resolveSession } from './lib/api';
 import { subscribeMissionEvents } from './lib/sse';
@@ -139,10 +141,11 @@ function RouterRoutes() {
       <Route path="/missions/:id" element={<WorkroomLoader />} />
       <Route path="/missions/:id/agents/:instanceId" element={<AgentProfileControlCenter />} />
       <Route path="/agents" element={<AgentLibrary />} />
-      <Route path="/artifacts" element={<ArtifactsRoute />} />
+      <Route path="/artifacts" element={<MagicPathSurface page="artifacts" />} />
       <Route path="/growth" element={<GrowthCenter />} />
       <Route path="/settings/budget" element={<SettingsBudget />} />
       <Route path="/settings/environment" element={<SettingsEnvironment />} />
+      <Route path="/settings/account" element={<SettingsAccount />} />
       <Route path="/admin" element={<AdminConsole />} />
       <Route path="/chat/:threadId" element={<DirectAgentThread />} />
       <Route path="*" element={<Navigate to={firstMissionId ? `/missions/${firstMissionId}` : '/missions'} replace />} />
@@ -158,27 +161,6 @@ function WorkroomLoader() {
     void api.workroom(id).then((workroom) => setWorkroom(id, workroom));
   }, [id, setWorkroom]);
   return <Workroom />;
-}
-
-function ArtifactsRoute() {
-  const { t, i18n } = useTranslation();
-  const session = useAppStore((state) => state.session);
-  const toggleLanguage = () => {
-    const next = i18n.language === 'zh' ? 'en' : 'zh';
-    localStorage.setItem('missionry.locale', next);
-    void i18n.changeLanguage(next);
-  };
-  return (
-    <div className="mp-shell">
-      <aside className="mp-sidebar">
-        <div className="mp-brand"><div className="mp-logo">M</div><div><div className="mp-brand-name">{t('app.name')}</div><div className="mp-muted mp-small">{t('app.workspace')}</div></div></div>
-      </aside>
-      <main className="mp-main">
-        <header className="mp-topbar"><strong>{t('artifacts.title')}</strong><span className="mp-muted mp-mono">{session?.email}</span><button className="mp-button mp-lang" onClick={toggleLanguage}>{t('common.language')}</button></header>
-        <section className="mp-content"><div className="mp-head"><div><div className="mp-label">/api/public/missions/:id/workroom</div><h1>{t('artifacts.title')}</h1><p className="mp-muted">{t('artifacts.subtitle')}</p></div></div><div className="mp-empty">{t('common.empty')}</div></section>
-      </main>
-    </div>
-  );
 }
 
 function LoginScreen({ onReady }: { onReady: () => void }) {

@@ -15,6 +15,13 @@
       "when": 1779295000000,
       "tag": "0001_cleanup_non_whitelisted_auth_leak",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1779298494513,
+      "tag": "0002_spooky_morph",
+      "breakpoints": true
     }
   ]
 }

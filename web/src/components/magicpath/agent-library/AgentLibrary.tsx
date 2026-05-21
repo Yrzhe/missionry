@@ -1,3 +1,195 @@
-import { MagicPathSurface } from '../Surface';
+import { useEffect, useMemo, useState } from 'react';
+import { useTranslation } from 'react-i18next';
+import { api } from '../../../lib/api';
+import { useAppStore } from '../../../lib/store';
+import type { AgentLibraryItem, MissionSummary } from '../../../lib/types';
+import type { FormEvent } from 'react';
+import { Shell } from '../Shell';
 
-export const AgentLibrary = () => <MagicPathSurface page="agents" />;
+type AgentForm = {
+  displayName: string;
+  role: string;
+  avatarSeed: string;
+};
+
+const ROLE_FILTERS = ['all', 'pm', 'research', 'frontend', 'backend'] as const;
+
+function initials(name: string) {
+  return name.split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]?.toUpperCase()).join('') || 'AG';
+}
+
+function agentRole(agent: AgentLibraryItem) {
+  return agent.role ?? agent.globalIdentity?.role ?? 'agent';
+}
+
+function avatarSeed(agent: AgentLibraryItem) {
+  const avatar = agent.avatar as { avatarSeed?: string; color?: string } | undefined;
+  return avatar?.avatarSeed ?? agent.slug ?? agent.id;
+}
+
+function avatarColor(agent: AgentLibraryItem) {
+  const colors = ['#5e7a5a', '#3f6577', '#6b4a6f', '#b8701f', '#7a7163', '#a8442a'];
+  const avatar = agent.avatar as { color?: string } | undefined;
+  if (avatar?.color) return avatar.color;
+  const seed = avatarSeed(agent);
+  const total = Array.from(seed).reduce((sum, char) => sum + char.charCodeAt(0), 0);
+  return colors[total % colors.length];
+}
+
+export function AgentLibrary() {
+  const { t } = useTranslation();
+  const missions = useAppStore((state) => state.missions);
+  const setWorkroom = useAppStore((state) => state.setWorkroom);
+  const [agents, setAgents] = useState<AgentLibraryItem[]>([]);
+  const [filter, setFilter] = useState<(typeof ROLE_FILTERS)[number]>('all');
+  const [createOpen, setCreateOpen] = useState(false);
+  const [recruitAgent, setRecruitAgent] = useState<AgentLibraryItem | null>(null);
+  const [form, setForm] = useState<AgentForm>({ displayName: '', role: 'agent', avatarSeed: '' });
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const rows = useMemo(() => {
+    return agents.filter((agent) => filter === 'all' || agentRole(agent).toLowerCase().includes(filter));
+  }, [agents, filter]);
+
+  async function refreshAgents() {
+    const response = await api.agents();
+    setAgents(response.items);
+  }
+
+  useEffect(() => {
+    void refreshAgents().catch(() => undefined);
+  }, []);
+
+  async function submitAgent(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setError(null);
+    setBusy(true);
+    try {
+      await api.createAgent({
+        displayName: form.displayName.trim(),
+        role: form.role.trim(),
+        avatarSeed: form.avatarSeed.trim() || form.displayName.trim().toLowerCase().replace(/\s+/g, '-'),
+      });
+      await refreshAgents();
+      setCreateOpen(false);
+      setForm({ displayName: '', role: 'agent', avatarSeed: '' });
+    } catch (createError) {
+      setError(createError instanceof Error ? createError.message : t('agents.createError'));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function recruit(mission: MissionSummary) {
+    if (!recruitAgent) return;
+    setError(null);
+    setBusy(true);
+    try {
+      await api.recruitAgentToMission(mission.id, recruitAgent.id);
+      const workroom = await api.workroom(mission.id);
+      setWorkroom(mission.id, workroom);
+      setRecruitAgent(null);
+    } catch (recruitError) {
+      setError(recruitError instanceof Error ? recruitError.message : t('agents.recruitError'));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Shell title={t('agents.title')} meta={<span className="mp-muted mp-mono">{t('agents.endpoint')}</span>} actions={<button className="mp-button dark" onClick={() => setCreateOpen(true)}>{t('agents.new')}</button>}>
+      <div className="mp-head">
+        <div>
+          <div className="mp-label">{t('agents.endpoint')}</div>
+          <h1>{t('agents.libraryTitle')}</h1>
+          <p className="mp-muted">{t('agents.subtitle')}</p>
+        </div>
+        <div className="mp-filter-pills">
+          {ROLE_FILTERS.map((role) => <button key={role} className={`mp-button ${filter === role ? 'dark' : ''}`} onClick={() => setFilter(role)}>{role === 'all' ? t('common.all') : t(`agents.role.${role}`)}</button>)}
+        </div>
+      </div>
+
+      {rows.length ? (
+        <div className="mp-agent-grid">
+          {rows.map((agent) => <AgentCard key={agent.id} agent={agent} onRecruit={() => setRecruitAgent(agent)} />)}
+        </div>
+      ) : (
+        <EmptyCta title={t('agents.empty.title')} body={t('agents.empty.body')} action={t('agents.empty.action')} onAction={() => setCreateOpen(true)} />
+      )}
+
+      {createOpen ? (
+        <div className="mp-modal-backdrop" role="presentation">
+          <form className="mp-modal" onSubmit={submitAgent}>
+            <div className="mp-section-title">
+              <div>
+                <div className="mp-label">{t('agents.modal.endpoint')}</div>
+                <h2>{t('agents.modal.title')}</h2>
+              </div>
+              <button type="button" className="mp-button" onClick={() => setCreateOpen(false)}>{t('common.cancel')}</button>
+            </div>
+            <label>{t('agents.modal.displayName')}<input value={form.displayName} onChange={(event) => setForm((current) => ({ ...current, displayName: event.target.value }))} required /></label>
+            <label>{t('agents.modal.role')}<input value={form.role} onChange={(event) => setForm((current) => ({ ...current, role: event.target.value }))} required /></label>
+            <label>{t('agents.modal.avatarSeed')}<input value={form.avatarSeed} onChange={(event) => setForm((current) => ({ ...current, avatarSeed: event.target.value }))} /></label>
+            {error ? <div className="mp-denied">{error}</div> : null}
+            <button className="mp-button dark" disabled={busy}>{busy ? t('common.saving') : t('common.create')}</button>
+          </form>
+        </div>
+      ) : null}
+
+      {recruitAgent ? (
+        <div className="mp-modal-backdrop" role="presentation">
+          <div className="mp-modal">
+            <div className="mp-section-title">
+              <div>
+                <div className="mp-label">{t('agents.recruit.endpoint')}</div>
+                <h2>{t('agents.recruit.title', { name: recruitAgent.displayName })}</h2>
+              </div>
+              <button type="button" className="mp-button" onClick={() => setRecruitAgent(null)}>{t('common.cancel')}</button>
+            </div>
+            <div className="mp-recruit-list">
+              {missions.length ? missions.map((mission) => <button className="mp-recruit-row" key={mission.id} disabled={busy} onClick={() => void recruit(mission)}><strong>{mission.title}</strong><span className="mp-muted">{mission.status}</span></button>) : <p className="mp-muted">{t('agents.recruit.noMissions')}</p>}
+            </div>
+            {error ? <div className="mp-denied">{error}</div> : null}
+          </div>
+        </div>
+      ) : null}
+    </Shell>
+  );
+}
+
+function AgentCard({ agent, onRecruit }: { agent: AgentLibraryItem; onRecruit: () => void }) {
+  const { t } = useTranslation();
+  const role = agentRole(agent);
+  const skills = agent.skills ?? [];
+  return (
+    <article className="mp-card mp-agent-card">
+      <div className="mp-agent-card-head">
+        <div className="mp-agent-avatar" style={{ background: avatarColor(agent) }}>{initials(agent.displayName)}</div>
+        <div>
+          <h2>{agent.displayName}</h2>
+          <p className="mp-muted">{role}</p>
+        </div>
+      </div>
+      <div className="mp-row-tight">
+        <span className="mp-chip">{t('agents.avatarSeed')}: {avatarSeed(agent)}</span>
+        <span className="mp-chip">{t('agents.model')}: {agent.model ?? agent.globalIdentity?.baseConfigSummary ?? '-'}</span>
+      </div>
+      <p className="mp-muted">{t('agents.skills')}: {skills.length ? skills.join(', ') : t('common.pending')}</p>
+      <div className="mp-row-tight">
+        <button className="mp-button dark" onClick={onRecruit}>{t('agents.recruit.action')}</button>
+      </div>
+      <div className="mp-muted mp-mono mp-small">{agent.updatedAt ?? agent.createdAt ?? agent.id}</div>
+    </article>
+  );
+}
+
+function EmptyCta({ title, body, action, onAction }: { title: string; body: string; action: string; onAction: () => void }) {
+  return (
+    <div className="mp-empty mp-empty-cta">
+      <h2>{title}</h2>
+      <p>{body}</p>
+      <button className="mp-button dark" onClick={onAction}>{action}</button>
+    </div>
+  );
+}

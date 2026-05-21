@@ -14,6 +14,12 @@ export type MissionOwner = {
   displayName: string;
 };
 
+export type CreateMissionInput = {
+  title: string;
+  objective: string;
+  dailyBudgetCents: number;
+};
+
 export type MissionSummary = {
   id: string;
   title: string;
@@ -22,6 +28,7 @@ export type MissionSummary = {
   updatedAt?: string;
   updated?: string;
   owner?: MissionOwner;
+  leaderInstanceId?: string;
   agentCount?: number;
   pendingCount?: number;
   artifactCount?: number;
@@ -49,6 +56,21 @@ export type AgentRef = {
     version?: string;
     updatedAt?: string;
   };
+};
+
+export type AgentLibraryItem = AgentRef & {
+  slug?: string;
+  role?: string;
+  model?: string;
+  skills?: string[];
+  updatedAt?: string;
+  createdAt?: string;
+};
+
+export type CreateAgentInput = {
+  displayName: string;
+  role: string;
+  avatarSeed: string;
 };
 
 export type MissionAgentRow = {
@@ -91,10 +113,21 @@ export type WorkCard = {
   updatedAt?: string;
 };
 
+export type CreateWorkCardInput = {
+  title: string;
+  description?: string;
+  assigneeInstanceId: string;
+  sandboxAffinity: {
+    tier: 'tier0' | 'mission' | 'private';
+    reason: string;
+  };
+};
+
 export type MissionSandboxReadModel = {
   sandboxId?: string;
   state: SandboxState;
   active?: boolean;
+  activeSandboxCount?: number;
   burnRateCentsPerMinute?: number;
   environmentVersionId?: string;
   injectedCredentialIds?: string[];
@@ -102,6 +135,7 @@ export type MissionSandboxReadModel = {
   environmentAccessMode?: 'inherit' | 'restricted' | 'blocked';
   repoPath?: string;
   r2SnapshotKey?: string;
+  lastActivityAt?: string;
   processes?: Array<{
     id: string;
     command: string;
@@ -109,6 +143,40 @@ export type MissionSandboxReadModel = {
     terminalSessionId?: string;
     streamId?: string;
   }>;
+};
+
+export type MissionChatMessage = {
+  id: string;
+  missionId: string;
+  body: string;
+  authorType: 'user' | 'agent' | 'system';
+  authorName: string;
+  authorInstanceId?: string;
+  replyToMessageId?: string;
+  createdAt: string;
+};
+
+export type DirectThreadMessage = {
+  id: string;
+  threadId: string;
+  missionId: string;
+  agentInstanceId: string;
+  sender: {
+    type: 'user' | 'agent' | 'system';
+    id: string;
+  };
+  body: string;
+  createdAt: string;
+  auditEventId?: string;
+};
+
+export type DirectThreadReadModel = {
+  threadId: string;
+  missionId: string;
+  agentInstanceId: string;
+  messages: DirectThreadMessage[];
+  unreadCount?: number;
+  lastMessageAt?: string;
 };
 
 export type WorkroomReadModel = {
@@ -178,6 +246,8 @@ export type WhitelistEntry = {
   value: string;
   enabled: boolean | number;
   createdBy?: string;
+  createdAt?: string;
+  updatedAt?: string;
 };
 
 export type MissionEvent = {
@@ -188,6 +258,22 @@ export type MissionEvent = {
     sandboxSeconds?: number;
     sandboxId?: string;
     burnRateCentsPerMinute?: number;
+    agentId?: string;
+    instanceId?: string;
+    model?: string;
+    message?: MissionChatMessage;
+    chatMessage?: MissionChatMessage;
+    subjectType?: string;
+    subjectId?: string;
+    actor?: {
+      type?: string;
+      id?: string;
+    };
+    diffSummary?: string;
+    payloadRef?: {
+      r2Key?: string;
+      previousBody?: string;
+    };
   };
   auditEventId?: string;
   occurredAt?: string;

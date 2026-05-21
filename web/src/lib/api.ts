@@ -1,7 +1,13 @@
 import type {
   AdminOverview,
   AdminUser,
+  AgentLibraryItem,
   BudgetSettings,
+  CreateAgentInput,
+  CreateMissionInput,
+  CreateWorkCardInput,
+  DirectThreadReadModel,
+  MissionChatMessage,
   MissionSpendBreakdown,
   MissionSummary,
   Session,
@@ -77,8 +83,31 @@ export async function login(email: string, password: string) {
   }
 }
 
+export async function changePassword(currentPassword: string, newPassword: string) {
+  const response = await fetch(`${API_BASE_URL}/api/_es/auth/change-password`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ currentPassword, newPassword }),
+  });
+  if (!response.ok) {
+    const body = await response.json().catch(() => undefined);
+    throw parseAuthError(response.status, body, response.statusText);
+  }
+}
+
 export async function signUp(email: string, password: string, name: string) {
-  const response = await fetch(`${publicBase}/auth/sign-up`, {
+  const gate = await fetch(`${publicBase}/auth/whitelist-check`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ email }),
+  });
+  if (!gate.ok) {
+    const body = await gate.json().catch(() => undefined);
+    throw parseAuthError(gate.status, body, gate.statusText);
+  }
+  const response = await fetch(`${API_BASE_URL}/api/_es/auth/sign-up/email`, {
     method: 'POST',
     credentials: 'include',
     headers: { 'content-type': 'application/json' },
@@ -123,6 +152,34 @@ function normalizeMission(row: MissionSummary & Record<string, unknown>): Missio
   };
 }
 
+type RawMissionChatMessage = {
+  id: string;
+  missionId: string;
+  body: string;
+  author?: { type?: string; id?: string };
+  authorType?: string;
+  authorName?: string;
+  authorInstanceId?: string;
+  replyToMessageId?: string | null;
+  createdAt: string;
+};
+
+function normalizeMissionChatMessage(row: RawMissionChatMessage): MissionChatMessage {
+  const authorType = row.author?.type ?? row.authorType ?? 'system';
+  const authorId = row.author?.id ?? row.authorName ?? 'system';
+  const isAgentInstance = authorType === 'agent_instance' || authorType === 'agent';
+  return {
+    id: row.id,
+    missionId: row.missionId,
+    body: row.body,
+    authorType: isAgentInstance ? 'agent' : authorType === 'user' ? 'user' : 'system',
+    authorName: row.authorName ?? authorId,
+    authorInstanceId: row.authorInstanceId ?? (isAgentInstance ? authorId : undefined),
+    replyToMessageId: row.replyToMessageId ?? undefined,
+    createdAt: row.createdAt,
+  };
+}
+
 export const api = {
   missions: async () => {
     const response = await request<{ items: Array<MissionSummary & Record<string, unknown>> }>('/missions');
@@ -130,6 +187,52 @@ export const api = {
   },
   mission: (missionId: string) => request<MissionSummary>(`/missions/${missionId}`),
   workroom: (missionId: string) => request<WorkroomReadModel>(`/missions/${missionId}/workroom`),
+  createMission: (input: CreateMissionInput) => request<{ missionId: string; ownerInstanceId?: string | null }>('/missions', {
+    method: 'POST',
+    body: JSON.stringify({
+      title: input.title,
+      objective: input.objective,
+      dailyBudgetCents: input.dailyBudgetCents,
+      owner: { type: 'user' },
+    }),
+  }),
+  createWorkCard: (missionId: string, input: CreateWorkCardInput) => request<{ workCardId: string; status?: string }>(`/missions/${missionId}/work-cards`, {
+    method: 'POST',
+    body: JSON.stringify(input),
+  }),
+  agents: () => request<{ items: AgentLibraryItem[] }>('/agents'),
+  createAgent: (input: CreateAgentInput) => request<{ agent?: AgentLibraryItem; agentId?: string }>('/agents', {
+    method: 'POST',
+    body: JSON.stringify(input),
+  }),
+  recruitAgentToMission: (missionId: string, agentId: string) => request<{ instanceId?: string; status?: string }>(`/missions/${missionId}/agent-instances`, {
+    method: 'POST',
+    body: JSON.stringify({ agentId }),
+  }),
+  startMissionSandbox: (missionId: string) => request<{ status?: string }>(`/missions/${missionId}/sandbox/start`, { method: 'POST', body: '{}' }),
+  pauseMissionSandbox: (missionId: string) => request<{ status?: string }>(`/missions/${missionId}/sandbox/pause`, { method: 'POST', body: '{}' }),
+  startAgentSandbox: (missionId: string, instanceId: string) => request<{ status?: string }>(`/missions/${missionId}/agent-instances/${instanceId}/sandbox/start`, { method: 'POST', body: '{}' }),
+  pauseAgentSandbox: (missionId: string, instanceId: string) => request<{ status?: string }>(`/missions/${missionId}/agent-instances/${instanceId}/sandbox/pause`, { method: 'POST', body: '{}' }),
+  missionChat: async (missionId: string) => {
+    const response = await request<{ items: RawMissionChatMessage[] }>(`/missions/${missionId}/chat`);
+    return { items: response.items.map(normalizeMissionChatMessage) };
+  },
+  sendMissionChat: async (missionId: string, body: string, replyToMessageId?: string) => {
+    const response = await request<{ message?: RawMissionChatMessage; agentReplies?: RawMissionChatMessage[] }>(`/missions/${missionId}/chat`, {
+      method: 'POST',
+      body: JSON.stringify({ body, replyToMessageId }),
+    });
+    return {
+      message: response.message ? normalizeMissionChatMessage(response.message) : undefined,
+      agentReplies: (response.agentReplies ?? []).map(normalizeMissionChatMessage),
+    };
+  },
+  directThread: (threadId: string) => request<DirectThreadReadModel>(`/direct-threads/${threadId}/messages`),
+  sendDirectThreadMessage: (threadId: string, body: string) => request<{ message?: DirectThreadReadModel['messages'][number]; agentReply?: DirectThreadReadModel['messages'][number] }>(`/direct-threads/${threadId}/messages`, {
+    method: 'POST',
+    body: JSON.stringify({ body, clientActionId: `web_${Date.now()}` }),
+  }),
+  rollbackAuditEvent: (auditEventId: string) => request<{ status?: string; rollbackAuditEventId?: string }>(`/audit-events/${auditEventId}/rollback`, { method: 'POST', body: '{}' }),
   createDemoMission: () => request<{ mission?: MissionSummary; missionId?: string }>('/missions/demo', { method: 'POST', body: '{}' }),
   budget: () => optional<BudgetSettings>('/settings/budget', {
     dailyBudgetCents: 0,
@@ -140,6 +243,11 @@ export const api = {
   adminOverview: () => request<AdminOverview>('/admin/overview'),
   adminUsers: () => request<{ items: AdminUser[] }>('/admin/users'),
   adminWhitelist: () => request<{ items: WhitelistEntry[] }>('/admin/whitelist'),
+  addWhitelistEntry: (type: WhitelistEntry['type'], value: string) => request<{ entry: WhitelistEntry; status?: string }>('/admin/whitelist', {
+    method: 'POST',
+    body: JSON.stringify({ type, value }),
+  }),
+  removeWhitelistEntry: (id: string) => request<{ status?: string }>(`/admin/whitelist/${id}`, { method: 'DELETE' }),
   adminMissions: () => request<{ items: MissionSpendBreakdown[] }>('/admin/missions'),
 };
 

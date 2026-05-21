@@ -1,11 +1,10 @@
-import { NavLink, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
+import { useNavigate } from 'react-router-dom';
 import { useAppStore } from '../../lib/store';
-import type { MissionAgentRow, MissionSandboxReadModel, MissionSummary } from '../../lib/types';
+import type { MissionAgentRow, MissionSandboxReadModel } from '../../lib/types';
+import { Shell } from './Shell';
 
 type Page =
-  | 'missions'
-  | 'workroom'
   | 'agents'
   | 'agent'
   | 'artifacts'
@@ -23,69 +22,20 @@ type SurfaceProps = {
 };
 
 const money = (cents = 0) => `$${(cents / 100).toFixed(2)}`;
-const percent = (mission: MissionSummary) => {
-  const total = mission.issues?.total ?? 0;
-  return total ? Math.round(((mission.issues?.completed ?? 0) / total) * 100) : 0;
-};
 
 export function MagicPathSurface(props: SurfaceProps) {
-  const { t, i18n } = useTranslation();
-  const session = useAppStore((state) => state.session);
-  const toggleLanguage = () => {
-    const next = i18n.language === 'zh' ? 'en' : 'zh';
-    localStorage.setItem('missionry.locale', next);
-    void i18n.changeLanguage(next);
-  };
-
+  const { t } = useTranslation();
   return (
-    <div className="mp-shell">
-      <aside className="mp-sidebar">
-        <div className="mp-brand">
-          <div className="mp-logo">M</div>
-          <div>
-            <div className="mp-brand-name">{t('app.name')}</div>
-            <div className="mp-muted mp-small">{t('app.workspace')}</div>
-          </div>
-        </div>
-        <nav className="mp-nav">
-          <NavItem to="/missions" label={t('nav.missions')} mark="●" />
-          <NavItem to="/agents" label={t('nav.agents')} mark="◐" />
-          <NavItem to="/artifacts" label={t('nav.artifacts')} mark="□" />
-          <NavItem to="/growth" label={t('nav.growth')} mark="↻" />
-          <NavItem to="/settings/budget" label={t('nav.budget')} mark="⚙" />
-          <NavItem to="/settings/environment" label={t('nav.environment')} mark="◇" />
-          {session?.role === 'admin' ? <NavItem to="/admin" label={t('nav.admin')} mark="◆" /> : null}
-        </nav>
-      </aside>
-      <main className="mp-main">
-        <header className="mp-topbar">
-          <strong>{t(`nav.${props.page === 'workroom' ? 'missions' : props.page === 'budget' ? 'settings' : props.page}`)}</strong>
-          <span className="mp-muted mp-mono">{session?.email ?? t('common.loading')}</span>
-          <button className="mp-button mp-lang" onClick={toggleLanguage}>{t('common.language')}</button>
-        </header>
-        <section className="mp-content">
-          {props.page === 'missions' ? <MissionsPage /> : null}
-          {props.page === 'workroom' ? <WorkroomPage missionId={props.missionId} /> : null}
-          {props.page === 'agents' ? <AgentsPage /> : null}
-          {props.page === 'agent' ? <AgentPage missionId={props.missionId} instanceId={props.instanceId} /> : null}
-          {props.page === 'artifacts' ? <ArtifactsPage /> : null}
-          {props.page === 'growth' ? <GrowthPage /> : null}
-          {props.page === 'budget' ? <BudgetPage /> : null}
-          {props.page === 'environment' ? <EnvironmentPage /> : null}
-          {props.page === 'chat' ? <ChatPage threadId={props.threadId} /> : null}
-          {props.page === 'admin' ? <AdminPage /> : null}
-        </section>
-      </main>
-    </div>
-  );
-}
-
-function NavItem({ to, label, mark }: { to: string; label: string; mark: string }) {
-  return (
-    <NavLink to={to} className={({ isActive }) => `mp-nav-item ${isActive ? 'active' : ''}`}>
-      <span>{mark}</span>
-      <span>{label}</span>
-    </NavLink>
+    <Shell title={t(`nav.${props.page === 'budget' || props.page === 'environment' ? 'settings' : props.page}`)}>
+      {props.page === 'agents' ? <AgentsPage /> : null}
+      {props.page === 'agent' ? <AgentPage missionId={props.missionId} instanceId={props.instanceId} /> : null}
+      {props.page === 'artifacts' ? <ArtifactsPage /> : null}
+      {props.page === 'growth' ? <GrowthPage /> : null}
+      {props.page === 'budget' ? <BudgetPage /> : null}
+      {props.page === 'environment' ? <EnvironmentPage /> : null}
+      {props.page === 'chat' ? <ChatPage threadId={props.threadId} /> : null}
+      {props.page === 'admin' ? <AdminPage /> : null}
+    </Shell>
   );
 }
 
@@ -98,89 +48,6 @@ function PageHead({ label, title, subtitle }: { label: string; title: string; su
         <p className="mp-muted">{subtitle}</p>
       </div>
     </div>
-  );
-}
-
-function MissionsPage() {
-  const { t } = useTranslation();
-  const navigate = useNavigate();
-  const missions = useAppStore((state) => state.missions);
-  return (
-    <>
-      <PageHead label="/api/public/missions" title={t('missions.title')} subtitle={t('missions.subtitle')} />
-      <div className="mp-card mp-list">
-        {missions.length ? missions.map((mission) => (
-          <button className="mp-mission-row" key={mission.id} onClick={() => navigate(`/missions/${mission.id}`)}>
-            <div>
-              <div className="mp-row-tight">
-                <span className="mp-chip">{t(`status.${mission.status}`, mission.status)}</span>
-                {mission.owner?.type === 'agent' ? <span className="mp-chip dark">{t('missions.pm')}: {mission.owner.displayName}</span> : null}
-                <span className="mp-muted mp-mono mp-small">{mission.id}</span>
-              </div>
-              <h2>{mission.title}</h2>
-              <p className="mp-muted">{mission.objective}</p>
-              <div className="mp-facts">
-                <span>{t('common.owner')}: {mission.owner?.displayName ?? '-'}</span>
-                <span>{t('common.artifacts')}: {mission.artifactCount ?? 0}</span>
-                <span>{t('common.pending')}: {mission.pendingCount ?? 0}</span>
-              </div>
-            </div>
-            <div className="mp-sidecell">
-              <span className="mp-chip">{mission.issues?.completed ?? 0}/{mission.issues?.total ?? 0} {t('common.issues')} · {percent(mission)}%</span>
-              <span>{t('common.budget')}: {money(mission.spentCents ?? mission.missionSpendCents)} / {money(mission.budgetCapCents ?? mission.dailyBudgetCents)}</span>
-              <span>{t('common.burn')}: {mission.sandboxSummary?.burnRateCentsPerMinute ?? 0}c/min</span>
-              <span>{t(`status.${mission.sandboxSummary?.state ?? 'none'}`)}</span>
-            </div>
-          </button>
-        )) : <Empty />}
-      </div>
-    </>
-  );
-}
-
-function WorkroomPage({ missionId }: { missionId?: string }) {
-  const { t } = useTranslation();
-  const events = useAppStore((state) => state.events);
-  const workroom = useAppStore((state) => (missionId ? state.workrooms[missionId] : undefined));
-  if (!workroom) return <Empty />;
-  const strip = workroom.metricStrip;
-  return (
-    <>
-      <PageHead label="/api/public/missions/:id/workroom" title={workroom.mission.title || t('workroom.title')} subtitle={workroom.mission.objective} />
-      <div className="mp-metrics">
-        <Stat label={t('workroom.metric.active')} value={String(strip.activeSandboxCount)} sub={`${strip.privateCap.activePrivateSandboxes}/${strip.privateCap.maxConcurrentPrivateSandboxes} ${t('workroom.metric.private')}`} />
-        <Stat label={t('workroom.metric.burn')} value={`${strip.burnRateCentsPerMinute.toFixed(1)}c/min`} sub="cost_event + sandbox_burn" />
-        <Stat label={t('workroom.metric.spend')} value={money(strip.missionSpendCents)} sub={`${money(strip.dailyBudgetCents)} ${t('workroom.metric.daily')}`} />
-        <Stat label={t('common.open')} value={String(workroom.openIssues)} sub={workroom.costGuardrailStatus?.state ?? '-'} />
-      </div>
-      <SandboxPanel sandbox={workroom.missionSandbox} />
-      <div className="mp-grid two">
-        <section className="mp-card">
-          <div className="mp-section-title"><strong>{t('workroom.cards')}</strong><span className="mp-muted mp-mono">/work-cards</span></div>
-          {workroom.workCards.map((card) => (
-            <div className="mp-row" key={card.id}>
-              <div>
-                <strong>{card.title}</strong>
-                <p className="mp-muted">{card.description}</p>
-              </div>
-              <span className="mp-chip">{t(`status.${card.status}`, card.status)}</span>
-              <span>{card.sandboxAffinity?.tier ?? 'tier0'}</span>
-              <span>{money(card.cost?.spentCents)}</span>
-            </div>
-          ))}
-        </section>
-        <section className="mp-card">
-          <div className="mp-section-title"><strong>{t('workroom.events')}</strong><span className="mp-muted mp-mono">SSE</span></div>
-          {events.slice(0, 8).map((event, index) => (
-            <div className="mp-event" key={`${event.auditEventId ?? event.type}-${index}`}>
-              <span className="mp-chip">{event.type}</span>
-              <span>{event.payload?.sandboxId ?? event.missionId ?? '-'}</span>
-              <span className="mp-muted mp-mono">{event.auditEventId ?? '-'}</span>
-            </div>
-          ))}
-        </section>
-      </div>
-    </>
   );
 }
 
@@ -223,7 +90,7 @@ function AgentsPage() {
     <>
       <PageHead label="/api/public/missions/:id/agents" title={t('agents.title')} subtitle={t('agents.subtitle')} />
       <div className="mp-grid three">{Array.from(agents.values()).map((row) => <AgentCard row={row} key={row.instance.id} />)}</div>
-      {!agents.size ? <Empty /> : null}
+      {!agents.size ? <EmptyNote title={t('agents.empty.title')} body={t('agents.empty.body')} /> : null}
     </>
   );
 }
@@ -235,7 +102,7 @@ function AgentPage({ missionId, instanceId }: { missionId?: string; instanceId?:
   return (
     <>
       <PageHead label="/api/public/missions/:id/agent-instances/:instanceId" title={t('agent.title')} subtitle={row?.agent.displayName ?? t('agent.noInstance')} />
-      {row ? <div className="mp-grid two"><AgentCard row={row} /><SandboxPanel sandbox={{ state: 'none', ...row.instance.sandboxSummary }} /></div> : <Empty />}
+      {row ? <div className="mp-grid two"><AgentCard row={row} /><SandboxPanel sandbox={{ state: 'none', ...row.instance.sandboxSummary }} /></div> : <EmptyNote title={t('agent.empty.title')} body={t('agent.empty.body')} />}
     </>
   );
 }
@@ -255,7 +122,9 @@ function AgentCard({ row }: { row: MissionAgentRow }) {
 
 function ArtifactsPage() {
   const { t } = useTranslation();
-  return <><PageHead label="/api/public/missions/:id/workroom" title={t('artifacts.title')} subtitle={t('artifacts.subtitle')} /><Empty /></>;
+  const navigate = useNavigate();
+  const firstMissionId = useAppStore((state) => state.missions[0]?.id);
+  return <><PageHead label="/api/public/missions/:id/workroom" title={t('artifacts.title')} subtitle={t('artifacts.subtitle')} /><EmptyNote title={t('artifacts.empty.title')} body={t('artifacts.empty.body')} action={t('artifacts.empty.action')} onAction={() => navigate(firstMissionId ? `/missions/${firstMissionId}` : '/missions')} /></>;
 }
 
 function GrowthPage() {
@@ -265,9 +134,9 @@ function GrowthPage() {
     <>
       <PageHead label="/api/public/growth-center/*" title={t('growth.title')} subtitle={t('growth.subtitle')} />
       <div className="mp-grid three">
-        <section className="mp-card"><h2>{t('growth.feed')}</h2>{events.map((event, index) => <div className="mp-event" key={index}>{event.type}</div>)}</section>
-        <section className="mp-card"><h2>{t('growth.candidates')}</h2><Empty /></section>
-        <section className="mp-card"><h2>{t('growth.rollbacks')}</h2><Empty /></section>
+        <section className="mp-card"><h2>{t('growth.feed')}</h2>{events.length ? events.map((event, index) => <div className="mp-event" key={index}>{event.type}</div>) : <p className="mp-muted">{t('growth.empty.feed')}</p>}</section>
+        <section className="mp-card"><h2>{t('growth.candidates')}</h2><p className="mp-muted">{t('growth.empty.candidates')}</p></section>
+        <section className="mp-card"><h2>{t('growth.rollbacks')}</h2><p className="mp-muted">{t('growth.empty.rollbacks')}</p></section>
       </div>
     </>
   );
@@ -289,7 +158,7 @@ function BudgetPage() {
       <section className="mp-card">
         <div className="mp-section-title"><strong>{t('budget.breakdown')}</strong><span className="mp-muted mp-mono">/settings/budget/missions</span></div>
         {spend.map((row) => <div className="mp-row" key={row.missionId}><strong>{row.title}</strong><span>{row.owner?.displayName ?? row.ownerEmail ?? '-'}</span><span>{money(row.spentCents ?? row.spendCents)}</span><span>{row.burnRateCentsPerMinute ?? 0}c/min</span></div>)}
-        {!spend.length ? <Empty /> : null}
+        {!spend.length ? <EmptyNote title={t('budget.empty.title')} body={t('budget.empty.body')} /> : null}
       </section>
     </>
   );
@@ -297,12 +166,13 @@ function BudgetPage() {
 
 function EnvironmentPage() {
   const { t } = useTranslation();
+  const navigate = useNavigate();
   const workroom = useAppStore((state) => Object.values(state.workrooms)[0]);
   const sandbox = workroom?.missionSandbox;
   return (
     <>
       <PageHead label="/api/public/missions/:id/environment" title={t('environment.title')} subtitle={t('environment.subtitle')} />
-      {sandbox ? <SandboxPanel sandbox={sandbox} /> : <Empty />}
+      {sandbox ? <SandboxPanel sandbox={sandbox} /> : <EmptyNote title={t('environment.empty.title')} body={t('environment.empty.body')} action={t('environment.empty.action')} onAction={() => navigate('/missions')} />}
     </>
   );
 }
@@ -334,10 +204,10 @@ function AdminPage() {
         <Stat label={t('admin.users')} value={String(overview?.activeUserCount ?? 0)} />
       </div>
       <div className="mp-grid two">
-        <section className="mp-card"><h2>{t('admin.users')}</h2>{users.map((user) => <div className="mp-row" key={user.userId}><span>{user.email}</span><span>{user.role}</span><span>{money(user.todaySpendCents ?? user.dailySpendCents)}</span><span>{money(user.dailyBudgetCents)}</span></div>)}</section>
-        <section className="mp-card"><h2>{t('admin.whitelist')}</h2>{whitelist.map((entry) => <div className="mp-row" key={entry.id}><span>{entry.type}</span><span>{entry.value}</span><span>{String(Boolean(entry.enabled))}</span></div>)}</section>
+        <section className="mp-card"><h2>{t('admin.users')}</h2>{users.length ? users.map((user) => <div className="mp-row" key={user.userId}><span>{user.email}</span><span>{user.role}</span><span>{money(user.todaySpendCents ?? user.dailySpendCents)}</span><span>{money(user.dailyBudgetCents)}</span></div>) : <p className="mp-muted">{t('admin.empty.users')}</p>}</section>
+        <section className="mp-card"><h2>{t('admin.whitelist')}</h2>{whitelist.length ? whitelist.map((entry) => <div className="mp-row" key={entry.id}><span>{entry.type}</span><span>{entry.value}</span><span>{String(Boolean(entry.enabled))}</span></div>) : <p className="mp-muted">{t('admin.empty.whitelist')}</p>}</section>
       </div>
-      <section className="mp-card"><h2>{t('admin.allMissions')}</h2>{missions.map((mission, index) => <div className="mp-row" key={mission.missionId ?? mission.title ?? index}><span>{mission.ownerEmail ?? '-'}</span><span>{mission.title}</span><span>{mission.status ?? '-'}</span><span>{money(mission.spendCents ?? mission.spentCents)}</span></div>)}</section>
+      <section className="mp-card"><h2>{t('admin.allMissions')}</h2>{missions.length ? missions.map((mission, index) => <div className="mp-row" key={mission.missionId ?? mission.title ?? index}><span>{mission.ownerEmail ?? '-'}</span><span>{mission.title}</span><span>{mission.status ?? '-'}</span><span>{money(mission.spendCents ?? mission.spentCents)}</span></div>) : <p className="mp-muted">{t('admin.empty.missions')}</p>}</section>
     </>
   );
 }
@@ -350,7 +220,6 @@ function Info({ label, value }: { label: string; value: string }) {
   return <div><div className="mp-label">{label}</div><div className="mp-mono mp-wrap">{value}</div></div>;
 }
 
-function Empty() {
-  const { t } = useTranslation();
-  return <div className="mp-empty">{t('common.empty')}</div>;
+function EmptyNote({ title, body, action, onAction }: { title: string; body: string; action?: string; onAction?: () => void }) {
+  return <div className="mp-empty mp-empty-cta"><h2>{title}</h2><p>{body}</p>{action && onAction ? <button className="mp-button dark" onClick={onAction}>{action}</button> : null}</div>;
 }

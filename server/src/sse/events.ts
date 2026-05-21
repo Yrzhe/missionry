@@ -80,11 +80,13 @@ export async function recentMissionEvents(missionId: string): Promise<MissionSse
     type:
       row.action === "message_sent"
         ? "direct_thread_message_sent"
-        : row.action === "work_card_completed"
-          ? "work_card_completed"
-          : row.action === "direct_thread_created"
-            ? "direct_thread_ready"
-            : row.action,
+        : row.action === "mission_chat_message_sent"
+          ? "mission_chat_message_sent"
+          : row.action === "work_card_completed"
+            ? "work_card_completed"
+            : row.action === "direct_thread_created"
+              ? "direct_thread_ready"
+              : row.action,
     missionId,
     auditEventId: row.eventId,
     occurredAt: row.createdAt,

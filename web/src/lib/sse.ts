@@ -11,7 +11,7 @@ export function subscribeMissionEvents(missionId: string) {
       useAppStore.getState().applyEvent({ type: raw.type, missionId });
     }
   };
-  ['message', 'cost_event', 'sandbox_burn', 'work_card_allocated', 'work_card_updated', 'mission_spend_updated'].forEach((name) => {
+  ['message', 'cost_event', 'sandbox_burn', 'work_card_allocated', 'work_card_updated', 'mission_spend_updated', 'mission_chat_message_sent'].forEach((name) => {
     source.addEventListener(name, apply as EventListener);
   });
   return () => source.close();

@@ -72,6 +72,7 @@ export async function createDemoWorkCard(
     description: null,
     pmInstanceId: assigneeInstanceId,
     assigneeInstanceId,
+    reviewerInstanceId: null,
     status: "pending",
     priority: "high",
     sandboxAffinityJson: JSON.stringify({ tier, reason: "Phase 1 demo" }),
