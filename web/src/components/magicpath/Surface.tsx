@@ -61,7 +61,7 @@ function SandboxPanel({ sandbox }: { sandbox: MissionSandboxReadModel }) {
         <span className={`mp-chip ${state === 'running' ? 'dark' : ''}`}>{t(`status.${state}`)}</span>
       </div>
       <div className="mp-sandbox-grid">
-        <Info label={t('workroom.lazySlot')} value={sandbox.sandboxId ?? 'mission:<missionId>'} />
+        <Info label={t('workroom.lazySlot')} value={t(`status.${state}`)} />
         <Info label={t('workroom.repoPath')} value={sandbox.repoPath ?? '-'} />
         <Info label={t('workroom.r2Snapshot')} value={sandbox.r2SnapshotKey ?? '-'} />
         <Info label={t('workroom.envVersion')} value={sandbox.environmentVersionId ?? '-'} />
@@ -73,7 +73,7 @@ function SandboxPanel({ sandbox }: { sandbox: MissionSandboxReadModel }) {
           <div className="mp-event" key={process.id}>
             <span className="mp-chip">{process.status}</span>
             <span>{process.command}</span>
-            <span className="mp-muted mp-mono">{process.terminalSessionId ?? process.streamId ?? '-'}</span>
+            <span className="mp-muted">{t('workroom.processes')}</span>
           </div>
         )) : <span className="mp-muted">{t('status.none')}</span>}
       </div>
@@ -89,7 +89,7 @@ function AgentsPage() {
   workrooms.forEach((workroom) => workroom.agentInstances.forEach((row) => agents.set(row.agent.id, row)));
   return (
     <>
-      <PageHead label="/api/public/missions/:id/agents" title={t('agents.title')} subtitle={t('agents.subtitle')} />
+      <PageHead label={t('agents.endpoint')} title={t('agents.title')} subtitle={t('agents.subtitle')} />
       <div className="mp-grid three">{Array.from(agents.values()).map((row) => <AgentCard row={row} key={row.instance.id} />)}</div>
       {!agents.size ? <EmptyNote title={t('agents.empty.title')} body={t('agents.empty.body')} /> : null}
     </>
@@ -102,7 +102,7 @@ function AgentPage({ missionId, instanceId }: { missionId?: string; instanceId?:
   const row = workroom?.agentInstances.find((item) => item.instance.id === instanceId);
   return (
     <>
-      <PageHead label="/api/public/missions/:id/agent-instances/:instanceId" title={t('agent.title')} subtitle={row?.agent.displayName ?? t('agent.noInstance')} />
+      <PageHead label={t('agent.instance')} title={t('agent.title')} subtitle={row?.agent.displayName ?? t('agent.noInstance')} />
       {row ? <div className="mp-grid two"><AgentCard row={row} /><SandboxPanel sandbox={{ state: 'none', ...row.instance.sandboxSummary }} /></div> : <EmptyNote title={t('agent.empty.title')} body={t('agent.empty.body')} />}
     </>
   );
@@ -113,8 +113,8 @@ function AgentCard({ row }: { row: MissionAgentRow }) {
   return (
     <section className="mp-card">
       <div className="mp-section-title"><strong>{row.agent.displayName}</strong><span className="mp-chip">{row.role}</span></div>
-      <Info label={t('agent.global')} value={row.agent.globalIdentity?.role ?? row.agent.id} />
-      <Info label={t('agent.instance')} value={row.instance.displayAlias ?? row.instance.id} />
+      <Info label={t('agent.global')} value={row.agent.globalIdentity?.role ?? '-'} />
+      <Info label={t('agent.instance')} value={row.instance.displayAlias ?? row.agent.displayName} />
       <Info label={t('common.status')} value={row.instance.workState?.status ?? '-'} />
       <Info label={t('agent.sandbox')} value={row.instance.sandboxSummary?.state ?? 'none'} />
     </section>
@@ -125,7 +125,7 @@ function ArtifactsPage() {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const firstMissionId = useAppStore((state) => state.missions[0]?.id);
-  return <><PageHead label="/api/public/missions/:id/workroom" title={t('artifacts.title')} subtitle={t('artifacts.subtitle')} /><EmptyNote title={t('artifacts.empty.title')} body={t('artifacts.empty.body')} action={t('artifacts.empty.action')} onAction={() => navigate(firstMissionId ? `/missions/${firstMissionId}` : '/missions')} /></>;
+  return <><PageHead label={t('artifacts.title')} title={t('artifacts.title')} subtitle={t('artifacts.subtitle')} /><EmptyNote title={t('artifacts.empty.title')} body={t('artifacts.empty.body')} action={t('artifacts.empty.action')} onAction={() => navigate(firstMissionId ? `/missions/${firstMissionId}` : '/missions')} /></>;
 }
 
 function GrowthPage() {
@@ -133,7 +133,7 @@ function GrowthPage() {
   const events = useAppStore((state) => state.events);
   return (
     <>
-      <PageHead label="/api/public/growth-center/*" title={t('growth.title')} subtitle={t('growth.subtitle')} />
+      <PageHead label={t('growth.feed')} title={t('growth.title')} subtitle={t('growth.subtitle')} />
       <div className="mp-grid three">
         <section className="mp-card"><h2>{t('growth.feed')}</h2>{events.length ? events.map((event, index) => <div className="mp-event" key={index}>{event.type}</div>) : <p className="mp-muted">{t('growth.empty.feed')}</p>}</section>
         <section className="mp-card"><h2>{t('growth.candidates')}</h2><p className="mp-muted">{t('growth.empty.candidates')}</p></section>
@@ -149,7 +149,7 @@ function BudgetPage() {
   const spend = useAppStore((state) => state.spend);
   return (
     <>
-      <PageHead label="/api/public/settings/budget" title={t('budget.title')} subtitle={t('budget.subtitle')} />
+      <PageHead label={t('budget.breakdown')} title={t('budget.title')} subtitle={t('budget.subtitle')} />
       <div className="mp-metrics">
         <Stat label={t('budget.daily')} value={money(budget?.dailyBudgetCents)} />
         <Stat label={t('budget.global')} value={money(budget?.globalCapCents)} />
@@ -157,7 +157,7 @@ function BudgetPage() {
         <Stat label={t('workroom.metric.burn')} value={`${budget?.burnRateCentsPerMinute ?? 0}c/min`} />
       </div>
       <section className="mp-card">
-        <div className="mp-section-title"><strong>{t('budget.breakdown')}</strong><span className="mp-muted mp-mono">/settings/budget/missions</span></div>
+        <div className="mp-section-title"><strong>{t('budget.breakdown')}</strong><span className="mp-muted">{t('common.updated')}</span></div>
         {spend.map((row) => <div className="mp-row" key={row.missionId}><strong>{row.title}</strong><span>{row.owner?.displayName ?? row.ownerEmail ?? '-'}</span><span>{money(row.spentCents ?? row.spendCents)}</span><span>{row.burnRateCentsPerMinute ?? 0}c/min</span></div>)}
         {!spend.length ? <EmptyNote title={t('budget.empty.title')} body={t('budget.empty.body')} /> : null}
       </section>
@@ -173,7 +173,7 @@ function EnvironmentPage() {
   const sandbox = workroom?.missionSandbox;
   return (
     <>
-      <PageHead label="/api/public/missions/:id/environment" title={t('environment.title')} subtitle={t('environment.subtitle')} />
+      <PageHead label={t('workroom.environment.title')} title={t('environment.title')} subtitle={t('environment.subtitle')} />
       {sandbox ? <SandboxPanel sandbox={sandbox} /> : <EmptyNote title={t('environment.empty.title')} body={t('environment.empty.body')} action={t('environment.empty.action')} onAction={() => navigate('/missions')} />}
     </>
   );
@@ -183,8 +183,8 @@ function ChatPage({ threadId }: { threadId?: string }) {
   const { t } = useTranslation();
   return (
     <>
-      <PageHead label="/api/public/direct-threads/:threadId/messages" title={t('chat.title')} subtitle={t('chat.subtitle')} />
-      <section className="mp-card mp-chat"><div className="mp-muted mp-mono">{threadId}</div><textarea placeholder={t('chat.placeholder')} /><button className="mp-button dark">{t('common.send')}</button></section>
+      <PageHead label={t('chat.messages')} title={t('chat.title')} subtitle={t('chat.subtitle')} />
+      <section className="mp-card mp-chat"><div className="mp-muted">{threadId ? t('chat.context') : t('common.loading')}</div><textarea placeholder={t('chat.placeholder')} /><button className="mp-button dark">{t('common.send')}</button></section>
     </>
   );
 }
@@ -199,7 +199,7 @@ function AdminPage() {
   if (session?.role !== 'admin') return <div className="mp-denied">{t('admin.denied')}</div>;
   return (
     <>
-      <PageHead label="/api/public/admin/*" title={t('admin.title')} subtitle={t('admin.subtitle')} />
+      <PageHead label={t('admin.overview')} title={t('admin.title')} subtitle={t('admin.subtitle')} />
       <div className="mp-metrics">
         <Stat label={t('common.spend')} value={money(overview?.totalSpendCents)} />
         <Stat label={t('nav.missions')} value={String(overview?.missionCount ?? 0)} />

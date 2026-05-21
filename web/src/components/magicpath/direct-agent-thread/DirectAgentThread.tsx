@@ -6,6 +6,7 @@ import { useAppStore } from '../../../lib/store';
 import type { DirectThreadMessage, DirectThreadReadModel } from '../../../lib/types';
 import type { FormEvent } from 'react';
 import { Shell } from '../Shell';
+import { Markdown } from '../Markdown';
 
 const money = (cents = 0) => `$${(cents / 100).toFixed(2)}`;
 
@@ -61,7 +62,7 @@ export function DirectAgentThread() {
   }
 
   return (
-    <Shell title={t('chat.title')} meta={<span className="mp-muted mp-mono">GET/POST /api/public/direct-threads/:threadId/messages</span>}>
+    <Shell title={t('chat.title')} meta={<span className="mp-muted">{t('chat.meta')}</span>}>
       <div className="mp-head">
         <div className="mp-avatar lg">{initials(agentRow?.agent.displayName ?? threadId)}</div>
         <div>
@@ -75,7 +76,7 @@ export function DirectAgentThread() {
         <section className="mp-card mp-direct-chat">
           <div className="mp-section-title">
             <strong>{t('chat.messages')}</strong>
-            <span className="mp-chip">SSE direct_thread_message_sent</span>
+            <span className="mp-chip">{t('chat.live')}</span>
           </div>
           <div className="mp-chat-scroll">
             {thread?.messages.length ? thread.messages.map((message) => <DirectMessage key={message.id} message={message} agentName={agentRow?.agent.displayName} />) : <div className="mp-empty mp-empty-cta"><h2>{t('chat.empty.title')}</h2><p>{t('chat.empty.body')}</p></div>}
@@ -89,10 +90,9 @@ export function DirectAgentThread() {
 
         <aside className="mp-card mp-direct-side">
           <div className="mp-label">{t('chat.context')}</div>
-          <h2>{thread?.threadId ?? threadId}</h2>
-          <Info label="missionId" value={thread?.missionId ?? '-'} />
-          <Info label="agentInstanceId" value={thread?.agentInstanceId ?? '-'} />
-          <Info label={t('agent.instance')} value={agentRow?.instance.displayAlias ?? agentRow?.instance.id ?? '-'} />
+          <h2>{agentRow?.agent.displayName ?? t('chat.title')}</h2>
+          <Info label={t('nav.missions')} value={workroom?.mission.title ?? '-'} />
+          <Info label={t('agent.instance')} value={agentRow?.instance.displayAlias ?? agentRow?.agent.displayName ?? '-'} />
           <Info label={t('agent.sandbox')} value={agentRow?.instance.sandboxSummary?.state ?? 'none'} />
           <Info label={t('common.burn')} value={`${agentRow?.instance.sandboxSummary?.burnRateCentsPerMinute ?? 0}${t('common.centsPerMinute')}`} />
           <Info label={t('common.spend')} value={money(0)} />
@@ -101,7 +101,7 @@ export function DirectAgentThread() {
               <div key={`${event.type}-${event.auditEventId ?? event.occurredAt}`}>
                 <span className="mp-chip">{event.type}</span>
                 <span>{event.payload?.diffSummary ?? '-'}</span>
-                <span className="mp-muted mp-mono">{event.auditEventId ?? '-'}</span>
+                <span className="mp-muted">{event.occurredAt ?? '-'}</span>
               </div>
             ))}
           </div>
@@ -117,11 +117,11 @@ function DirectMessage({ message, agentName }: { message: DirectThreadMessage; a
   return (
     <div className={`mp-chat-bubble ${isUser ? 'user' : ''}`}>
       <div className="mp-chat-author">
-        <span>{isUser ? t('chat.you') : agentName ?? message.sender.id}</span>
+        <span>{isUser ? t('chat.you') : agentName ?? t('workroom.chat.unknown')}</span>
         <span className="mp-muted mp-mono">{message.createdAt}</span>
       </div>
-      <div>{message.body}</div>
-      {message.auditEventId ? <div className="mp-muted mp-mono mp-small">{t('chat.audit')}: {message.auditEventId}</div> : null}
+      <Markdown value={message.body} />
+      {message.auditEventId ? <div className="mp-muted mp-small">{t('chat.audit')}</div> : null}
     </div>
   );
 }

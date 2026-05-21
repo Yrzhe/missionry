@@ -93,7 +93,7 @@ export function MissionsHome() {
   return (
     <Shell
       title={t('missions.title')}
-      meta={<span className="mp-muted mp-mono">/api/public/missions</span>}
+      meta={<span className="mp-muted">{t('missions.endpoint')}</span>}
       actions={<button className="mp-button dark" onClick={() => setModalOpen(true)}>{t('missions.new')}</button>}
     >
       <div className="mp-head">
@@ -177,7 +177,6 @@ function MissionRow({ mission, agents, onOpen }: { mission: MissionSummary; agen
         <div className="mp-row-tight">
           <span className="mp-chip"><span className={`mp-status-dot ${mission.status}`} />{t(`status.${mission.status}`, mission.status)}</span>
           {mission.owner?.type === 'agent' ? <span className="mp-chip dark">{t('missions.pm')}: {ownerName}</span> : null}
-          <span className="mp-muted mp-mono mp-small">{mission.id}</span>
           <span className="mp-muted mp-small">{t('common.updated')}: {mission.updatedAt ?? mission.updated ?? '-'}</span>
         </div>
         <h2>{mission.title}</h2>

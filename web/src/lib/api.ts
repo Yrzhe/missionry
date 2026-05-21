@@ -8,6 +8,9 @@ import type {
   CreateWorkCardInput,
   DirectThreadReadModel,
   MissionChatMessage,
+  MissionEvent,
+  MissionFileContent,
+  MissionFileEntry,
   MissionSpendBreakdown,
   MissionSummary,
   Session,
@@ -68,6 +71,18 @@ async function optional<T>(path: string, empty: T): Promise<T> {
     if (error instanceof ApiError && error.status === 404) return empty;
     throw error;
   }
+}
+
+async function requestAny<T>(paths: string[], empty: T): Promise<T> {
+  for (const path of paths) {
+    try {
+      return await request<T>(path);
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 404) continue;
+      throw error;
+    }
+  }
+  return empty;
 }
 
 export async function login(email: string, password: string) {
@@ -213,6 +228,17 @@ export const api = {
   pauseMissionSandbox: (missionId: string) => request<{ status?: string }>(`/missions/${missionId}/sandbox/pause`, { method: 'POST', body: '{}' }),
   startAgentSandbox: (missionId: string, instanceId: string) => request<{ status?: string }>(`/missions/${missionId}/agent-instances/${instanceId}/sandbox/start`, { method: 'POST', body: '{}' }),
   pauseAgentSandbox: (missionId: string, instanceId: string) => request<{ status?: string }>(`/missions/${missionId}/agent-instances/${instanceId}/sandbox/pause`, { method: 'POST', body: '{}' }),
+  missionEvents: (missionId: string) => optional<{ items: MissionEvent[] }>(`/missions/${missionId}/events.json`, { items: [] }),
+  missionFiles: (missionId: string, path = '') => requestAny<{ items: MissionFileEntry[] }>([
+    `/missions/${missionId}/files?path=${encodeURIComponent(path)}`,
+    `/missions/${missionId}/sandbox/files?path=${encodeURIComponent(path)}`,
+    `/missions/${missionId}/artifacts/files?path=${encodeURIComponent(path)}`,
+  ], { items: [] }),
+  missionFileContent: (missionId: string, path: string) => requestAny<MissionFileContent>([
+    `/missions/${missionId}/files/content?path=${encodeURIComponent(path)}`,
+    `/missions/${missionId}/sandbox/files/content?path=${encodeURIComponent(path)}`,
+    `/missions/${missionId}/artifacts/files/content?path=${encodeURIComponent(path)}`,
+  ], { path, content: '' }),
   missionChat: async (missionId: string) => {
     const response = await request<{ items: RawMissionChatMessage[] }>(`/missions/${missionId}/chat`);
     return { items: response.items.map(normalizeMissionChatMessage) };

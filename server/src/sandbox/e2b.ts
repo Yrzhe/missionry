@@ -43,10 +43,15 @@ async function e2bApiKey() {
   return Promise.resolve(secret.get("E2B_API_KEY")).catch(() => undefined);
 }
 
-async function useMemoryMode() {
+export async function useMemoryMode() {
   const mode = vars.get("DEMO_E2B_MODE");
   const apiKey = await e2bApiKey();
   return mode === "memory" || !apiKey;
+}
+
+function isE2bNotFound(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.includes("error.e2b.request_failed:404") || /not[-_\s]?found|expired/i.test(message);
 }
 
 async function ensureMemorySandbox(id: string): Promise<MemorySandbox> {
@@ -80,6 +85,26 @@ async function e2bFetch(path: string, init: RequestInit = {}) {
     throw new Error(`error.e2b.request_failed:${response.status}:${message}`);
   }
   return body;
+}
+
+export async function reconcileLiveRef(ref: SandboxRef): Promise<SandboxRef> {
+  await assertRefAccess(ref);
+  if (await useMemoryMode()) return ref;
+  if (ref.state !== "running") return ref;
+  if (!ref.e2bSandboxId) {
+    const next = { ...ref, state: "none" as const, burnRateCentsPerMinute: 0 };
+    await persistRef(missionIdFor(ref), next);
+    return next;
+  }
+  try {
+    await e2bFetch(`/sandboxes/${encodeURIComponent(ref.e2bSandboxId)}`, { method: "GET" });
+    return ref;
+  } catch (error) {
+    if (!isE2bNotFound(error)) throw error;
+    const paused = { ...ref, state: "paused" as const, burnRateCentsPerMinute: 0 };
+    await persistRef(missionIdFor(ref), paused);
+    return paused;
+  }
 }
 
 async function loadPersistedE2bSandboxId(refSandboxId: string) {
@@ -258,11 +283,82 @@ export async function pauseIfIdle(ref: SandboxRef) {
     const sandbox = await ensureMemorySandbox(ref.sandboxId);
     sandbox.state = "paused";
   } else if (ref.e2bSandboxId) {
-    await e2bFetch(`/sandboxes/${encodeURIComponent(ref.e2bSandboxId)}/pause`, { method: "POST" });
+    try {
+      await e2bFetch(`/sandboxes/${encodeURIComponent(ref.e2bSandboxId)}/pause`, { method: "POST" });
+    } catch (error) {
+      if (!isE2bNotFound(error)) throw error;
+    }
   }
   const paused = { ...ref, state: "paused" as const, burnRateCentsPerMinute: 0 };
   await persistRef(missionIdFor(ref), paused);
   return paused;
+}
+
+export type SandboxFileEntry = { name: string; type: "dir" | "file"; size?: number };
+
+function normalizeSandboxPath(path: string) {
+  const withSlash = path.startsWith("/") ? path : `/${path}`;
+  return withSlash.replace(/\/+/g, "/").replace(/\/$/, "") || "/";
+}
+
+function memoryChildEntries(files: Map<string, string>, dirPath: string): SandboxFileEntry[] {
+  const normalizedDir = normalizeSandboxPath(dirPath);
+  const prefix = normalizedDir === "/" ? "/" : `${normalizedDir}/`;
+  const entries = new Map<string, SandboxFileEntry>();
+  for (const [rawPath, content] of files.entries()) {
+    const filePath = normalizeSandboxPath(rawPath);
+    if (!filePath.startsWith(prefix)) continue;
+    const rest = filePath.slice(prefix.length);
+    if (!rest) continue;
+    const [name, ...remaining] = rest.split("/");
+    if (!name) continue;
+    if (remaining.length > 0) entries.set(name, { name, type: "dir" });
+    else entries.set(name, { name, type: "file", size: new TextEncoder().encode(content).length });
+  }
+  return Array.from(entries.values()).sort((a, b) => a.type.localeCompare(b.type) || a.name.localeCompare(b.name));
+}
+
+export async function listFiles(ref: SandboxRef, path: string): Promise<{ state: SandboxRef["state"]; entries: SandboxFileEntry[] }> {
+  await assertRefAccess(ref);
+  if (ref.state !== "running") return { state: ref.state, entries: [] };
+  if (await useMemoryMode()) {
+    const sandbox = memorySandboxes.get(ref.sandboxId);
+    if (!sandbox || sandbox.state !== "running") return { state: "none", entries: [] };
+    return { state: "running", entries: memoryChildEntries(sandbox.files, path) };
+  }
+  if (!ref.e2bSandboxId) return { state: "none", entries: [] };
+  const response = await e2bFetch(`/sandboxes/${encodeURIComponent(ref.e2bSandboxId)}/files/list?path=${encodeURIComponent(path)}`, { method: "GET" }) as unknown;
+  const rawEntries = Array.isArray(response)
+    ? response
+    : Array.isArray((response as { entries?: unknown[] })?.entries)
+      ? (response as { entries: unknown[] }).entries
+      : Array.isArray((response as { files?: unknown[] })?.files)
+        ? (response as { files: unknown[] }).files
+        : [];
+  const entries = rawEntries.map((entry) => {
+    const row = entry as Record<string, unknown>;
+    const name = String(row.name ?? row.path ?? "");
+    const type = row.type === "dir" || row.isDir === true || row.isDirectory === true ? "dir" as const : "file" as const;
+    const size = row.size === undefined ? undefined : Number(row.size);
+    return { name: name.split("/").filter(Boolean).at(-1) ?? name, type, ...(Number.isFinite(size) ? { size } : {}) };
+  }).filter((entry) => entry.name);
+  return { state: "running", entries };
+}
+
+export async function readWorkspaceFile(ref: SandboxRef, path: string, maxBytes = 256 * 1024): Promise<{ state: SandboxRef["state"]; content: string }> {
+  await assertRefAccess(ref);
+  if (ref.state !== "running") return { state: ref.state, content: "" };
+  if (await useMemoryMode()) {
+    const sandbox = memorySandboxes.get(ref.sandboxId);
+    if (!sandbox || sandbox.state !== "running") return { state: "none", content: "" };
+    const content = sandbox.files.get(path) ?? sandbox.files.get(path.replace(/^\//, ""));
+    if (content === undefined) throw new Error("error.file.not_found");
+    return { state: "running", content: content.slice(0, maxBytes) };
+  }
+  if (!ref.e2bSandboxId) return { state: "none", content: "" };
+  const response = await e2bFetch(`/sandboxes/${encodeURIComponent(ref.e2bSandboxId)}/files/read?path=${encodeURIComponent(path)}`, { method: "GET" });
+  const content = typeof response === "string" ? response : String((response as { content?: unknown })?.content ?? "");
+  return { state: "running", content: content.slice(0, maxBytes) };
 }
 
 export async function kill(ref: SandboxRef) {

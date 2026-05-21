@@ -39,7 +39,7 @@ export function GrowthCenter() {
   }
 
   return (
-    <Shell title={t('growth.title')} meta={<span className="mp-muted mp-mono">{endpointForTab(tab)}</span>}>
+    <Shell title={t('growth.title')} meta={<span className="mp-muted">{t(`growth.tab.${tab}`)}</span>}>
       <div className="mp-head">
         <div>
           <div className="mp-label">{t('growth.costNote')}</div>
@@ -73,8 +73,8 @@ export function GrowthCenter() {
             <div className="mp-growth-feed">
               {visibleFeed.length ? visibleFeed.map((event) => (
                 <div className="mp-growth-row" key={event.auditEventId ?? `${event.type}-${event.occurredAt}`}>
-                  <span className="mp-muted mp-mono">{event.auditEventId ?? '-'}</span>
-                  <strong>{event.payload?.actor?.id ?? event.payload?.agentId ?? '-'}</strong>
+                  <span className="mp-muted">{eventStatus(event) === 'reviewed' ? t('growth.stat.reviewed') : t('growth.stat.unreviewed')}</span>
+                  <strong>{event.payload?.actor?.type ?? event.payload?.subjectType ?? t('growth.feed')}</strong>
                   <span>{missionTitle(event, missions)}</span>
                   <span className="mp-chip">{event.type}</span>
                   <div>
@@ -108,12 +108,6 @@ export function GrowthCenter() {
   );
 }
 
-function endpointForTab(tab: GrowthTab) {
-  if (tab === 'candidates') return 'GET /api/public/growth-center/candidates';
-  if (tab === 'rollbacks') return 'POST /api/public/audit-events/:auditEventId/rollback';
-  return 'GET /api/public/missions/:id/events';
-}
-
 function isGrowthEvent(event: MissionEvent) {
   return event.type.includes('memory') || event.type.includes('config') || event.type.includes('candidate') || event.type.includes('rollback') || event.payload?.subjectType === 'agent' || event.payload?.subjectType === 'growth_candidate';
 }
@@ -131,7 +125,7 @@ function risk(event: MissionEvent) {
 }
 
 function missionTitle(event: MissionEvent, missions: Array<{ id: string; title: string }>) {
-  return missions.find((mission) => mission.id === event.missionId)?.title ?? event.missionId ?? '-';
+  return missions.find((mission) => mission.id === event.missionId)?.title ?? '-';
 }
 
 function Stat({ label, value }: { label: string; value: string }) {
@@ -143,17 +137,18 @@ function CandidateCard({ event }: { event: MissionEvent }) {
   return (
     <div className="mp-growth-candidate">
       <div className="mp-section-title"><strong>{event.payload?.diffSummary ?? event.type}</strong><span className="mp-chip">{event.payload?.subjectType ?? t('growth.candidate')}</span></div>
-      <p className="mp-muted">{event.payload?.payloadRef?.r2Key ?? t('growth.candidateFallback')}</p>
+      <p className="mp-muted">{event.payload?.diffSummary ?? t('growth.candidateFallback')}</p>
       <div className="mp-row-tight"><button className="mp-button dark">{t('common.enable')}</button><button className="mp-button">{t('common.dismiss')}</button></div>
     </div>
   );
 }
 
 function RollbackRow({ event }: { event: MissionEvent }) {
+  const { t } = useTranslation();
   return (
     <div className="mp-growth-rollback-row">
-      <span className="mp-muted mp-mono">{event.auditEventId ?? '-'}</span>
-      <strong>{event.payload?.subjectId ?? event.type}</strong>
+      <span className="mp-muted">{event.payload?.subjectType ?? t('growth.rollbacks')}</span>
+      <strong>{event.type}</strong>
       <span>{event.payload?.diffSummary ?? '-'}</span>
       <span className="mp-muted">{event.occurredAt ?? '-'}</span>
     </div>

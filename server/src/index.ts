@@ -36,6 +36,7 @@ import {
   reserveMissionSandboxSlot,
   reservePrivateSandboxSlot,
   updateMission,
+  type SandboxRef,
 } from "./state/missionState";
 import { missionryToolKit } from "./tools";
 
@@ -76,6 +77,8 @@ const app = new Hono();
 const now = () => new Date().toISOString();
 const SUPER_ADMIN_EMAIL = "qq1514337391@gmail.com";
 const DAY_MS = 24 * 60 * 60 * 1000;
+const DEFAULT_IDLE_MS = 120000;
+const FILE_TEXT_CAP_BYTES = 256 * 1024;
 let startupSeedPromise: Promise<unknown> | null = null;
 const storageBodyCache = new Map<string, string>();
 
@@ -158,6 +161,24 @@ function scheduleStartupSeed() {
   });
   waitUntil(startupSeedPromise);
   return startupSeedPromise;
+}
+
+// EdgeSpark has no cron/scheduled handler — it only exposes ctx.runInBackground().
+// We reap idle sandboxes opportunistically: any authenticated public request may
+// kick a background reap, throttled to at most once per REAP_THROTTLE_MS. Combined
+// with workroom GET reconciling live E2B state and E2B's own idle timeout, this
+// keeps idle sandboxes from billing without a dedicated scheduler.
+let lastOpportunisticReapAt = 0;
+const REAP_THROTTLE_MS = 60_000;
+function maybeReapInBackground() {
+  const nowMs = Date.now();
+  if (nowMs - lastOpportunisticReapAt < REAP_THROTTLE_MS) return;
+  lastOpportunisticReapAt = nowMs;
+  ctx.runInBackground(
+    reapIdleSandboxes().catch((error) => {
+      console.error("OPPORTUNISTIC REAP ERROR:", error);
+    }),
+  );
 }
 
 function currentUserProfile(c: any): UserProfile {
@@ -327,11 +348,12 @@ function workCardJson(row: typeof workCards.$inferSelect) {
   };
 }
 
-function chatMessageJson(row: typeof missionChatMessages.$inferSelect) {
+async function chatMessageJson(row: typeof missionChatMessages.$inferSelect) {
   return {
     id: row.id,
     missionId: row.missionId,
     author: { type: row.authorType, id: row.authorId },
+    authorName: await resolveChatAuthorName(row),
     body: row.body,
     mentions: JSON.parse(row.mentionsJson) as ChatMention[],
     isSilent: row.isSilent === 1,
@@ -365,6 +387,32 @@ function agentListItem(row: typeof agents.$inferSelect, instanceCount: number): 
     createdAt: row.createdAt,
     instanceCount,
   };
+}
+
+function normalizeWorkspacePath(value: string | undefined | null, fallback = "/workspace") {
+  const raw = value?.trim() || fallback;
+  if (raw.length > 256 || /[\u0000-\u001f\u007f]/.test(raw) || raw.includes("\\")) throw new Error("error.path.relative_invalid");
+  const withoutLeading = raw.replace(/^\/+/, "");
+  const relative = assertSafeRelativePath(withoutLeading);
+  if (relative !== "workspace" && !relative.startsWith("workspace/")) throw new Error("error.path.relative_invalid");
+  return `/${relative}`;
+}
+
+async function resolveChatAuthorName(row: typeof missionChatMessages.$inferSelect) {
+  if (row.authorType === "user") {
+    const [profile] = await db.select().from(usersProfile).where(eq(usersProfile.userId, row.authorId)).limit(1);
+    if (profile?.email) return profile.email;
+    const [authUser] = await db.select({ email: esSystemAuthUser.email, name: esSystemAuthUser.name }).from(esSystemAuthUser).where(eq(esSystemAuthUser.id, row.authorId)).limit(1);
+    return authUser?.name || authUser?.email || row.authorId;
+  }
+  if (row.authorType === "agent_instance") {
+    const [instance] = await db.select().from(agentInstances).where(eq(agentInstances.id, row.authorId)).limit(1);
+    if (instance) {
+      const [agent] = await db.select({ displayName: agents.displayName }).from(agents).where(eq(agents.id, instance.agentId)).limit(1);
+      return instance.displayAlias || agent?.displayName || row.authorId;
+    }
+  }
+  return row.authorId;
 }
 
 type MissionAgentInstanceRow = {
@@ -972,6 +1020,51 @@ async function dispatchMissionChatReplies(missionId: string, source: typeof miss
   return created;
 }
 
+async function reconcileMissionSandboxRefs(missionId: string) {
+  let mission = await getMission(missionId);
+  const refs: SandboxRef[] = [mission.stateJson.sharedSandbox, ...Object.values(mission.stateJson.privateSandboxes)];
+  for (const ref of refs) {
+    if (ref.state === "running") await e2b.reconcileLiveRef(ref);
+  }
+  return getMission(missionId);
+}
+
+export async function reapIdleSandboxes() {
+  const idleMs = Number(vars.get("MISSIONRY_IDLE_MS") ?? DEFAULT_IDLE_MS);
+  const idle = await listIdleSandboxes(idleMs);
+  const snapshotKeys: string[] = [];
+  for (const item of idle) {
+    const paused = await e2b.pauseIfIdle(item.ref);
+    const snapshotKey =
+      item.target === "mission"
+        ? `missions/${item.mission.id}/snapshots/shared/latest.json`
+        : `missions/${item.mission.id}/snapshots/private/${item.instanceId}/latest.json`;
+    await storage.from(buckets.missionryWorkspaces).put(snapshotKey, JSON.stringify({ sandboxId: item.ref.sandboxId, pausedAt: now(), state: paused.state }, null, 2));
+    if (!(await storage.from(buckets.missionryWorkspaces).get(snapshotKey))) throw new Error("error.snapshot.write_failed");
+    snapshotKeys.push(snapshotKey);
+    await updateMission(item.mission.id, (mission) => {
+      if (item.target === "mission") {
+        mission.stateJson.sharedSandbox = paused;
+        mission.stateJson.snapshots.sharedLatestR2Key = snapshotKey;
+      } else if (item.instanceId) {
+        mission.stateJson.privateSandboxes[item.instanceId] = paused;
+        mission.stateJson.snapshots.privateLatestR2Keys[item.instanceId] = snapshotKey;
+      }
+      mission.stateJson.snapshots.lastSnapshotAt = now();
+      return mission;
+    });
+    await emitCostEvent({
+      missionId: item.mission.id,
+      instanceId: item.instanceId,
+      sandboxId: item.ref.sandboxId,
+      sandboxSeconds: item.ref.activeSince ? Math.max(1, (Date.now() - Date.parse(item.ref.activeSince)) / 1000) : 1,
+      costCents: 1,
+      eventType: "sandbox_burn",
+    });
+  }
+  return { checkedMissions: new Set(idle.map((item) => item.mission.id)).size, pausedSandboxes: idle.length, snapshotKeys, recoverableErrors: [] as string[] };
+}
+
 app.use("/api/public/*", async (c, next) => {
   assertSafeStartupConfig();
   await scheduleStartupSeed();
@@ -981,6 +1074,7 @@ app.use("/api/public/*", async (c, next) => {
   const profile = await resolveRequestProfile(c);
   if (!profile) return jsonError(c, "error.auth.not_whitelisted", 403);
   (c as any).set("userProfile", profile);
+  maybeReapInBackground();
   await next();
 });
 
@@ -1488,7 +1582,7 @@ app.post("/api/public/missions/:id/agent-instances/:instanceId/direct-thread", a
 app.get("/api/public/missions/:id/workroom", async (c) => {
   const denied = await assertMissionAccess(c);
   if (denied) return denied;
-  const mission = await getMission(assertSafeId(c.req.param("id"), "mission_id"));
+  const mission = await reconcileMissionSandboxRefs(assertSafeId(c.req.param("id"), "mission_id"));
   const instanceRows = await loadMissionAgentRows(mission.id);
   const cardRows = await db.select().from(workCards).where(eq(workCards.missionId, mission.id)).orderBy(asc(workCards.createdAt));
   const workCardsJson = cardRows.map(workCardJson);
@@ -1540,6 +1634,24 @@ app.get("/api/public/missions/:id/workroom", async (c) => {
   });
 });
 
+app.get("/api/public/missions/:id/sandbox/files", async (c) => {
+  const denied = await assertMissionAccess(c);
+  if (denied) return denied;
+  const mission = await reconcileMissionSandboxRefs(assertSafeId(c.req.param("id"), "mission_id"));
+  const path = normalizeWorkspacePath(c.req.query("path"), "/workspace");
+  const listed = await e2b.listFiles(mission.stateJson.sharedSandbox, path);
+  return c.json({ path, state: listed.state === "running" ? "running" : "none", entries: listed.entries });
+});
+
+app.get("/api/public/missions/:id/sandbox/file", async (c) => {
+  const denied = await assertMissionAccess(c);
+  if (denied) return denied;
+  const mission = await reconcileMissionSandboxRefs(assertSafeId(c.req.param("id"), "mission_id"));
+  const path = normalizeWorkspacePath(c.req.query("path"), "/workspace/README.md");
+  const read = await e2b.readWorkspaceFile(mission.stateJson.sharedSandbox, path, FILE_TEXT_CAP_BYTES);
+  return c.json({ path, state: read.state === "running" ? "running" : "none", content: read.content });
+});
+
 app.get("/api/public/missions/:id/chat", async (c) => {
   const denied = await assertMissionAccess(c);
   if (denied) return denied;
@@ -1554,7 +1666,7 @@ app.get("/api/public/missions/:id/chat", async (c) => {
     .orderBy(desc(missionChatMessages.createdAt));
   const rows = before ? allRows.filter((row: typeof missionChatMessages.$inferSelect) => row.id < before).slice(0, limit) : allRows.slice(0, limit);
   return c.json({
-    items: rows.map(chatMessageJson),
+    items: await Promise.all(rows.map(chatMessageJson)),
     nextCursor: rows.length === limit ? rows.at(-1)?.id : null,
   });
 });
@@ -1579,8 +1691,8 @@ app.post("/api/public/missions/:id/chat", async (c) => {
   return c.json({
     actionId: crypto.randomUUID(),
     status: "completed",
-    message: chatMessageJson(message),
-    agentReplies: agentReplies.map(chatMessageJson),
+    message: await chatMessageJson(message),
+    agentReplies: await Promise.all(agentReplies.map(chatMessageJson)),
   }, 201);
 });
 
@@ -1773,6 +1885,9 @@ app.get("/api/public/missions/:id/events", async (c) => {
   const denied = await assertMissionAccess(c);
   if (denied) return denied;
   const missionId = assertSafeId(c.req.param("id"), "mission_id");
+  if (!String(c.req.header("accept") ?? "").includes("text/event-stream")) {
+    return c.json({ items: await recentMissionEvents(missionId) });
+  }
   return streamSSE(c, async (stream) => {
     let sent = 0;
     while (sent < 30) {
@@ -1789,39 +1904,7 @@ app.post("/api/public/internal/reap", async (c) => {
   if (!expected) return jsonError(c, "error.reap.token_not_configured", 503);
   if (c.req.header("x-internal-token") !== expected) return jsonError(c, "error.internal.unauthorized", 401);
   if (c.req.query("throw") === "1") throw new Error("smoke internal throw");
-  const idleMs = Number(vars.get("MISSIONRY_IDLE_MS") ?? 45000);
-  const idle = await listIdleSandboxes(idleMs);
-  const snapshotKeys: string[] = [];
-  for (const item of idle) {
-    const paused = await e2b.pauseIfIdle(item.ref);
-    const snapshotKey =
-      item.target === "mission"
-        ? `missions/${item.mission.id}/snapshots/shared/latest.json`
-        : `missions/${item.mission.id}/snapshots/private/${item.instanceId}/latest.json`;
-    await storage.from(buckets.missionryWorkspaces).put(snapshotKey, JSON.stringify({ sandboxId: item.ref.sandboxId, pausedAt: now(), state: paused.state }, null, 2));
-    if (!(await storage.from(buckets.missionryWorkspaces).get(snapshotKey))) throw new Error("error.snapshot.write_failed");
-    snapshotKeys.push(snapshotKey);
-    await updateMission(item.mission.id, (mission) => {
-      if (item.target === "mission") {
-        mission.stateJson.sharedSandbox = paused;
-        mission.stateJson.snapshots.sharedLatestR2Key = snapshotKey;
-      } else if (item.instanceId) {
-        mission.stateJson.privateSandboxes[item.instanceId] = paused;
-        mission.stateJson.snapshots.privateLatestR2Keys[item.instanceId] = snapshotKey;
-      }
-      mission.stateJson.snapshots.lastSnapshotAt = now();
-      return mission;
-    });
-    await emitCostEvent({
-      missionId: item.mission.id,
-      instanceId: item.instanceId,
-      sandboxId: item.ref.sandboxId,
-      sandboxSeconds: item.ref.activeSince ? Math.max(1, (Date.now() - Date.parse(item.ref.activeSince)) / 1000) : 1,
-      costCents: 1,
-      eventType: "sandbox_burn",
-    });
-  }
-  return c.json({ checkedMissions: new Set(idle.map((item) => item.mission.id)).size, pausedSandboxes: idle.length, snapshotKeys, recoverableErrors: [] });
+  return c.json(await reapIdleSandboxes());
 });
 
 app.post("/api/public/audit-events/:auditEventId/rollback", async (c) => {
@@ -1861,4 +1944,8 @@ app.post("/api/public/audit-events/:auditEventId/rollback", async (c) => {
   }), { headers: { "content-type": "application/json" } });
 });
 
+// EdgeSpark requires the default export to be the Hono app instance (its route
+// analyzer inspects app.routes). Cron/scheduled handlers are not supported here;
+// idle reaping runs opportunistically via maybeReapInBackground() in the
+// /api/public/* middleware. See note above reapIdleSandboxes().
 export default app;

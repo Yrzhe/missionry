@@ -69,10 +69,10 @@ export function AdminConsole() {
   }
 
   return (
-    <Shell title={t('admin.title')} meta={<span className="mp-muted mp-mono">/api/public/admin/*</span>}>
+    <Shell title={t('admin.title')} meta={<span className="mp-muted">{t('admin.overview')}</span>}>
       <div className="mp-head">
         <div>
-          <div className="mp-label">GET /api/public/admin/overview</div>
+          <div className="mp-label">{t('admin.overview')}</div>
           <h1>{t('admin.title')}</h1>
           <p className="mp-muted">{t('admin.subtitle')}</p>
         </div>
@@ -87,7 +87,7 @@ export function AdminConsole() {
       </div>
 
       <section className="mp-card mp-admin-block">
-        <div className="mp-section-title"><strong>{t('admin.users')}</strong><span className="mp-muted mp-mono">GET /api/public/admin/users</span></div>
+        <div className="mp-section-title"><strong>{t('admin.users')}</strong><span className="mp-muted">{t('admin.userManagement')}</span></div>
         <div className="mp-admin-user-row mp-label"><span>{t('common.email')}</span><span>{t('common.role')}</span><span>{t('admin.todaySpend')}</span><span>{t('admin.dailyBudget')}</span></div>
         {users.length ? users.map((user, index) => (
           <div className="mp-admin-user-row" key={`${user.userId ?? user.email ?? 'user'}-${index}`}>
@@ -100,7 +100,7 @@ export function AdminConsole() {
       </section>
 
       <section className="mp-card mp-admin-block">
-        <div className="mp-section-title"><strong>{t('admin.whitelist')}</strong><span className="mp-muted mp-mono">GET/POST/DELETE /api/public/admin/whitelist</span></div>
+        <div className="mp-section-title"><strong>{t('admin.whitelist')}</strong><span className="mp-muted">{t('admin.accessList')}</span></div>
         <div className="mp-admin-white-row mp-label"><span>{t('admin.type')}</span><span>{t('admin.value')}</span><span>{t('admin.enabled')}</span><span>{t('admin.createdBy')}</span><span /></div>
         {whitelist.length ? whitelist.map((entry, index) => (
           <div className="mp-admin-white-row" key={`${entry.id ?? `${entry.type}-${entry.value}`}-${index}`}>
@@ -122,7 +122,7 @@ export function AdminConsole() {
       </section>
 
       <section className="mp-card mp-admin-block">
-        <div className="mp-section-title"><strong>{t('admin.allMissions')}</strong><span className="mp-muted mp-mono">GET /api/public/admin/missions</span></div>
+        <div className="mp-section-title"><strong>{t('admin.allMissions')}</strong><span className="mp-muted">{t('admin.missionRegistry')}</span></div>
         <div className="mp-admin-mission-row mp-label"><span>{t('admin.ownerEmail')}</span><span>{t('admin.missionTitle')}</span><span>{t('common.status')}</span><span>{t('admin.spendCap')}</span><span>{t('common.burn')}</span></div>
         {missions.length ? missions.map((mission, index) => (
           <div className="mp-admin-mission-row" key={`${mission.missionId ?? mission.title ?? 'mission'}-${index}`}>

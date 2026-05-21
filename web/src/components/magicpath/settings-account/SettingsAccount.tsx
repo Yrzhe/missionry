@@ -41,7 +41,7 @@ export function SettingsAccount() {
   }
 
   return (
-    <Shell title={t('account.title')} meta={<span className="mp-muted mp-mono">/api/_es/auth/change-password</span>}>
+    <Shell title={t('account.title')} meta={<span className="mp-muted">{t('account.security')}</span>}>
       <div className="mp-head">
         <div>
           <div className="mp-label">{t('nav.settings')}</div>

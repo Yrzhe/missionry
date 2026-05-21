@@ -53,13 +53,13 @@ export async function recentMissionEvents(missionId: string): Promise<MissionSse
     .from(missionSpend)
     .where(eq(missionSpend.missionId, missionId))
     .orderBy(desc(missionSpend.createdAt))
-    .limit(20);
+    .limit(50);
   const auditRows = await db
     .select()
     .from(auditEvents)
     .where(eq(auditEvents.missionId, missionId))
     .orderBy(desc(auditEvents.createdAt))
-    .limit(20);
+    .limit(50);
   const spendEvents = spendRows.map((row: typeof missionSpend.$inferSelect) => ({
     type: row.eventType,
     missionId,
@@ -101,5 +101,5 @@ export async function recentMissionEvents(missionId: string): Promise<MissionSse
   }));
   return [...spendEvents, ...auditSseEvents]
     .sort((a, b) => a.occurredAt.localeCompare(b.occurredAt))
-    .slice(-30);
+    .slice(-50);
 }

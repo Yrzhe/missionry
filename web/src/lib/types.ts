@@ -278,3 +278,18 @@ export type MissionEvent = {
   auditEventId?: string;
   occurredAt?: string;
 };
+
+export type MissionFileEntry = {
+  name: string;
+  path: string;
+  type: 'file' | 'directory';
+  size?: number;
+  updatedAt?: string;
+};
+
+export type MissionFileContent = {
+  path: string;
+  content: string;
+  mimeType?: string;
+  updatedAt?: string;
+};
