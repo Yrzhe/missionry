@@ -50,6 +50,24 @@ function shouldRefreshChat(event: MissionEvent) {
     || Boolean(event.payload?.message ?? event.payload?.chatMessage);
 }
 
+// High-frequency "noise" events (cost ticks / sandbox burn) update the activity feed
+// locally but must NOT trigger a workroom refetch — refetching the workroom kicks the
+// backend's background reconcile/reaper which emits more cost/burn events, creating an
+// SSE -> invalidate -> refetch -> emit feedback loop that exhausts browser connections
+// (ERR_INSUFFICIENT_RESOURCES / white screen).
+const NOISE_EVENTS = new Set(['cost_event', 'sandbox_burn', 'mission_spend_updated']);
+
+// Coalesce invalidations: at most one invalidate per key every COALESCE_MS.
+const COALESCE_MS = 4_000;
+const pendingInvalidations = new Map<string, ReturnType<typeof setTimeout>>();
+function coalesceInvalidate(key: string, run: () => void) {
+  if (pendingInvalidations.has(key)) return;
+  pendingInvalidations.set(key, setTimeout(() => {
+    pendingInvalidations.delete(key);
+    run();
+  }, COALESCE_MS));
+}
+
 export function subscribeMissionEvents(missionId: string) {
   const controller = new AbortController();
   void fetchEventSource(eventUrl(missionId), {
@@ -66,17 +84,23 @@ export function subscribeMissionEvents(missionId: string) {
         event = { type, missionId };
       }
       const resolvedMissionId = event.missionId ?? missionId;
-      upsertEvent(resolvedMissionId, { ...event, type: event.type || type, missionId: resolvedMissionId });
-      invalidateMission(resolvedMissionId);
-      if (event.type.startsWith('work_card_') || event.type === 'mission_environment_updated') {
-        void queryClient.invalidateQueries({ queryKey: ['agents'] });
+      const resolvedType = event.type || type;
+      // Always update the local activity feed cache (cheap, no network).
+      upsertEvent(resolvedMissionId, { ...event, type: resolvedType, missionId: resolvedMissionId });
+      // Noise events (cost/burn) only feed the activity list — never refetch the workroom,
+      // or we re-trigger the backend's emit-on-read background work and loop forever.
+      if (NOISE_EVENTS.has(resolvedType)) return;
+      // Meaningful events: coalesce the actual refetches so a burst can't storm.
+      coalesceInvalidate(`mission:${resolvedMissionId}`, () => invalidateMission(resolvedMissionId));
+      if (resolvedType.startsWith('work_card_') || resolvedType === 'mission_environment_updated') {
+        coalesceInvalidate('agents', () => void queryClient.invalidateQueries({ queryKey: ['agents'] }));
       }
-      if (event.type.startsWith('agent_request_') || event.type === 'agent_joined' || event.type === 'agent_recruited') {
-        void queryClient.invalidateQueries({ queryKey: queryKeys.missionAgentRequests(resolvedMissionId) });
-        void queryClient.invalidateQueries({ queryKey: queryKeys.agents });
+      if (resolvedType.startsWith('agent_request_') || resolvedType === 'agent_joined' || resolvedType === 'agent_recruited') {
+        coalesceInvalidate(`agentReq:${resolvedMissionId}`, () => void queryClient.invalidateQueries({ queryKey: queryKeys.missionAgentRequests(resolvedMissionId) }));
+        coalesceInvalidate('agents', () => void queryClient.invalidateQueries({ queryKey: queryKeys.agents }));
       }
       if (shouldRefreshChat(event)) {
-        void queryClient.invalidateQueries({ queryKey: queryKeys.missionChat(resolvedMissionId) });
+        coalesceInvalidate(`chat:${resolvedMissionId}`, () => void queryClient.invalidateQueries({ queryKey: queryKeys.missionChat(resolvedMissionId) }));
       }
     },
     onerror(error) {
