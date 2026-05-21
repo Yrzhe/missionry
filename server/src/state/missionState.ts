@@ -35,6 +35,11 @@ export type MissionStateJson = {
     lastSnapshotAt?: string;
     lastRestoreAt?: string;
   };
+  environment?: {
+    vars: Record<string, string>;
+    credentialRefs?: string[];
+    updatedAt?: string;
+  };
   issues: { total: number; completed: number; open: number; reopened: number; addedAfterDone: number };
   costGuardrailStatus: "ok" | "near_daily_cap" | "daily_cap_hit" | "global_cap_hit";
 };
@@ -108,6 +113,7 @@ export function defaultMissionState(missionId = "new"): MissionStateJson {
     sharedSandbox: emptySandbox("mission", missionId),
     privateSandboxes: {},
     snapshots: { privateLatestR2Keys: {} },
+    environment: { vars: {}, credentialRefs: [] },
     issues: { total: 0, completed: 0, open: 0, reopened: 0, addedAfterDone: 0 },
     costGuardrailStatus: "ok",
   };

@@ -121,6 +121,17 @@ async function waitForServer() {
   throw new Error(`server did not start\n\n${logs.slice(-8000)}`);
 }
 
+async function waitForCompletedCard(missionId) {
+  const deadline = Date.now() + 60_000;
+  while (Date.now() < deadline) {
+    const workroom = await request(`/missions/${missionId}/workroom`);
+    const card = workroom.workCards.find((item) => item.status === "done") ?? workroom.workCards.find((item) => item.status === "running");
+    if (card) return card;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  throw new Error(`mission did not auto-run a work card\n\n${logs.slice(-4000)}`);
+}
+
 try {
   await waitForServer();
 
@@ -139,12 +150,11 @@ try {
   const decomposition = await request(`/missions/${mission.missionId}/decompose`, { method: "POST" });
   assert.equal(decomposition.mock, true);
   assert.ok(decomposition.created.length >= 1);
-  assert.equal(decomposition.created[0].status, "proposed");
+  assert.equal(decomposition.created[0].status, "queued");
 
-  const workCardId = decomposition.created[0].workCardId;
-  const started = await request(`/missions/${mission.missionId}/work-cards/${workCardId}/start`, { method: "POST" });
-  assert.equal(started.workCard.id, workCardId);
-  assert.match(started.workCard.status, /^(running|done)$/);
+  const completed = await waitForCompletedCard(mission.missionId);
+  assert.match(completed.status, /^(running|done)$/);
+  const workCardId = completed.id;
 
   const events = await request(`/missions/${mission.missionId}/events`);
   assert.ok(events.items.some((event) => ["work_card_completed", "sandbox_burn", "sandbox_burn_recorded"].includes(event.type)));

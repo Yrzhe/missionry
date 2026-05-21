@@ -66,6 +66,8 @@ export type AgentLibraryItem = AgentRef & {
   role?: string;
   model?: string;
   skills?: string[];
+  soul?: string;
+  identity?: string;
   updatedAt?: string;
   createdAt?: string;
 };
@@ -74,6 +76,28 @@ export type CreateAgentInput = {
   displayName: string;
   role: string;
   avatarSeed: string;
+};
+
+export type UpdateAgentInput = {
+  displayName?: string;
+  role?: string;
+  soul?: string;
+  identity?: string;
+  skills?: string[];
+};
+
+export type MissionEnvironmentVariable = {
+  key: string;
+  value?: string;
+  masked?: boolean;
+  isSecret?: boolean;
+  updatedAt?: string;
+};
+
+export type MissionEnvironment = {
+  versionId?: string;
+  updatedAt?: string;
+  variables: MissionEnvironmentVariable[];
 };
 
 export type MissionAgentRow = {

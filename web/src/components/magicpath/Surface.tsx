@@ -1,11 +1,12 @@
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
-import { useQueries, useQuery } from '@tanstack/react-query';
+import { useState } from 'react';
+import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useShallow } from 'zustand/react/shallow';
 import { api } from '../../lib/api';
 import { queryKeys } from '../../lib/query';
 import { useAppStore } from '../../lib/store';
-import type { MissionAgentRow, MissionSandboxReadModel } from '../../lib/types';
+import type { AgentLibraryItem, MissionAgentRow, MissionSandboxReadModel } from '../../lib/types';
 import { Shell } from './Shell';
 import { AgentTaskList } from './agent-library/AgentLibrary';
 
@@ -133,8 +134,68 @@ function AgentCard({ row }: { row: MissionAgentRow }) {
       <Info label={t('agent.instance')} value={row.instance.displayAlias ?? row.agent.displayName} />
       <Info label={t('common.status')} value={row.instance.workState?.status ?? '-'} />
       <Info label={t('agent.sandbox')} value={row.instance.sandboxSummary?.state ?? 'none'} />
+      <AgentProfileEditor agentId={row.agent.id} fallbackAgent={row.agent as AgentLibraryItem} />
       <AgentTaskList agentId={row.agent.id} />
     </section>
+  );
+}
+
+function AgentProfileEditor({ agentId, fallbackAgent }: { agentId: string; fallbackAgent: AgentLibraryItem }) {
+  const { t } = useTranslation();
+  const queryClient = useQueryClient();
+  const agentsQuery = useQuery({ queryKey: queryKeys.agents, queryFn: api.agents });
+  const agent = agentsQuery.data?.items.find((item) => item.id === agentId) ?? fallbackAgent;
+  const [open, setOpen] = useState(false);
+  const [form, setForm] = useState({
+    displayName: agent.displayName,
+    role: agent.role ?? agent.globalIdentity?.role ?? '',
+    soul: agent.soul ?? '',
+    identity: agent.identity ?? agent.globalIdentity?.baseConfigSummary ?? '',
+    skills: (agent.skills ?? []).join(', '),
+  });
+  const updateMutation = useMutation({
+    mutationFn: () => api.updateAgent(agentId, {
+      displayName: form.displayName.trim(),
+      role: form.role.trim(),
+      soul: form.soul.trim(),
+      identity: form.identity.trim(),
+      skills: form.skills.split(',').map((skill) => skill.trim()).filter(Boolean),
+    }),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: queryKeys.agents });
+      setOpen(false);
+    },
+  });
+
+  function startEdit() {
+    setForm({
+      displayName: agent.displayName,
+      role: agent.role ?? agent.globalIdentity?.role ?? '',
+      soul: agent.soul ?? '',
+      identity: agent.identity ?? agent.globalIdentity?.baseConfigSummary ?? '',
+      skills: (agent.skills ?? []).join(', '),
+    });
+    setOpen(true);
+  }
+
+  return (
+    <div className="mp-agent-config">
+      <button className="mp-button" onClick={startEdit}>{t('agents.edit.action')}</button>
+      {open ? (
+        <form className="mp-agent-config-form" onSubmit={(event) => { event.preventDefault(); void updateMutation.mutateAsync(); }}>
+          <label>{t('agents.modal.displayName')}<input value={form.displayName} onChange={(event) => setForm((current) => ({ ...current, displayName: event.target.value }))} /></label>
+          <label>{t('agents.modal.role')}<input value={form.role} onChange={(event) => setForm((current) => ({ ...current, role: event.target.value }))} /></label>
+          <label>{t('agents.edit.soul')}<textarea value={form.soul} onChange={(event) => setForm((current) => ({ ...current, soul: event.target.value }))} /></label>
+          <label>{t('agents.edit.identity')}<textarea value={form.identity} onChange={(event) => setForm((current) => ({ ...current, identity: event.target.value }))} /></label>
+          <label>{t('agents.edit.skills')}<input value={form.skills} onChange={(event) => setForm((current) => ({ ...current, skills: event.target.value }))} placeholder={t('agents.edit.skillsPlaceholder')} /></label>
+          <div className="mp-row-tight">
+            <button className="mp-button dark" disabled={updateMutation.isPending}>{updateMutation.isPending ? t('common.saving') : t('common.save')}</button>
+            <button type="button" className="mp-button" onClick={() => setOpen(false)}>{t('common.cancel')}</button>
+          </div>
+          {updateMutation.isError ? <div className="mp-denied">{updateMutation.error instanceof Error ? updateMutation.error.message : t('agents.edit.error')}</div> : null}
+        </form>
+      ) : null}
+    </div>
   );
 }
 

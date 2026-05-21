@@ -163,16 +163,27 @@ function requireEnvd(ref: SandboxRef) {
   };
 }
 
-async function envdFetch(ref: SandboxRef, path: string, init: RequestInit = {}) {
+async function envdFetch(ref: SandboxRef, path: string, init: RequestInit = {}, timeoutMs = 5000) {
   const envd = requireEnvd(ref);
-  const response = await fetch(`${envd.host}${path}`, {
-    ...init,
-    headers: {
-      "X-Access-Token": envd.token,
-      ...(init.body && !(init.body instanceof FormData) ? { "Content-Type": "application/json" } : {}),
-      ...(init.headers ?? {}),
-    },
-  });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort("envd_timeout"), timeoutMs);
+  let response: Response;
+  try {
+    response = await fetch(`${envd.host}${path}`, {
+      ...init,
+      signal: controller.signal,
+      headers: {
+        "X-Access-Token": envd.token,
+        ...(init.body && !(init.body instanceof FormData) ? { "Content-Type": "application/json" } : {}),
+        ...(init.headers ?? {}),
+      },
+    });
+  } catch (error) {
+    if ((error as Error)?.name === "AbortError") throw new Error("error.e2b.envd_timeout");
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
   const contentType = response.headers.get("content-type") ?? "";
   if (!response.ok) {
     const body = await response.text().catch(() => "");
@@ -306,6 +317,8 @@ async function loadPersistedLiveRouting(refSandboxId: string): Promise<LiveSandb
 
 async function createRealSandbox(input: { missionId: string; target: SandboxTarget; instanceId?: string }) {
   const templateID = vars.get("E2B_TEMPLATE_ID") || "base";
+  const mission = await getMissionWithRuntimeSandboxes(input.missionId).catch(() => null);
+  const missionEnv = mission?.stateJson.environment?.vars ?? {};
   const body = {
     // E2B lifecycle is platform API only; exec/files route to envd using
     // envdAccessToken persisted below.
@@ -324,6 +337,7 @@ async function createRealSandbox(input: { missionId: string; target: SandboxTarg
       MISSION_ID: input.missionId,
       MISSIONRY_TARGET: input.target,
       ...(input.instanceId ? { AGENT_INSTANCE_ID: input.instanceId } : {}),
+      ...missionEnv,
     },
   };
   const created = await e2bFetch("/sandboxes", { method: "POST", body: JSON.stringify(body) }) as E2BCreateResponse;

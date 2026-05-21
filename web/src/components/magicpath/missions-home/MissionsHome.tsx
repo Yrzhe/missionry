@@ -109,6 +109,12 @@ export function MissionsHome() {
       if (created.missionId) navigate(`/missions/${created.missionId}`);
     },
   });
+  const deleteMissionMutation = useMutation({
+    mutationFn: api.deleteMission,
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: queryKeys.missions });
+    },
+  });
 
   async function submitMission(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -135,7 +141,17 @@ export function MissionsHome() {
     }
   }
 
-  const isSubmitting = createMissionMutation.isPending || createDemoMutation.isPending;
+  async function deleteMission(mission: MissionSummary) {
+    if (!window.confirm(t('missions.delete.confirm', { title: mission.title }))) return;
+    setError(null);
+    try {
+      await deleteMissionMutation.mutateAsync(mission.id);
+    } catch (deleteError) {
+      setError(deleteError instanceof Error ? deleteError.message : t('missions.delete.error'));
+    }
+  }
+
+  const isSubmitting = createMissionMutation.isPending || createDemoMutation.isPending || deleteMissionMutation.isPending;
 
   return (
     <Shell
@@ -181,7 +197,7 @@ export function MissionsHome() {
 
       <div className="mp-card mp-list">
         {rows.length ? rows.map((mission) => (
-          <MissionRow key={mission.id} mission={mission} agents={workrooms[mission.id]?.agentInstances ?? []} onOpen={() => navigate(`/missions/${mission.id}`)} />
+          <MissionRow key={mission.id} mission={mission} agents={workrooms[mission.id]?.agentInstances ?? []} isDeleting={deleteMissionMutation.variables === mission.id && deleteMissionMutation.isPending} onDelete={() => void deleteMission(mission)} onOpen={() => navigate(`/missions/${mission.id}`)} />
         )) : <EmptyCta title={t('missions.empty.title')} body={t('missions.empty.body')} action={t('missions.empty.action')} secondaryAction={t('missions.empty.demoAction')} onAction={() => setModalOpen(true)} onSecondaryAction={() => void createDemoMission()} />}
       </div>
 
@@ -226,7 +242,7 @@ function Stat({ label, value, sub }: { label: string; value: string; sub: string
   return <div className="mp-card mp-stat"><div className="mp-label">{label}</div><div className="mp-value">{value}</div><div className="mp-muted mp-small">{sub}</div></div>;
 }
 
-function MissionRow({ mission, agents, onOpen }: { mission: MissionSummary; agents: MissionAgentRow[]; onOpen: () => void }) {
+function MissionRow({ mission, agents, isDeleting, onOpen, onDelete }: { mission: MissionSummary; agents: MissionAgentRow[]; isDeleting: boolean; onOpen: () => void; onDelete: () => void }) {
   const { t } = useTranslation();
   const ownerName = mission.owner?.displayName ?? '-';
   const spend = mission.spentCents ?? mission.missionSpendCents ?? 0;
@@ -234,7 +250,8 @@ function MissionRow({ mission, agents, onOpen }: { mission: MissionSummary; agen
   const sandboxState = mission.sandboxSummary?.state ?? 'none';
 
   return (
-    <button className="mp-mission-row" onClick={onOpen}>
+    <div className="mp-mission-row">
+      <button className="mp-mission-row-main" onClick={onOpen}>
       <div>
         <div className="mp-row-tight">
           <span className="mp-chip"><span className={`mp-status-dot ${mission.status}`} />{t(`status.${mission.status}`, mission.status)}</span>
@@ -256,7 +273,9 @@ function MissionRow({ mission, agents, onOpen }: { mission: MissionSummary; agen
         <span>{t('common.burn')}: {(mission.sandboxSummary?.burnRateCentsPerMinute ?? 0).toFixed(1)}{t('common.centsPerMinute')}</span>
         <span>{t('common.sandbox')}: {t(`status.${sandboxState}`)}</span>
       </div>
-    </button>
+      </button>
+      <button className="mp-button danger mp-row-delete" disabled={isDeleting} onClick={onDelete}>{isDeleting ? t('common.saving') : t('common.delete')}</button>
+    </div>
   );
 }
 

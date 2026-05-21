@@ -38,6 +38,7 @@ import {
   reserveMissionSandboxSlot,
   reservePrivateSandboxSlot,
   updateMission,
+  type MissionStateJson,
   type SandboxRef,
 } from "./state/missionState";
 import { missionryToolKit } from "./tools";
@@ -351,6 +352,17 @@ function requireAdmin(c: any) {
   return null;
 }
 
+async function assertAgentAccess(c: any, agentId: string) {
+  agentId = assertSafeId(agentId, "agent_id");
+  const profile = currentUserProfile(c);
+  if (profile.role === "admin") return null;
+  const [agent] = await db.select().from(agents).where(eq(agents.id, agentId)).limit(1);
+  if (!agent) return jsonError(c, "error.agent.not_found", 404);
+  const identity = JSON.parse(agent.globalIdentityJson) as Record<string, unknown>;
+  if (identity.ownerUserId === profile.userId) return null;
+  return jsonError(c, "error.agent.access_denied", 403);
+}
+
 async function userHasMissionAccess(profile: UserProfile, missionId: string) {
   missionId = assertSafeId(missionId, "mission_id");
   if (profile.role === "admin") return true;
@@ -392,6 +404,14 @@ function publicSandboxRef(ref: SandboxRef) {
 function redactMissionStateJson(stateJson: any) {
   return {
     ...stateJson,
+    environment: stateJson.environment
+      ? {
+          varKeys: Object.keys(stateJson.environment.vars ?? {}),
+          vars: Object.fromEntries(Object.keys(stateJson.environment.vars ?? {}).map((key) => [key, "********"])),
+          credentialRefs: stateJson.environment.credentialRefs ?? [],
+          updatedAt: stateJson.environment.updatedAt,
+        }
+      : { varKeys: [], vars: {}, credentialRefs: [] },
     sharedSandbox: publicSandboxRef(stateJson.sharedSandbox),
     privateSandboxes: Object.fromEntries(Object.entries(stateJson.privateSandboxes ?? {}).map(([key, value]) => [key, publicSandboxRef(value as SandboxRef)])),
   };
@@ -473,6 +493,22 @@ function normalizeWorkspacePath(value: string | undefined | null, fallback = "")
   const relative = raw.startsWith("/workspace/") ? raw.slice("/workspace/".length) : raw.replace(/^\/+/, "");
   if (relative.startsWith("/") || relative === "workspace") throw new Error("error.path.relative_invalid");
   return assertSafeRelativePath(relative);
+}
+
+function assertEnvKey(value: string) {
+  const key = value.trim();
+  if (!/^[A-Z_][A-Z0-9_]{0,63}$/.test(key)) throw new Error("error.environment.key_invalid");
+  return key;
+}
+
+function maskedEnvironment(environment: MissionStateJson["environment"] | undefined) {
+  const vars = environment?.vars ?? {};
+  return {
+    varKeys: Object.keys(vars),
+    vars: Object.fromEntries(Object.keys(vars).map((key) => [key, "********"])),
+    credentialRefs: environment?.credentialRefs ?? [],
+    updatedAt: environment?.updatedAt ?? null,
+  };
 }
 
 async function resolveChatAuthorName(row: typeof missionChatMessages.$inferSelect) {
@@ -1015,11 +1051,12 @@ async function decomposeMission(missionId: string) {
       description: card.description,
       assigneeInstanceId: resolveProposedAssignee(card, rows, leader.instance.id),
       sandboxAffinity: card.sandboxAffinity ?? { tier: "mission", reason: "proposed execution" },
-      status: "proposed",
+      status: "queued",
       activate: false,
       mock,
     }));
   }
+  waitUntil(tryDequeue().catch((error) => console.error("AUTO DEQUEUE AFTER DECOMPOSE ERROR:", error)));
   return { created: cards, mock };
 }
 
@@ -1263,6 +1300,14 @@ async function reconcileMissionSandboxRefs(missionId: string) {
     if (ref.state === "running") await e2b.reconcileLiveRef(ref);
   }
   return getMissionWithRuntimeSandboxes(missionId);
+}
+
+function reconcileMissionSandboxRefsInBackground(missionId: string) {
+  waitUntil(
+    reconcileMissionSandboxRefs(missionId).catch((error) => {
+      console.error("BACKGROUND SANDBOX RECONCILE ERROR:", error);
+    }),
+  );
 }
 
 export async function reapIdleSandboxes() {
@@ -1570,6 +1615,45 @@ app.get("/api/public/agents/:agentId/work-cards", async (c) => {
   });
 });
 
+app.patch("/api/public/agents/:agentId", async (c) => {
+  const agentId = assertSafeId(c.req.param("agentId"), "agent_id");
+  const denied = await assertAgentAccess(c, agentId);
+  if (denied) return denied;
+  const body = (await c.req.json().catch(() => ({}))) as {
+    displayName?: string;
+    role?: string;
+    soul?: string;
+    identity?: string;
+    equippedSkillIds?: string[];
+  };
+  const [agent] = await db.select().from(agents).where(eq(agents.id, agentId)).limit(1);
+  if (!agent) return jsonError(c, "error.agent.not_found", 404);
+  const timestamp = now();
+  const globalIdentity = JSON.parse(agent.globalIdentityJson) as Record<string, unknown>;
+  const patch: Record<string, unknown> = { updatedAt: timestamp };
+  if (body.displayName?.trim()) {
+    patch.displayName = body.displayName.trim();
+    globalIdentity.displayName = body.displayName.trim();
+  }
+  if (body.role?.trim()) globalIdentity.role = body.role.trim();
+  patch.globalIdentityJson = JSON.stringify(globalIdentity);
+  if (Array.isArray(body.equippedSkillIds)) patch.equippedSkillIdsJson = JSON.stringify(body.equippedSkillIds.map((id) => assertSafeId(id, "skill_id")));
+  const bucket = storage.from(buckets.missionryWorkspaces);
+  const writes = [];
+  if (body.soul !== undefined) writes.push(bucket.put(`agents/${agentId}/soul.md`, body.soul));
+  if (body.identity !== undefined) writes.push(bucket.put(`agents/${agentId}/identity.md`, body.identity));
+  const [updated] = await db.update(agents).set(patch).where(eq(agents.id, agentId)).returning();
+  await Promise.all(writes);
+  const auditEventId = await recordAudit({
+    subjectType: "agent",
+    subjectId: agentId,
+    actor: { type: "user", id: currentUserProfile(c).userId },
+    action: "agent_config_updated",
+    diffSummary: JSON.stringify(Object.keys(body)),
+  });
+  return c.json({ actionId: crypto.randomUUID(), status: "completed", agent: agentListItem(updated, 0), auditEventId });
+});
+
 app.post("/api/public/agents", async (c) => {
   const profile = currentUserProfile(c);
   const body = (await c.req.json().catch(() => ({}))) as {
@@ -1624,9 +1708,10 @@ app.get("/api/public/missions", async (c) => {
       ? await db.select().from(missions).where(eq(missions.ownerAgentId, ownerAgentId)).orderBy(desc(missions.updatedAt))
       : await db.select().from(missions).orderBy(desc(missions.updatedAt));
   const allItems = rows.map((row: any) => row.mission ? rowMission(row.mission) : rowMission(row));
-  const items = profile.role === "admin" ? allItems : [];
+  const visibleItems = allItems.filter((item: any) => item.status !== "deleted");
+  const items = profile.role === "admin" ? visibleItems : [];
   if (profile.role !== "admin") {
-    for (const item of allItems) {
+    for (const item of visibleItems) {
       if (await userHasMissionAccess(profile, item.id)) items.push(item);
     }
   }
@@ -1663,6 +1748,11 @@ app.post("/api/public/missions", async (c) => {
     requestUserId: currentUserProfile(c).userId,
   });
   const missionJson = rowMission(created.mission);
+  waitUntil(
+    decomposeMission(created.missionId)
+      .then(() => tryDequeue())
+      .catch((error) => console.error("AUTO DECOMPOSE ERROR:", error)),
+  );
   return c.json({ ...missionJson, missionId: created.missionId, ownerInstanceId: created.ownerInstanceId, leaderAgentId: created.leaderAgentId, leaderInstanceId: created.leaderInstanceId }, 201);
 });
 
@@ -1684,6 +1774,72 @@ app.patch("/api/public/missions/:id", async (c) => {
     dailyBudgetCents: body.dailyBudgetCents ?? current.dailyBudgetCents,
   }));
   return c.json({ actionId: crypto.randomUUID(), status: "completed", mission });
+});
+
+app.delete("/api/public/missions/:id", async (c) => {
+  const denied = await assertMissionAccess(c);
+  if (denied) return denied;
+  const missionId = assertSafeId(c.req.param("id"), "mission_id");
+  const mission = await getMissionWithRuntimeSandboxes(missionId);
+  waitUntil(
+    (async () => {
+      const refs = [mission.stateJson.sharedSandbox, ...Object.values(mission.stateJson.privateSandboxes)];
+      for (const ref of refs) {
+        if (ref.state === "running" || ref.state === "paused") await e2b.kill(ref).catch((error) => console.error("MISSION DELETE SANDBOX KILL ERROR:", error));
+      }
+    })(),
+  );
+  const timestamp = now();
+  const auditEventId = await recordAudit({
+    missionId,
+    subjectType: "mission",
+    subjectId: missionId,
+    actor: { type: "user", id: currentUserProfile(c).userId },
+    action: "mission_deleted",
+    diffSummary: "status:deleted",
+  });
+  await db.batch([
+    db.update(missions).set({ status: "deleted", updatedAt: timestamp }).where(eq(missions.id, missionId)),
+    db.update(workCards).set({ status: "cancelled", updatedAt: timestamp }).where(eq(workCards.missionId, missionId)),
+    db.delete(agentResponseCursors).where(eq(agentResponseCursors.missionId, missionId)),
+    db.delete(directThreadMessages).where(eq(directThreadMessages.missionId, missionId)),
+    db.delete(directThreads).where(eq(directThreads.missionId, missionId)),
+    db.delete(missionLeader).where(eq(missionLeader.missionId, missionId)),
+  ]);
+  return c.json({ actionId: crypto.randomUUID(), status: "completed", missionId, deleted: true, auditEventId });
+});
+
+app.get("/api/public/missions/:id/environment", async (c) => {
+  const denied = await assertMissionAccess(c);
+  if (denied) return denied;
+  const mission = await getMissionWithRuntimeSandboxes(assertSafeId(c.req.param("id"), "mission_id"));
+  return c.json(maskedEnvironment(mission.stateJson.environment));
+});
+
+app.put("/api/public/missions/:id/environment", async (c) => {
+  const denied = await assertMissionAccess(c);
+  if (denied) return denied;
+  const missionId = assertSafeId(c.req.param("id"), "mission_id");
+  const body = (await c.req.json().catch(() => ({}))) as { vars?: Record<string, unknown>; credentialRefs?: string[] };
+  const varsIn = body.vars ?? {};
+  const envVars: Record<string, string> = {};
+  for (const [rawKey, rawValue] of Object.entries(varsIn)) {
+    envVars[assertEnvKey(rawKey)] = String(rawValue);
+  }
+  const credentialRefs = Array.isArray(body.credentialRefs) ? body.credentialRefs.map((id) => assertSafeId(id, "credential_ref")) : [];
+  const updated = await updateMission(missionId, (mission) => {
+    mission.stateJson.environment = { vars: envVars, credentialRefs, updatedAt: now() };
+    return mission;
+  });
+  const auditEventId = await recordAudit({
+    missionId,
+    subjectType: "mission_environment",
+    subjectId: missionId,
+    actor: { type: "user", id: currentUserProfile(c).userId },
+    action: "mission_environment_updated",
+    diffSummary: `vars:${Object.keys(envVars).join(",")}`,
+  });
+  return c.json({ actionId: crypto.randomUUID(), status: "completed", environment: maskedEnvironment(updated.stateJson.environment), auditEventId });
 });
 
 app.get("/api/public/missions/:id/agents", async (c) => {
@@ -1915,7 +2071,9 @@ app.post("/api/public/missions/:id/agent-instances/:instanceId/direct-thread", a
 app.get("/api/public/missions/:id/workroom", async (c) => {
   const denied = await assertMissionAccess(c);
   if (denied) return denied;
-  const mission = await reconcileMissionSandboxRefs(assertSafeId(c.req.param("id"), "mission_id"));
+  const missionId = assertSafeId(c.req.param("id"), "mission_id");
+  const mission = await getMissionWithRuntimeSandboxes(missionId);
+  reconcileMissionSandboxRefsInBackground(missionId);
   const instanceRows = await loadMissionAgentRows(mission.id);
   const cardRows = await db.select().from(workCards).where(eq(workCards.missionId, mission.id)).orderBy(asc(workCards.createdAt));
   const workCardsJson = cardRows.map(workCardJson);
@@ -1971,19 +2129,33 @@ app.get("/api/public/missions/:id/workroom", async (c) => {
 app.get("/api/public/missions/:id/sandbox/files", async (c) => {
   const denied = await assertMissionAccess(c);
   if (denied) return denied;
-  const mission = await reconcileMissionSandboxRefs(assertSafeId(c.req.param("id"), "mission_id"));
+  const missionId = assertSafeId(c.req.param("id"), "mission_id");
+  const mission = await getMissionWithRuntimeSandboxes(missionId);
+  reconcileMissionSandboxRefsInBackground(missionId);
   const path = normalizeWorkspacePath(c.req.query("path"), "");
-  const listed = await e2b.listFiles(mission.stateJson.sharedSandbox, path);
-  return c.json({ path, state: listed.state === "running" ? "running" : "none", entries: listed.entries });
+  try {
+    const listed = await e2b.listFiles(mission.stateJson.sharedSandbox, path);
+    return c.json({ path, state: listed.state === "running" ? "running" : "none", entries: listed.entries });
+  } catch (error) {
+    const code = error instanceof Error ? error.message : "error.sandbox.files_failed";
+    return c.json({ path, state: "none", entries: [], error: { code, messageKey: code } }, 200);
+  }
 });
 
 app.get("/api/public/missions/:id/sandbox/file", async (c) => {
   const denied = await assertMissionAccess(c);
   if (denied) return denied;
-  const mission = await reconcileMissionSandboxRefs(assertSafeId(c.req.param("id"), "mission_id"));
+  const missionId = assertSafeId(c.req.param("id"), "mission_id");
+  const mission = await getMissionWithRuntimeSandboxes(missionId);
+  reconcileMissionSandboxRefsInBackground(missionId);
   const path = normalizeWorkspacePath(c.req.query("path"), "README.md");
-  const read = await e2b.readWorkspaceFile(mission.stateJson.sharedSandbox, path, FILE_TEXT_CAP_BYTES);
-  return c.json({ path, state: read.state === "running" ? "running" : "none", content: read.content });
+  try {
+    const read = await e2b.readWorkspaceFile(mission.stateJson.sharedSandbox, path, FILE_TEXT_CAP_BYTES);
+    return c.json({ path, state: read.state === "running" ? "running" : "none", content: read.content });
+  } catch (error) {
+    const code = error instanceof Error ? error.message : "error.sandbox.file_failed";
+    return c.json({ path, state: "none", content: "", error: { code, messageKey: code } }, 200);
+  }
 });
 
 app.get("/api/public/missions/:id/chat", async (c) => {

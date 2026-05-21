@@ -10,10 +10,13 @@ import type {
   AgentWorkCardList,
   MissionChatMessage,
   MissionEvent,
+  MissionEnvironment,
+  MissionEnvironmentVariable,
   MissionFileContent,
   MissionSpendBreakdown,
   MissionSummary,
   Session,
+  UpdateAgentInput,
   WhitelistEntry,
   WorkroomReadModel,
 } from './types';
@@ -179,6 +182,11 @@ type RawMissionFileEntry = {
   updatedAt?: string;
 };
 
+type RawMissionEnvironment = Partial<MissionEnvironment> & {
+  variables?: MissionEnvironmentVariable[] | Record<string, string | { value?: string; masked?: boolean; isSecret?: boolean; updatedAt?: string }>;
+  env?: Record<string, string>;
+};
+
 function workspaceRelativePath(path: string) {
   return path.replace(/^\/?workspace\/?/, '').replace(/^\/+/, '');
 }
@@ -199,6 +207,27 @@ function normalizeMissionChatMessage(row: RawMissionChatMessage): MissionChatMes
   };
 }
 
+function normalizeMissionEnvironment(row: RawMissionEnvironment | undefined): MissionEnvironment {
+  const rawVariables = row?.variables ?? row?.env ?? {};
+  const variables = Array.isArray(rawVariables)
+    ? rawVariables
+    : Object.entries(rawVariables).map(([key, value]) => {
+      if (typeof value === 'object' && value) return { key, ...(value as { value?: string; masked?: boolean; isSecret?: boolean; updatedAt?: string }) };
+      return { key, value: String(value), masked: true };
+    });
+  return {
+    versionId: row?.versionId,
+    updatedAt: row?.updatedAt,
+    variables: variables.map((item) => ({
+      key: item.key,
+      value: item.value,
+      masked: item.masked ?? item.isSecret ?? true,
+      isSecret: item.isSecret,
+      updatedAt: item.updatedAt,
+    })),
+  };
+}
+
 export const api = {
   missions: async () => {
     const response = await request<{ items: Array<MissionSummary & Record<string, unknown>> }>('/missions');
@@ -206,6 +235,7 @@ export const api = {
   },
   mission: (missionId: string) => request<MissionSummary>(`/missions/${missionId}`),
   workroom: (missionId: string) => request<WorkroomReadModel>(`/missions/${missionId}/workroom`),
+  deleteMission: (missionId: string) => request<{ status?: string }>(`/missions/${missionId}`, { method: 'DELETE' }),
   createMission: (input: CreateMissionInput) => request<{ missionId: string; ownerInstanceId?: string | null }>('/missions', {
     method: 'POST',
     body: JSON.stringify({
@@ -231,6 +261,10 @@ export const api = {
     method: 'POST',
     body: JSON.stringify(input),
   }),
+  updateAgent: (agentId: string, input: UpdateAgentInput) => request<{ agent?: AgentLibraryItem; status?: string }>(`/agents/${agentId}`, {
+    method: 'PATCH',
+    body: JSON.stringify(input),
+  }),
   recruitAgentToMission: (missionId: string, agentId: string) => request<{ instanceId?: string; status?: string }>(`/missions/${missionId}/agent-instances`, {
     method: 'POST',
     body: JSON.stringify({ agentId }),
@@ -239,6 +273,11 @@ export const api = {
   pauseMissionSandbox: (missionId: string) => request<{ status?: string }>(`/missions/${missionId}/sandbox/pause`, { method: 'POST', body: '{}' }),
   startAgentSandbox: (missionId: string, instanceId: string) => request<{ status?: string }>(`/missions/${missionId}/agent-instances/${instanceId}/sandbox/start`, { method: 'POST', body: '{}' }),
   pauseAgentSandbox: (missionId: string, instanceId: string) => request<{ status?: string }>(`/missions/${missionId}/agent-instances/${instanceId}/sandbox/pause`, { method: 'POST', body: '{}' }),
+  missionEnvironment: async (missionId: string) => normalizeMissionEnvironment(await optional<RawMissionEnvironment>(`/missions/${missionId}/environment`, { variables: [] })),
+  updateMissionEnvironment: async (missionId: string, variables: MissionEnvironmentVariable[]) => normalizeMissionEnvironment(await request<RawMissionEnvironment>(`/missions/${missionId}/environment`, {
+    method: 'PUT',
+    body: JSON.stringify({ variables }),
+  })),
   missionEvents: (missionId: string) => optional<{ items: MissionEvent[] }>(`/missions/${missionId}/events`, { items: [] }),
   missionFiles: async (missionId: string, path = '') => {
     const response = await request<{ path: string; state?: string; entries?: RawMissionFileEntry[] }>(`/missions/${missionId}/sandbox/files?path=${encodeURIComponent(workspaceRelativePath(path))}`);

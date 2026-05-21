@@ -13,6 +13,14 @@ type AgentForm = {
   avatarSeed: string;
 };
 
+type AgentEditForm = {
+  displayName: string;
+  role: string;
+  soul: string;
+  identity: string;
+  skills: string;
+};
+
 const ROLE_FILTERS = ['all', 'pm', 'research', 'frontend', 'backend'] as const;
 
 function initials(name: string) {
@@ -47,7 +55,9 @@ export function AgentLibrary() {
   const [filter, setFilter] = useState<(typeof ROLE_FILTERS)[number]>('all');
   const [createOpen, setCreateOpen] = useState(false);
   const [recruitAgent, setRecruitAgent] = useState<AgentLibraryItem | null>(null);
+  const [editAgent, setEditAgent] = useState<AgentLibraryItem | null>(null);
   const [form, setForm] = useState<AgentForm>({ displayName: '', role: 'agent', avatarSeed: '' });
+  const [editForm, setEditForm] = useState<AgentEditForm>({ displayName: '', role: '', soul: '', identity: '', skills: '' });
   const [error, setError] = useState<string | null>(null);
   const createAgentMutation = useMutation({
     mutationFn: api.createAgent,
@@ -67,7 +77,14 @@ export function AgentLibrary() {
       setRecruitAgent(null);
     },
   });
-  const busy = createAgentMutation.isPending || recruitMutation.isPending;
+  const updateAgentMutation = useMutation({
+    mutationFn: ({ agentId, input }: { agentId: string; input: Parameters<typeof api.updateAgent>[1] }) => api.updateAgent(agentId, input),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: queryKeys.agents });
+      setEditAgent(null);
+    },
+  });
+  const busy = createAgentMutation.isPending || recruitMutation.isPending || updateAgentMutation.isPending;
 
   const rows = useMemo(() => {
     return agents.filter((agent) => filter === 'all' || agentRole(agent).toLowerCase().includes(filter));
@@ -97,6 +114,37 @@ export function AgentLibrary() {
     }
   }
 
+  function openEdit(agent: AgentLibraryItem) {
+    setEditAgent(agent);
+    setEditForm({
+      displayName: agent.displayName,
+      role: agentRole(agent),
+      soul: agent.soul ?? '',
+      identity: agent.identity ?? agent.globalIdentity?.baseConfigSummary ?? '',
+      skills: (agent.skills ?? []).join(', '),
+    });
+  }
+
+  async function submitEdit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!editAgent) return;
+    setError(null);
+    try {
+      await updateAgentMutation.mutateAsync({
+        agentId: editAgent.id,
+        input: {
+          displayName: editForm.displayName.trim(),
+          role: editForm.role.trim(),
+          soul: editForm.soul.trim(),
+          identity: editForm.identity.trim(),
+          skills: editForm.skills.split(',').map((skill) => skill.trim()).filter(Boolean),
+        },
+      });
+    } catch (updateError) {
+      setError(updateError instanceof Error ? updateError.message : t('agents.edit.error'));
+    }
+  }
+
   return (
     <Shell title={t('agents.title')} meta={<span className="mp-muted mp-mono">{t('agents.endpoint')}</span>} actions={<button className="mp-button dark" onClick={() => setCreateOpen(true)}>{t('agents.new')}</button>}>
       <div className="mp-head">
@@ -112,7 +160,7 @@ export function AgentLibrary() {
 
       {rows.length ? (
         <div className="mp-agent-grid">
-          {rows.map((agent) => <AgentCard key={agent.id} agent={agent} onRecruit={() => setRecruitAgent(agent)} />)}
+          {rows.map((agent) => <AgentCard key={agent.id} agent={agent} onEdit={() => openEdit(agent)} onRecruit={() => setRecruitAgent(agent)} />)}
         </div>
       ) : (
         <EmptyCta title={t('agents.empty.title')} body={t('agents.empty.body')} action={t('agents.empty.action')} onAction={() => setCreateOpen(true)} />
@@ -154,11 +202,32 @@ export function AgentLibrary() {
           </div>
         </div>
       ) : null}
+
+      {editAgent ? (
+        <div className="mp-modal-backdrop" role="presentation">
+          <form className="mp-modal" onSubmit={submitEdit}>
+            <div className="mp-section-title">
+              <div>
+                <div className="mp-label">{t('agents.edit.endpoint')}</div>
+                <h2>{t('agents.edit.title', { name: editAgent.displayName })}</h2>
+              </div>
+              <button type="button" className="mp-button" onClick={() => setEditAgent(null)}>{t('common.cancel')}</button>
+            </div>
+            <label>{t('agents.modal.displayName')}<input value={editForm.displayName} onChange={(event) => setEditForm((current) => ({ ...current, displayName: event.target.value }))} required /></label>
+            <label>{t('agents.modal.role')}<input value={editForm.role} onChange={(event) => setEditForm((current) => ({ ...current, role: event.target.value }))} required /></label>
+            <label>{t('agents.edit.soul')}<textarea value={editForm.soul} onChange={(event) => setEditForm((current) => ({ ...current, soul: event.target.value }))} /></label>
+            <label>{t('agents.edit.identity')}<textarea value={editForm.identity} onChange={(event) => setEditForm((current) => ({ ...current, identity: event.target.value }))} /></label>
+            <label>{t('agents.edit.skills')}<input value={editForm.skills} onChange={(event) => setEditForm((current) => ({ ...current, skills: event.target.value }))} placeholder={t('agents.edit.skillsPlaceholder')} /></label>
+            {error ? <div className="mp-denied">{error}</div> : null}
+            <button className="mp-button dark" disabled={busy}>{busy ? t('common.saving') : t('common.save')}</button>
+          </form>
+        </div>
+      ) : null}
     </Shell>
   );
 }
 
-function AgentCard({ agent, onRecruit }: { agent: AgentLibraryItem; onRecruit: () => void }) {
+function AgentCard({ agent, onEdit, onRecruit }: { agent: AgentLibraryItem; onEdit: () => void; onRecruit: () => void }) {
   const { t } = useTranslation();
   const role = agentRole(agent);
   const skills = agent.skills ?? [];
@@ -179,6 +248,7 @@ function AgentCard({ agent, onRecruit }: { agent: AgentLibraryItem; onRecruit: (
       <AgentTaskList agentId={agent.id} compact />
       <div className="mp-row-tight">
         <button className="mp-button dark" onClick={onRecruit}>{t('agents.recruit.action')}</button>
+        <button className="mp-button" onClick={onEdit}>{t('agents.edit.action')}</button>
       </div>
       <div className="mp-muted mp-mono mp-small">{agent.updatedAt ?? agent.createdAt ?? agent.id}</div>
     </article>

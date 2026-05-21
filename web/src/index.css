@@ -216,11 +216,10 @@ strong { font-weight: 650; }
 .mp-list { padding: 0; overflow: hidden; }
 .mp-mission-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 270px;
+  grid-template-columns: minmax(0, 1fr) minmax(86px, auto);
   gap: 18px;
   width: 100%;
   text-align: left;
-  border: 0;
   background: transparent;
   color: inherit;
   padding: 18px;
@@ -229,6 +228,19 @@ strong { font-weight: 650; }
 
 .mp-mission-row:hover { background: #fbf8f2; }
 .mp-mission-row:last-child { border-bottom: 0; }
+.mp-mission-row-main {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 270px;
+  gap: 18px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  padding: 0;
+  min-width: 0;
+  font: inherit;
+}
+.mp-row-delete { align-self: center; }
 .mp-row-tight, .mp-facts {
   display: flex;
   gap: 8px;
@@ -767,6 +779,113 @@ strong { font-weight: 650; }
   padding: 5px 0;
 }
 
+.mp-workcard-item.status-running {
+  background: #fbf8f2;
+  margin: 0 -8px;
+  padding: 13px 8px;
+  border-radius: 8px;
+}
+
+.mp-workcard-flow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.mp-flow-step {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 4px 8px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.2;
+  background: #fffdf9;
+}
+
+.mp-flow-step.done {
+  color: #365c39;
+  border-color: #c8dac4;
+  background: #f2f7f0;
+}
+
+.mp-flow-step.active {
+  color: var(--paper);
+  border-color: var(--ink);
+  background: var(--ink);
+}
+
+.mp-flow-step.failed {
+  color: var(--danger);
+  border-color: #d8a99b;
+  background: #fff7f4;
+}
+
+.mp-env-vars {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+  display: grid;
+  gap: 10px;
+  background: #fffdf9;
+}
+
+.mp-env-var-list {
+  display: grid;
+  gap: 6px;
+}
+
+.mp-env-var-row,
+.mp-env-var-form {
+  display: grid;
+  grid-template-columns: minmax(120px, .35fr) minmax(0, 1fr) minmax(78px, auto);
+  gap: 8px;
+  align-items: center;
+}
+
+.mp-env-var-form input,
+.mp-agent-config-form input,
+.mp-agent-config-form textarea {
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  padding: 9px 10px;
+  background: white;
+  color: var(--ink);
+  min-height: 40px;
+  min-width: 0;
+  width: 100%;
+}
+
+.mp-agent-config {
+  display: grid;
+  gap: 10px;
+}
+
+.mp-agent-config-form {
+  display: grid;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px;
+  background: #fffdf9;
+}
+
+.mp-skeleton-page,
+.mp-skeleton-panel {
+  display: grid;
+  gap: 12px;
+}
+
+.mp-skeleton-line {
+  width: 54%;
+  height: 14px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #eee7dc, #fbf8f2, #eee7dc);
+}
+
+.mp-skeleton-line.wide { width: min(520px, 100%); height: 24px; }
+.mp-skeleton-line.short { width: 32%; }
+
 .mp-private-line,
 .mp-activity-row,
 .mp-file-row {
@@ -1268,7 +1387,7 @@ strong { font-weight: 650; }
   .mp-content { padding: 18px 14px; }
   .mp-topbar { padding: 8px 14px; flex-wrap: wrap; align-items: flex-start; }
   .mp-topbar-actions { margin-left: 0; width: 100%; }
-  .mp-mission-row, .mp-grid.two, .mp-grid.three, .mp-row, .mp-event, .mp-workcard-row, .mp-workcard-item, .mp-agent-task-row, .mp-agent-sandbox-row, .mp-private-line, .mp-plan-cta, .mp-activity-row, .mp-growth-row, .mp-growth-rollback-row, .mp-admin-add-row, .mp-direct-layout, .mp-workroom-layout, .mp-env-status { grid-template-columns: 1fr; }
+  .mp-mission-row, .mp-mission-row-main, .mp-grid.two, .mp-grid.three, .mp-row, .mp-event, .mp-workcard-row, .mp-workcard-item, .mp-agent-task-row, .mp-agent-sandbox-row, .mp-private-line, .mp-plan-cta, .mp-activity-row, .mp-growth-row, .mp-growth-rollback-row, .mp-admin-add-row, .mp-direct-layout, .mp-workroom-layout, .mp-env-status, .mp-env-var-row, .mp-env-var-form { grid-template-columns: 1fr; }
   .mp-metrics, .mp-sandbox-grid, .mp-sandbox-control-grid, .mp-agent-grid, .mp-growth-candidate-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .mp-env-status-line { justify-content: flex-start; }
   .mp-chat-panel, .mp-direct-chat { min-height: 520px; }

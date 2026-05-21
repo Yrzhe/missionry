@@ -14,6 +14,8 @@ const eventTypes = new Set([
   'work_card_completed',
   'work_card_failed',
   'work_card_updated',
+  'mission_deleted',
+  'mission_environment_updated',
   'mission_spend_updated',
   'mission_chat_message_sent',
   'message',
@@ -58,6 +60,9 @@ export function subscribeMissionEvents(missionId: string) {
       const resolvedMissionId = event.missionId ?? missionId;
       upsertEvent(resolvedMissionId, { ...event, type: event.type || type, missionId: resolvedMissionId });
       invalidateMission(resolvedMissionId);
+      if (event.type.startsWith('work_card_') || event.type === 'mission_environment_updated') {
+        void queryClient.invalidateQueries({ queryKey: ['agents'] });
+      }
       if (shouldRefreshChat(event)) {
         void queryClient.invalidateQueries({ queryKey: queryKeys.missionChat(resolvedMissionId) });
       }

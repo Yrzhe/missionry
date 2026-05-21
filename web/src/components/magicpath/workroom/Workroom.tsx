@@ -9,6 +9,7 @@ import type {
   CreateWorkCardInput,
   MissionAgentRow,
   MissionChatMessage,
+  MissionEnvironmentVariable,
   MissionEvent,
   MissionFileContent,
   MissionFileEntry,
@@ -129,6 +130,13 @@ export function Workroom() {
   const directThreadMutation = useMutation({
     mutationFn: (instanceId: string) => api.createDirectThread(id ?? '', instanceId),
   });
+  const deleteMissionMutation = useMutation({
+    mutationFn: () => api.deleteMission(id ?? ''),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: queryKeys.missions });
+      navigate('/missions', { replace: true });
+    },
+  });
 
   async function generatePlan() {
     if (!id) return;
@@ -218,6 +226,16 @@ export function Workroom() {
     }
   }
 
+  async function deleteMission() {
+    if (!id || !workroom || !window.confirm(t('missions.delete.confirm', { title: workroom.mission.title }))) return;
+    setError(null);
+    try {
+      await deleteMissionMutation.mutateAsync();
+    } catch (deleteError) {
+      setError(deleteError instanceof Error ? deleteError.message : t('missions.delete.error'));
+    }
+  }
+
   function insertMention(row: MissionAgentRow) {
     const handle = row.agent.displayName.toLowerCase().replace(/[\s_]+/g, '-');
     setChatBody((current) => current.replace(/@[\w.-]*$/, `@${handle} `));
@@ -226,7 +244,7 @@ export function Workroom() {
   if (!workroom && workroomQuery.isLoading) {
     return (
       <Shell title={t('workroom.route')} meta={<span className="mp-muted">{t('workroom.loadingMeta')}</span>}>
-        <div className="mp-empty"><h2>{t('common.loading')}</h2><p>{t('workroom.loadingMeta')}</p></div>
+        <WorkroomSkeleton />
       </Shell>
     );
   }
@@ -250,7 +268,7 @@ export function Workroom() {
     <Shell
       title={t('workroom.route')}
       meta={<span className="mp-muted">{t('workroom.meta')}</span>}
-      actions={<button className="mp-button dark" onClick={() => setModalOpen(true)}>{t('workroom.newCard')}</button>}
+      actions={<div className="mp-row-tight"><button className="mp-button" onClick={() => setModalOpen(true)}>{t('workroom.newCard')}</button><button className="mp-button danger" disabled={deleteMissionMutation.isPending} onClick={() => void deleteMission()}>{deleteMissionMutation.isPending ? t('common.saving') : t('common.delete')}</button></div>}
     >
       <div className="mp-head">
         <div>
@@ -285,6 +303,7 @@ export function Workroom() {
             <div className="mp-label">{t('workroom.environment.title')}</div>
             <h2>{t('workroom.environment.heading')}</h2>
             <p className="mp-muted">{t('workroom.environment.lifecycle')}</p>
+            <span className="mp-chip">{t('workroom.environment.auto')}</span>
           </div>
           <div className="mp-env-status-line">
             <span className="mp-chip dark"><span className={`mp-status-dot ${workroom.missionSandbox.state}`} />{t(`status.${workroom.missionSandbox.state}`)}</span>
@@ -295,6 +314,7 @@ export function Workroom() {
             </div>
           </div>
         </div>
+        <MissionEnvironmentPanel missionId={workroom.mission.id} />
         <FileBrowser missionId={workroom.mission.id} />
       </section>
 
@@ -382,6 +402,19 @@ export function Workroom() {
   );
 }
 
+function WorkroomSkeleton() {
+  const { t } = useTranslation();
+  return (
+    <div className="mp-skeleton-page">
+      <div className="mp-skeleton-line wide" />
+      <div className="mp-metrics">
+        {[0, 1, 2, 3].map((item) => <div className="mp-card mp-stat" key={item}><div className="mp-skeleton-line" /><div className="mp-skeleton-line short" /></div>)}
+      </div>
+      <section className="mp-card mp-skeleton-panel"><h2>{t('common.loading')}</h2><p className="mp-muted">{t('workroom.loadingMeta')}</p></section>
+    </div>
+  );
+}
+
 function Stat({ label, value, sub }: { label: string; value: string; sub: string }) {
   return <div className="mp-card mp-stat"><div className="mp-label">{label}</div><div className="mp-value">{value}</div><div className="mp-muted mp-small">{sub}</div></div>;
 }
@@ -389,21 +422,22 @@ function Stat({ label, value, sub }: { label: string; value: string; sub: string
 function PlanTab({ workroom, isGeneratingPlan, activeWorkCardId, onGeneratePlan, onStartWorkCard, onNewCard }: { workroom: WorkroomReadModel; isGeneratingPlan: boolean; activeWorkCardId: string | null; onGeneratePlan: () => void; onStartWorkCard: (workCardId: string) => void; onNewCard: () => void }) {
   const { t } = useTranslation();
   const queuePositions = useMemo(() => queuePositionByCard(workroom.workCards), [workroom.workCards]);
+  const hasCards = workroom.workCards.length > 0;
   return (
     <div className="mp-tab-panel">
       <section className="mp-plan-cta">
         <div>
-          <strong>{t('workroom.generatePlan.title')}</strong>
-          <p className="mp-muted">{t('workroom.generatePlan.body')}</p>
+          <strong>{hasCards ? t('workroom.autonomy.title') : t('workroom.autonomy.waitingTitle')}</strong>
+          <p className="mp-muted">{hasCards ? t('workroom.autonomy.body') : t('workroom.autonomy.waitingBody')}</p>
         </div>
-        <button className="mp-button dark" disabled={isGeneratingPlan || !workroom.agentInstances.length} onClick={onGeneratePlan}>{isGeneratingPlan ? t('common.saving') : t('workroom.generatePlan.action')}</button>
+        <button className="mp-button" disabled={isGeneratingPlan || !workroom.agentInstances.length} onClick={onGeneratePlan}>{isGeneratingPlan ? t('common.saving') : t('workroom.generatePlan.regenerate')}</button>
       </section>
       <div className="mp-section-title">
         <strong>{t('workroom.cards')}</strong>
         <button className="mp-button" onClick={onNewCard}>{t('workroom.newCard')}</button>
       </div>
       <div className="mp-workcard-list">
-        {workroom.workCards.length ? workroom.workCards.map((card) => <WorkCardRow key={card.id} card={card} queuePosition={queuePositions.get(card.id)} workroom={workroom} isStarting={activeWorkCardId === card.id} onStart={() => onStartWorkCard(card.id)} />) : <EmptyCta title={t('workroom.emptyCards.title')} body={t('workroom.emptyCards.body')} action={t('workroom.generatePlan.action')} onAction={onGeneratePlan} />}
+        {workroom.workCards.length ? workroom.workCards.map((card) => <WorkCardRow key={card.id} card={card} queuePosition={queuePositions.get(card.id)} workroom={workroom} isStarting={activeWorkCardId === card.id} onStart={() => onStartWorkCard(card.id)} />) : <div className="mp-empty mp-empty-cta"><h2>{t('workroom.autonomy.waitingTitle')}</h2><p>{t('workroom.autonomy.waitingBody')}</p></div>}
       </div>
     </div>
   );
@@ -480,11 +514,13 @@ function FileBrowser({ missionId, expanded = false }: { missionId: string; expan
   const filesQuery = useQuery({
     queryKey: queryKeys.missionFiles(missionId, path),
     queryFn: () => api.missionFiles(missionId, path),
+    retry: 1,
   });
   const contentQuery = useQuery({
     queryKey: queryKeys.missionFileContent(missionId, selectedPath ?? ''),
     queryFn: () => api.missionFileContent(missionId, selectedPath ?? ''),
     enabled: selectedPath !== null,
+    retry: 1,
   });
   const entries: MissionFileEntry[] = filesQuery.data?.items ?? [];
   const selected: MissionFileContent | undefined = contentQuery.data;
@@ -507,7 +543,7 @@ function FileBrowser({ missionId, expanded = false }: { missionId: string; expan
         </div>
         {path ? <button className="mp-button" onClick={() => { setPath(ROOT_PATH); setSelectedPath(null); }}>{t('workroom.files.root')}</button> : null}
       </div>
-      {filesQuery.isError ? <div className="mp-denied">{t('workroom.files.error')} · {filesQuery.error instanceof Error ? filesQuery.error.message : ''}</div> : null}
+      {filesQuery.isError ? <div className="mp-denied">{t('workroom.files.error')} · {filesQuery.error instanceof Error ? filesQuery.error.message : ''}<button className="mp-button" onClick={() => void filesQuery.refetch()}>{t('common.retry')}</button></div> : null}
       <div className="mp-file-grid">
         <div className="mp-file-list">
           {filesQuery.isLoading ? <div className="mp-muted">{t('common.loading')}</div> : null}
@@ -517,7 +553,7 @@ function FileBrowser({ missionId, expanded = false }: { missionId: string; expan
               <strong>{entry.name}</strong>
               <span className="mp-muted">{entry.size ? `${Math.round(entry.size / 1024)} KB` : ''}</span>
             </button>
-          )) : <div className="mp-empty"><p>{t('workroom.files.empty')}</p></div>}
+          )) : !filesQuery.isLoading && !filesQuery.isError ? <div className="mp-empty"><p>{t('workroom.files.empty')}</p></div> : null}
         </div>
         <div className="mp-file-preview">
           {selected ? (
@@ -525,10 +561,79 @@ function FileBrowser({ missionId, expanded = false }: { missionId: string; expan
               <div className="mp-label">{selected.path}</div>
               {selected.path.endsWith('.md') || selected.mimeType?.includes('markdown') ? <Markdown value={selected.content} /> : <pre>{selected.content}</pre>}
             </>
-          ) : contentQuery.isError ? <p className="mp-denied">{t('workroom.files.previewError')} · {contentQuery.error instanceof Error ? contentQuery.error.message : ''}</p> : contentQuery.isLoading ? <p className="mp-muted">{t('common.loading')}</p> : <p className="mp-muted">{t('workroom.files.select')}</p>}
+          ) : contentQuery.isError ? <p className="mp-denied">{t('workroom.files.previewError')} · {contentQuery.error instanceof Error ? contentQuery.error.message : ''} <button className="mp-button" onClick={() => void contentQuery.refetch()}>{t('common.retry')}</button></p> : contentQuery.isLoading ? <p className="mp-muted">{t('common.loading')}</p> : <p className="mp-muted">{t('workroom.files.select')}</p>}
         </div>
       </div>
     </div>
+  );
+}
+
+function MissionEnvironmentPanel({ missionId }: { missionId: string }) {
+  const { t } = useTranslation();
+  const [key, setKey] = useState('');
+  const [value, setValue] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const environmentQuery = useQuery({
+    queryKey: queryKeys.missionEnvironment(missionId),
+    queryFn: () => api.missionEnvironment(missionId),
+  });
+  const variables = environmentQuery.data?.variables ?? [];
+  const updateMutation = useMutation({
+    mutationFn: (next: MissionEnvironmentVariable[]) => api.updateMissionEnvironment(missionId, next),
+    onSuccess: async () => {
+      setKey('');
+      setValue('');
+      await environmentQuery.refetch();
+    },
+  });
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!key.trim()) return;
+    setError(null);
+    try {
+      const next = [...variables.filter((item) => item.key !== key.trim()), { key: key.trim(), value, masked: true, isSecret: true }];
+      await updateMutation.mutateAsync(next);
+    } catch (updateError) {
+      setError(updateError instanceof Error ? updateError.message : t('workroom.environment.updateError'));
+    }
+  }
+
+  async function remove(name: string) {
+    setError(null);
+    try {
+      await updateMutation.mutateAsync(variables.filter((item) => item.key !== name));
+    } catch (updateError) {
+      setError(updateError instanceof Error ? updateError.message : t('workroom.environment.updateError'));
+    }
+  }
+
+  return (
+    <section className="mp-env-vars">
+      <div className="mp-section-title">
+        <div>
+          <strong>{t('workroom.environment.variables')}</strong>
+          <p className="mp-muted">{t('workroom.environment.variablesHint')}</p>
+        </div>
+        {environmentQuery.isFetching ? <span className="mp-muted">{t('common.loading')}</span> : null}
+      </div>
+      {environmentQuery.isError ? <div className="mp-denied">{t('workroom.environment.loadError')}<button className="mp-button" onClick={() => void environmentQuery.refetch()}>{t('common.retry')}</button></div> : null}
+      <div className="mp-env-var-list">
+        {variables.length ? variables.map((item) => (
+          <div className="mp-env-var-row" key={item.key}>
+            <strong>{item.key}</strong>
+            <span className="mp-muted">{item.masked !== false ? t('workroom.environment.masked') : item.value ?? ''}</span>
+            <button className="mp-button danger" disabled={updateMutation.isPending} onClick={() => void remove(item.key)}>{t('common.delete')}</button>
+          </div>
+        )) : <div className="mp-muted mp-small">{t('workroom.environment.empty')}</div>}
+      </div>
+      <form className="mp-env-var-form" onSubmit={submit}>
+        <input value={key} onChange={(event) => setKey(event.target.value)} placeholder={t('workroom.environment.keyPlaceholder')} />
+        <input value={value} onChange={(event) => setValue(event.target.value)} placeholder={t('workroom.environment.valuePlaceholder')} />
+        <button className="mp-button" disabled={updateMutation.isPending || !key.trim()}>{updateMutation.isPending ? t('common.saving') : t('workroom.environment.add')}</button>
+      </form>
+      {error ? <div className="mp-denied">{error}</div> : null}
+    </section>
   );
 }
 
@@ -545,7 +650,7 @@ function AgentSandboxLine({ row, isBusy, isOpeningChat, onStart, onPause, onOpen
       <span className="mp-muted">{row.role}</span>
       <div className="mp-row-tight">
         <button className="mp-button" disabled={isOpeningChat} onClick={onOpenChat}>{isOpeningChat ? t('common.saving') : t('workroom.openChat')}</button>
-        {canStart ? <button className="mp-button" disabled={isBusy} onClick={onStart}>{isBusy ? t('common.saving') : t('workroom.startSandbox')}</button> : null}
+        {canStart ? <button className="mp-button" disabled={isBusy} onClick={onStart}>{isBusy ? t('common.saving') : t('workroom.startSandbox.advanced')}</button> : null}
         {canPause ? <button className="mp-button" disabled={isBusy} onClick={onPause}>{isBusy ? t('common.saving') : t('workroom.pauseSandbox')}</button> : null}
       </div>
     </div>
@@ -573,13 +678,17 @@ function WorkCardRow({ card, queuePosition, workroom, isStarting, onStart }: { c
   const { t } = useTranslation();
   const assignee = workroom.agentInstances.find((row) => row.instance.id === card.assigneeInstanceId);
   const tier = card.sandboxAffinity?.tier ?? 'tier0';
-  const canStart = ['proposed', 'approved', 'queued', 'pending', 'failed'].includes(card.status);
+  const canRerun = ['done', 'failed'].includes(card.status);
+  const flow = workCardFlow(card.status);
   return (
-    <article className="mp-workcard-item">
+    <article className={`mp-workcard-item status-${card.status}`}>
       <div className="mp-workcard-main">
         <div className="mp-section-title">
           <strong>{card.title}</strong>
           <span className={`mp-chip ${card.status === 'running' ? 'dark' : ''}`}>{card.status === 'queued' && queuePosition ? t('workroom.queuePosition', { position: queuePosition }) : t(`status.${card.status}`, card.status)}</span>
+        </div>
+        <div className="mp-workcard-flow" aria-label={t('workroom.flow.label')}>
+          {(['queued', 'running', 'done'] as const).map((step) => <span key={step} className={`mp-flow-step ${flow[step]}`}>{t(`status.${step}`)}</span>)}
         </div>
         <Markdown value={card.description ?? t('workroom.cardNoDescription')} compact />
       </div>
@@ -587,10 +696,21 @@ function WorkCardRow({ card, queuePosition, workroom, isStarting, onStart }: { c
         <Info label={t('workroom.assignee')} value={assignee?.agent.displayName ?? '-'} />
         <Info label={t('workroom.affinity')} value={t(tier === 'mission' ? 'workroom.tierMission' : tier === 'private' ? 'workroom.tierPrivate' : 'workroom.tier0')} />
         <Info label={t('workroom.cost')} value={money(card.cost?.spentCents)} />
-        {canStart ? <button className="mp-button dark" disabled={isStarting} onClick={onStart}>{isStarting ? t('common.saving') : t('workroom.startCard')}</button> : null}
+        {canRerun ? <button className="mp-button" disabled={isStarting} onClick={onStart}>{isStarting ? t('common.saving') : t('workroom.rerunCard')}</button> : null}
       </div>
     </article>
   );
+}
+
+function workCardFlow(status: string) {
+  const order = ['proposed', 'approved', 'pending', 'queued', 'running', 'done'];
+  const normalized = status === 'failed' ? 'done' : status;
+  const index = order.indexOf(normalized);
+  return {
+    queued: index >= order.indexOf('queued') ? 'done' : index >= 0 ? 'next' : 'next',
+    running: status === 'running' ? 'active' : index > order.indexOf('running') ? 'done' : 'next',
+    done: status === 'done' ? 'done' : status === 'failed' ? 'failed' : 'next',
+  };
 }
 
 function Info({ label, value }: { label: string; value: string }) {
