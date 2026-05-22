@@ -2,12 +2,14 @@ import { createOpenAI } from "@ai-sdk/openai";
 import { db, storage, secret, vars, ctx } from "edgespark";
 import { auth } from "edgespark/http";
 import { and, asc, desc, eq, inArray, isNull, lte, ne, sql } from "drizzle-orm";
-import { generateText, streamText, stepCountIs } from "ai";
+import { generateText, streamText, stepCountIs, tool } from "ai";
+import { z } from "zod";
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import { ensureAgentFiles, ensureAgentInstanceFiles, loadAgentBootFiles, loadSkill, buildMemoryContext, appendAgentMemory, appendUserProfile, loadAgentMemory, loadUserProfile, setAgentMemory, setUserProfile } from "./agents/files";
 import { esSystemAuthUser } from "./__generated__/sys_schema";
 import {
+  adminChatMessages,
   agentInstances,
   agents,
   agentResponseCursors,
@@ -2376,6 +2378,108 @@ app.put("/api/public/me/memory-profile", async (c) => {
   const userId = currentUserProfile(c).userId;
   await setUserProfile(userId, String(body.content ?? ""));
   return c.json({ status: "completed", profile: await loadUserProfile(userId) });
+});
+
+// ── Admin / Concierge agent (control-plane only) ──────────────────────────────
+async function adminAgentsOverview() {
+  const agentRows = await db.select().from(agents).orderBy(asc(agents.createdAt)) as Array<typeof agents.$inferSelect>;
+  const running = await db
+    .select({ agentId: agentInstances.agentId, missionId: workCards.missionId, title: workCards.title })
+    .from(workCards)
+    .innerJoin(agentInstances, eq(agentInstances.id, workCards.assigneeInstanceId))
+    .where(eq(workCards.status, "running")) as Array<{ agentId: string; missionId: string; title: string }>;
+  const memberships = await db
+    .select({ agentId: agentInstances.agentId, missionId: agentInstances.missionId })
+    .from(agentInstances) as Array<{ agentId: string; missionId: string }>;
+  return agentRows.map((a) => ({
+    id: a.id,
+    name: a.displayName,
+    role: (() => { try { return (JSON.parse(a.globalIdentityJson) as { role?: string }).role ?? "agent"; } catch { return "agent"; } })(),
+    missionCount: new Set(memberships.filter((m) => m.agentId === a.id).map((m) => m.missionId)).size,
+    running: running.filter((r) => r.agentId === a.id).map((r) => ({ missionId: r.missionId, card: r.title })),
+  }));
+}
+
+async function adminMissionsOverview() {
+  const rows = await db.select().from(missions).where(ne(missions.status, "deleted")).orderBy(desc(missions.updatedAt)).limit(50) as Array<typeof missions.$inferSelect>;
+  return Promise.all(rows.map(async (m) => {
+    const cards = await db.select({ status: workCards.status }).from(workCards).where(eq(workCards.missionId, m.id)) as Array<{ status: string }>;
+    const byStatus: Record<string, number> = {};
+    for (const card of cards) byStatus[card.status] = (byStatus[card.status] ?? 0) + 1;
+    return { id: m.id, title: m.title, status: m.status, spendCents: m.missionSpendCents, dailyBudgetCents: m.dailyBudgetCents, cards: byStatus };
+  }));
+}
+
+const ADMIN_SYSTEM = [
+  "You are the workspace Concierge (Admin) for Missionry, talking to the owner.",
+  "You CAN: inspect all agents and what they're doing, inspect all missions, create new agents, and create missions with a leader (which auto-plans).",
+  "You CANNOT do task work yourself — no running code, no sandboxes, no producing artifacts. You orchestrate only.",
+  "Be concise. When asked to build an agent or start a mission, actually use the tools, then confirm with the created id(s).",
+].join(" ");
+
+async function runAdminConcierge(userId: string, history: Array<{ authorType: string; body: string }>, userMessage: string): Promise<string> {
+  const apiKey = forceMockAi() ? undefined : await Promise.resolve(secret.get("OPENAI_API_KEY")).catch(() => undefined);
+  if (!apiKey) return "(Admin model not configured — set OPENAI_API_KEY.)";
+  const openai = createOpenAI({ apiKey });
+  const messages = [
+    ...history.slice(-20).map((h) => ({ role: h.authorType === "user" ? ("user" as const) : ("assistant" as const), content: h.body })),
+    { role: "user" as const, content: userMessage },
+  ];
+  const tools = {
+    list_agents: tool({ description: "List all agents and what each is currently doing.", inputSchema: z.object({}), execute: async () => ({ agents: await adminAgentsOverview() }) }),
+    list_missions: tool({ description: "List all missions with status, budget and work-card counts.", inputSchema: z.object({}), execute: async () => ({ missions: await adminMissionsOverview() }) }),
+    create_agent: tool({
+      description: "Create a new agent in the library.",
+      inputSchema: z.object({ displayName: z.string(), role: z.string() }),
+      execute: async (input) => {
+        const agent = await createAgentForUser({ displayName: input.displayName, role: input.role, userId });
+        return { agentId: agent.id, displayName: agent.displayName };
+      },
+    }),
+    create_mission: tool({
+      description: "Create a mission and assign a leader agent (it then auto-plans). leaderAgentId is optional; omit to use the default leader.",
+      inputSchema: z.object({ title: z.string(), objective: z.string(), leaderAgentId: z.string().optional() }),
+      execute: async (input) => {
+        const created = await createMission({ title: input.title, objective: input.objective, ownerType: "user", leaderAgentId: input.leaderAgentId, requestUserId: userId });
+        waitUntil(decomposeMission(created.missionId).catch((error) => console.error("ADMIN DECOMPOSE ERROR:", error)));
+        return { missionId: created.missionId, leaderAgentId: created.leaderAgentId };
+      },
+    }),
+  };
+  try {
+    const result = await generateText({ model: openai("gpt-5.5"), system: ADMIN_SYSTEM, messages, tools, stopWhen: stepCountIs(6) });
+    return result.text?.trim() || "(done)";
+  } catch (error) {
+    return "Admin error: " + (error instanceof Error ? error.message : String(error));
+  }
+}
+
+app.get("/api/public/concierge/overview", async (c) => {
+  currentUserProfile(c);
+  return c.json({ agents: await adminAgentsOverview(), missions: await adminMissionsOverview() });
+});
+
+app.get("/api/public/concierge/chat", async (c) => {
+  const userId = currentUserProfile(c).userId;
+  const rows = await db.select().from(adminChatMessages).where(eq(adminChatMessages.userId, userId)).orderBy(asc(adminChatMessages.createdAt)) as Array<typeof adminChatMessages.$inferSelect>;
+  return c.json({ items: rows.map((r) => ({ id: r.id, authorType: r.authorType, body: r.body, createdAt: r.createdAt })) });
+});
+
+app.post("/api/public/concierge/chat", async (c) => {
+  const userId = currentUserProfile(c).userId;
+  const body = (await c.req.json().catch(() => ({}))) as { body?: string };
+  const text = (body.body ?? "").trim();
+  if (!text) return jsonError(c, "error.request.invalid", 400);
+  const history = await db.select().from(adminChatMessages).where(eq(adminChatMessages.userId, userId)).orderBy(asc(adminChatMessages.createdAt)) as Array<typeof adminChatMessages.$inferSelect>;
+  const userMsg = { id: `acm_${crypto.randomUUID().slice(0, 10)}`, userId, authorType: "user", body: text, createdAt: now() };
+  await db.insert(adminChatMessages).values(userMsg);
+  const reply = await runAdminConcierge(userId, history.map((h) => ({ authorType: h.authorType, body: h.body })), text);
+  const asstMsg = { id: `acm_${crypto.randomUUID().slice(0, 10)}`, userId, authorType: "assistant", body: reply, createdAt: now() };
+  await db.insert(adminChatMessages).values(asstMsg);
+  return c.json({
+    message: { id: userMsg.id, authorType: "user", body: text, createdAt: userMsg.createdAt },
+    reply: { id: asstMsg.id, authorType: "assistant", body: reply, createdAt: asstMsg.createdAt },
+  });
 });
 
 app.post("/api/public/agents", async (c) => {

@@ -7,6 +7,15 @@ uses date-based entries.
 ## [Unreleased]
 
 ### Added
+- **Concierge (Admin) agent — control-plane orchestrator.** A new top-level
+  「管家」 page where you chat with a workspace concierge that can inspect all agents
+  and missions, **create agents**, and **create missions + assign a leader**
+  (auto-plans) — but has **no execution tools** (no sandboxes/code/artifacts). Backed
+  by a restricted tool loop (`list_agents` / `list_missions` / `create_agent` /
+  `create_mission`), a workspace-level chat (`admin_chat_messages`, migration `0005`),
+  and a live overview snapshot. Endpoints `GET /concierge/overview`,
+  `GET/POST /concierge/chat`. (`server/src/index.ts`, `web/.../concierge/Concierge.tsx`)
+- **Chat scrolls to bottom on load/refresh** (rAF + fallback, after markdown reflow).
 - **Memory editor in the Agent Library.** The agent edit modal now shows and edits
   the agent's `MEMORY.md` (long-term memory) and the owner's shared `USER.md`
   profile. New endpoints `GET/PUT /agents/:agentId/memory` and

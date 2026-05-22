@@ -353,6 +353,18 @@ export type MissionFileContent = {
   updatedAt?: string;
 };
 
+export type ConciergeChatMessage = {
+  id: string;
+  authorType: 'user' | 'assistant';
+  body: string;
+  createdAt: string;
+};
+
+export type ConciergeOverview = {
+  agents: Array<{ id: string; name: string; role: string; missionCount: number; running: Array<{ missionId: string; card: string }> }>;
+  missions: Array<{ id: string; title: string; status: string; spendCents?: number; dailyBudgetCents?: number; cards: Record<string, number> }>;
+};
+
 export type MissionArtifact = {
   path: string;
   size?: number;

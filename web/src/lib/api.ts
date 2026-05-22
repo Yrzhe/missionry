@@ -14,6 +14,8 @@ import type {
   MissionEnvironmentVariable,
   MissionFileContent,
   MissionArtifact,
+  ConciergeChatMessage,
+  ConciergeOverview,
   MissionAgentRequest,
   MissionSpendBreakdown,
   MissionSummary,
@@ -334,6 +336,9 @@ export const api = {
       agentReplies: (response.agentReplies ?? []).map(normalizeMissionChatMessage),
     };
   },
+  conciergeOverview: () => request<ConciergeOverview>(`/concierge/overview`),
+  conciergeChat: () => request<{ items: ConciergeChatMessage[] }>(`/concierge/chat`),
+  sendConciergeChat: (body: string) => request<{ message: ConciergeChatMessage; reply: ConciergeChatMessage }>(`/concierge/chat`, { method: 'POST', body: JSON.stringify({ body }) }),
   agentMemory: (agentId: string) => request<{ memory: string }>(`/agents/${agentId}/memory`),
   updateAgentMemory: (agentId: string, content: string) => request<{ memory: string }>(`/agents/${agentId}/memory`, { method: 'PUT', body: JSON.stringify({ content }) }),
   memoryProfile: () => request<{ profile: string }>(`/me/memory-profile`),
