@@ -6,13 +6,14 @@ import { generateText, streamText, stepCountIs, tool } from "ai";
 import { z } from "zod";
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
-import { ensureAgentFiles, ensureAgentInstanceFiles, loadAgentBootFiles, loadSkill, buildMemoryContext, appendAgentMemory, appendUserProfile, loadAgentMemory, loadUserProfile, setAgentMemory, setUserProfile, setAgentSoulIdentity, writeAgentSkill, equipSkills } from "./agents/files";
+import { ensureAgentFiles, ensureAgentInstanceFiles, loadAgentBootFiles, loadSkill, buildMemoryContext, appendAgentMemory, appendUserProfile, loadAgentMemory, loadUserProfile, setAgentMemory, setUserProfile, setAgentSoulIdentity, writeAgentSkill, equipSkills, writeLibrarySkill } from "./agents/files";
 import { esSystemAuthUser } from "./__generated__/sys_schema";
 import {
   adminChatMessages,
   agentInstances,
   agents,
   agentResponseCursors,
+  skills,
   auditEvents,
   directThreadMessages,
   directThreads,
@@ -2417,6 +2418,12 @@ function slugifySkillId(name: string): string {
   const s = name.toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60);
   return s || `skill-${crypto.randomUUID().slice(0, 6)}`;
 }
+async function upsertLibrarySkillRow(id: string, name: string, description: string, source: string, createdBy: string) {
+  const ts = now();
+  const [existing] = await db.select({ id: skills.id }).from(skills).where(eq(skills.id, id)).limit(1);
+  if (existing) await db.update(skills).set({ name, description, source, updatedAt: ts }).where(eq(skills.id, id));
+  else await db.insert(skills).values({ id, name, description, source, createdBy, createdAt: ts, updatedAt: ts });
+}
 // Heuristic red-flags for an untrusted SKILL.md (instructions an agent will follow).
 function heuristicSkillRisks(content: string): string[] {
   const risks: string[] = [];
@@ -2503,7 +2510,7 @@ async function searchGithubSkills(query: string): Promise<{ source: string; resu
 const ADMIN_SYSTEM = [
   "You are the workspace Concierge (Admin) for Missionry, talking to the owner.",
   "When asked to BUILD an agent, craft it well: write a tailored SOUL (persona — identity, voice, how it works, boundaries) and a short identity, and equip relevant skills. Skills are authored or installed INTO that agent's own folder.",
-  "Skills: you can SEARCH GitHub for an existing skill (find_skills), author a new one (add_skill), or install one from a GitHub URL (install_skill_from_github). When the owner asks for a capability, prefer find_skills first, show the candidates, then install the chosen one. All installs are security-scanned and refused if risky — relay the risks if so.",
+  "Skills live in a TEAM library and are equipped onto agents. To give an agent a capability: find_skills (search GitHub) → install_library_skill (add a SKILL.md from a URL to the library, security-scanned) OR add_library_skill (author one) → equip_skill(agentId, skillId). Use list_library_skills to see what's already available. Prefer reusing/finding before authoring. Installs are refused if the security scan flags risks — relay them.",
   "You CAN also: inspect all agents and what they're doing, inspect all missions, and create missions with a leader (auto-plans).",
   "You CANNOT do task work yourself — no running code, no sandboxes, no producing artifacts. You orchestrate only.",
   "Be concise. Actually call the tools, then confirm with the created id(s) and what you equipped.",
@@ -2544,39 +2551,55 @@ async function runAdminConcierge(userId: string, history: Array<{ authorType: st
       },
     }),
     find_skills: tool({
-      description: "Search GitHub for published agent skills (SKILL.md) matching a query. Returns candidates; then install a chosen one with install_skill_from_github (it gets security-scanned). For 'repo' source results, point the install at the repo's SKILL.md.",
+      description: "Search GitHub for published agent skills (SKILL.md) matching a query. Returns candidates; then add a chosen one to the team library with install_library_skill (it gets security-scanned), and equip onto agents with equip_skill. For 'repo' source results, point install_library_skill at the repo's SKILL.md.",
       inputSchema: z.object({ query: z.string() }),
       execute: async (input) => {
         try { return await searchGithubSkills(input.query); }
         catch (error) { return { source: "error", results: [], error: error instanceof Error ? error.message : String(error) }; }
       },
     }),
-    add_skill: tool({
-      description: "Author a NEW skill and install it into a specific agent's own skill folder, then equip it. Use for capabilities the agent should have.",
-      inputSchema: z.object({ agentId: z.string() }).merge(skillInputSchema),
+    list_library_skills: tool({
+      description: "List the team's shared skill library (skills any agent can be equipped with).",
+      inputSchema: z.object({}),
+      execute: async () => {
+        const rows = await db.select().from(skills).orderBy(asc(skills.createdAt)) as Array<typeof skills.$inferSelect>;
+        return { skills: rows.map((s) => ({ id: s.id, name: s.name, description: s.description, source: s.source })) };
+      },
+    }),
+    add_library_skill: tool({
+      description: "Author a NEW skill into the TEAM library (security-scanned). Then equip it onto agents with equip_skill.",
+      inputSchema: skillInputSchema,
       execute: async (input) => {
         const content = buildSkillMd(input.name, input.description, input.body);
         const scan = await scanSkillContent(content);
-        if (!scan.safe) return { installed: false, reason: "security scan flagged this skill", risks: scan.risks };
+        if (!scan.safe) return { added: false, reason: "security scan flagged this skill", risks: scan.risks };
         const skillId = slugifySkillId(input.name);
-        await writeAgentSkill(input.agentId, skillId, content);
-        await equipSkills(input.agentId, [skillId]);
-        return { installed: true, agentId: input.agentId, skillId };
+        await writeLibrarySkill(skillId, content);
+        await upsertLibrarySkillRow(skillId, input.name, input.description, "authored", userId);
+        return { added: true, skillId };
       },
     }),
-    install_skill_from_github: tool({
-      description: "Download a SKILL.md from a GitHub URL (blob/raw), security-scan it, and if safe install it into the agent's own folder + equip. Refuses unsafe skills.",
-      inputSchema: z.object({ agentId: z.string(), url: z.string(), skillId: z.string().optional() }),
+    install_library_skill: tool({
+      description: "Download a SKILL.md from a GitHub URL (blob/raw) into the TEAM library after a security scan. Refuses unsafe skills. Then equip onto agents with equip_skill.",
+      inputSchema: z.object({ url: z.string(), skillId: z.string().optional() }),
       execute: async (input) => {
         let content: string;
-        try { content = await fetchSkillFromGithub(input.url); } catch (error) { return { installed: false, reason: "fetch failed: " + (error instanceof Error ? error.message : String(error)) }; }
+        try { content = await fetchSkillFromGithub(input.url); } catch (error) { return { added: false, reason: "fetch failed: " + (error instanceof Error ? error.message : String(error)) }; }
         const scan = await scanSkillContent(content);
-        if (!scan.safe) return { installed: false, reason: "security scan flagged this skill — not installed", risks: scan.risks };
+        if (!scan.safe) return { added: false, reason: "security scan flagged this skill — not added", risks: scan.risks };
         const nameFromMd = content.match(/name:\s*(.+)/)?.[1]?.trim();
         const skillId = slugifySkillId(input.skillId || nameFromMd || input.url.split("/").filter(Boolean).at(-2) || "skill");
-        await writeAgentSkill(input.agentId, skillId, content);
-        await equipSkills(input.agentId, [skillId]);
-        return { installed: true, agentId: input.agentId, skillId, risksChecked: true };
+        await writeLibrarySkill(skillId, content);
+        await upsertLibrarySkillRow(skillId, nameFromMd || skillId, content.match(/description:\s*(.+)/)?.[1]?.trim() || "", `github:${input.url}`, userId);
+        return { added: true, skillId, risksChecked: true };
+      },
+    }),
+    equip_skill: tool({
+      description: "Equip a skill (from the team library, by id) onto an agent.",
+      inputSchema: z.object({ agentId: z.string(), skillId: z.string() }),
+      execute: async (input) => {
+        const equipped = await equipSkills(input.agentId, [input.skillId]);
+        return { agentId: input.agentId, equipped };
       },
     }),
     create_mission: tool({

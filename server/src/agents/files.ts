@@ -160,13 +160,18 @@ export async function loadAgentBootFiles(agentId: string): Promise<AgentBootFile
   const skillsIndex = (
     await Promise.all(
       skillIds.map(async (id) => {
-        const skill = await getText(`agents/${agentId}/skills/${id}/SKILL.md`);
+        // Resolve a skill from the agent's own folder first (bespoke), then the
+        // shared team library (skills/{id}/SKILL.md).
+        const agentPath = `agents/${agentId}/skills/${id}/SKILL.md`;
+        const libPath = `skills/${id}/SKILL.md`;
+        const agentSkill = await getText(agentPath);
+        const skill = agentSkill ?? (await getText(libPath));
         if (!skill) return null;
         return {
           id,
           name: skill.match(/name:\s*(.+)/)?.[1]?.trim() ?? id,
           description: skill.match(/description:\s*(.+)/)?.[1]?.trim() ?? "",
-          r2Path: `agents/${agentId}/skills/${id}/SKILL.md`,
+          r2Path: agentSkill ? agentPath : libPath,
         };
       }),
     )
@@ -208,9 +213,19 @@ export async function listAgentSkillIds(agentId: string): Promise<string[]> {
 export async function loadSkill(agentId: string, skillId: string): Promise<string> {
   agentId = assertSafeId(agentId, "agent_id");
   skillId = assertSafeId(skillId, "skill_id");
-  const body = await getText(`agents/${agentId}/skills/${skillId}/SKILL.md`);
+  // Agent-local first, then the shared team library.
+  const body = (await getText(`agents/${agentId}/skills/${skillId}/SKILL.md`)) ?? (await getText(`skills/${skillId}/SKILL.md`));
   if (!body) throw new Error("error.skill.not_found");
   return body;
+}
+
+// Team-shared skill library (R2 skills/{id}/SKILL.md).
+export async function writeLibrarySkill(skillId: string, content: string) {
+  skillId = assertSafeId(skillId, "skill_id");
+  await storage.from(buckets.missionryWorkspaces).put(`skills/${skillId}/SKILL.md`, textBytes(content));
+}
+export async function loadLibrarySkill(skillId: string): Promise<string | null> {
+  return getText(`skills/${assertSafeId(skillId, "skill_id")}/SKILL.md`);
 }
 
 // ── Layered memory (Hermes-style) ─────────────────────────────────────────────
