@@ -8,7 +8,9 @@ import urllib.error
 import urllib.request
 
 ROOT = "/workspace"
-MISSIONRY_DIR = os.path.join(ROOT, ".missionry")
+# Per-work-card run dir (injected by the server) so concurrent runners in the
+# same shared sandbox don't overwrite each other's task/status/log.
+MISSIONRY_DIR = os.environ.get("MISSIONRY_RUN_DIR") or os.path.join(ROOT, ".missionry")
 TASK_PATH = os.path.join(MISSIONRY_DIR, "task.json")
 STATUS_PATH = os.path.join(MISSIONRY_DIR, "status.json")
 RESULT_PATH = os.path.join(MISSIONRY_DIR, "result.json")
@@ -171,6 +173,26 @@ def run_tool(name, args):
     return {"error": "unknown tool"}
 
 
+def heartbeat(task):
+    # Tell the server the runner is alive so the stuck-card reaper doesn't kill a
+    # legitimately long task. Best-effort; never fail the run on a heartbeat error.
+    url = task.get("heartbeatUrl")
+    if not url:
+        return
+    try:
+        data = json.dumps({"cardId": task.get("cardId")}).encode("utf-8")
+        req = urllib.request.Request(
+            url,
+            data=data,
+            headers={"Content-Type": "application/json", "x-callback-token": task.get("callbackToken", ""), "User-Agent": "Missionry-Runner/1.0"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            resp.read()
+    except Exception:
+        pass
+
+
 def post_callback(task, result):
     if not task.get("callbackUrl"):
         return
@@ -210,6 +232,7 @@ def main():
     summary = ""
     for step in range(1, MAX_STEPS + 1):
         status("running", step, "calling model")
+        heartbeat(task)
         response = call_openai(api_key, task.get("model") or "gpt-5.5", messages)
         message = response["choices"][0]["message"]
         messages.append(message)

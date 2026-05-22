@@ -376,17 +376,27 @@ export async function listIdleSandboxes(idleMs: number, timestamp = Date.now()) 
     .from(sandboxRuntime)
     .where(and(eq(sandboxRuntime.state, "running"), lte(sandboxRuntime.lastActivityAt, cutoff)));
   if (rows.length === 0) return [];
-  // Never pause a sandbox whose mission still has an in-flight work card: the
-  // agent runner executes INSIDE the sandbox, so pausing would freeze the task
-  // mid-run and make its files vanish from the artifacts view.
+  // Never pause the SPECIFIC sandbox an in-flight work card runs inside (the agent
+  // runner executes in it; pausing would freeze the task). Protect only that
+  // sandbox — not every sandbox in the mission — so a private runner doesn't keep
+  // the shared / other private sandboxes warm and leak billing.
   const activeCardRows = await db
-    .select({ missionId: workCards.missionId })
+    .select({ missionId: workCards.missionId, assigneeInstanceId: workCards.assigneeInstanceId, sandboxAffinityJson: workCards.sandboxAffinityJson })
     .from(workCards)
     .where(inArray(workCards.status, ["running", "allocated", "assigned"]));
-  const activeCardMissionIds = new Set(activeCardRows.map((row: { missionId: string }) => row.missionId));
+  const protectedKeys = new Set<string>();
+  for (const card of activeCardRows as Array<{ missionId: string; assigneeInstanceId: string | null; sandboxAffinityJson: string }>) {
+    let tier = "mission";
+    try { tier = (JSON.parse(card.sandboxAffinityJson) as { tier?: string }).tier ?? "mission"; } catch { tier = "mission"; }
+    if (tier === "private" && card.assigneeInstanceId) protectedKeys.add(`${card.missionId}|private|${card.assigneeInstanceId}`);
+    else if (tier === "mission") protectedKeys.add(`${card.missionId}|mission`);
+    // tier0 has no dedicated sandbox to protect.
+  }
+  const sandboxKey = (missionId: string, tier: string, instanceId?: string | null) =>
+    tier === "mission" ? `${missionId}|mission` : `${missionId}|private|${instanceId ?? ""}`;
   const idle: Array<{ mission: MissionRow; ref: SandboxRef; target: "mission" | "private"; instanceId?: string }> = [];
   for (const row of rows) {
-    if (activeCardMissionIds.has(row.missionId)) continue;
+    if (protectedKeys.has(sandboxKey(row.missionId, row.tier, row.instanceId))) continue;
     const instanceId = row.instanceId ?? undefined;
     const mission = await getMissionWithRuntimeSandboxes(row.missionId);
     idle.push({ mission, ref: sandboxRefFromRuntime(row), target: row.tier === "mission" ? "mission" : "private", instanceId });

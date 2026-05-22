@@ -27,7 +27,24 @@ uses date-based entries.
   every agent (incl. the leader) it could reply `[NO]`; a direct @mention now
   forces a real, tool-using answer. (`server/src/index.ts`)
 
-### Fixed
+### Fixed (logic-review batch, from Codex review)
+- **Concurrent runners overwrote each other** — runner files now stage to a
+  per-work-card dir `.missionry/runs/{cardId}/` (was a shared fixed path), so two
+  agents in the same shared sandbox can't clobber each other's task/status/log.
+- **Stuck reaper killed legitimately long tasks** — the runner now sends a
+  heartbeat each step to `POST /api/webhooks/work-card-heartbeat`, which bumps the
+  card's `updated_at` so the 15-min stuck reaper doesn't fail a still-working task.
+- **Private-sandbox artifacts were read from the shared sandbox** — completion now
+  persists artifacts from the sandbox that actually ran the card (private vs shared).
+- **Late callback could overwrite a terminal card** — completion is now an atomic
+  conditional update (`WHERE status='running'`); if the user cancelled/deleted in
+  the meantime it's ignored instead of resurrecting the card.
+- **`startWorkCard` failure handler clobbered user intent** — it only marks failed
+  if the card is still `running`.
+- **`report_progress` could mark ANY card done** — now restricted to the calling
+  agent's own assigned card.
+- **Idle reaper over-protected (billing leak)** — it now protects only the specific
+  sandbox carrying an in-flight card (by affinity), not every sandbox in the mission.
 - **R2 stored EMPTY bodies (artifacts previewed as `[object Object]`).**
   `storage.put` requires `ArrayBuffer | ArrayBufferView`; passing a raw **string**
   stored a zero-byte body. Every text put (artifacts, agent soul/identity, tool
