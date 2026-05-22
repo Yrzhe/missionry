@@ -264,14 +264,22 @@ export function missionryToolKit(ctx: ToolContext) {
         }),
     }),
     report_progress: tool({
-      description: "Update work-card status.",
+      description: "Update the status of a work card assigned to YOU.",
       inputSchema: z.object({ workCardId: z.string(), status: z.enum(["running", "blocked", "done", "failed"]) }),
       execute: (input) =>
         withUsageAndSpend("report_progress", ctx, async () => {
-          await db
+          // Only the assignee may update its own card — prevents an agent from
+          // marking another agent's card done (which also bypasses billing/dequeue).
+          const [updated] = await db
             .update(workCards)
             .set({ status: input.status, updatedAt: new Date().toISOString() })
-            .where(and(eq(workCards.id, input.workCardId), eq(workCards.missionId, ctx.missionId)));
+            .where(and(
+              eq(workCards.id, input.workCardId),
+              eq(workCards.missionId, ctx.missionId),
+              eq(workCards.assigneeInstanceId, ctx.instanceId),
+            ))
+            .returning();
+          if (!updated) return { workCardId: input.workCardId, status: input.status, capabilityStatus: "denied" as const, error: "not your work card" };
           return { workCardId: input.workCardId, status: input.status, capabilityStatus: "real" as const };
         }),
     }),

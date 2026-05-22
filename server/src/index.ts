@@ -751,6 +751,10 @@ function runnerCallbackUrl() {
   return `${publicOrigin()}/api/webhooks/work-card-callback`;
 }
 
+function runnerHeartbeatUrl() {
+  return `${publicOrigin()}/api/webhooks/work-card-heartbeat`;
+}
+
 // Durable artifacts: produced files live in the ephemeral sandbox and disappear
 // from the UI when it pauses. On completion we copy them to R2 so 产物 can show
 // them even after the sandbox is gone. The SDK has no list(), so the canonical
@@ -767,10 +771,10 @@ function artifactR2Key(missionId: string, relPath: string) {
   return `missions/${missionId}/artifacts/${clean}`;
 }
 async function persistMissionArtifacts(
-  mission: Awaited<ReturnType<typeof getMissionWithRuntimeSandboxes>>,
+  ref: SandboxRef | null | undefined,
+  missionId: string,
   files: Array<{ path: string; size?: number }>,
 ) {
-  const ref = mission.stateJson.sharedSandbox;
   if (!ref || ref.state !== "running") return;
   const bucket = storage.from(buckets.missionryWorkspaces);
   for (const file of files.slice(0, 50)) {
@@ -779,7 +783,7 @@ async function persistMissionArtifacts(
       const { content } = await e2b.readWorkspaceFile(ref, file.path, ARTIFACT_MAX_BYTES);
       // storage.put requires ArrayBuffer | ArrayBufferView; a raw string stores
       // an EMPTY body. Always encode text to bytes.
-      if (content) await bucket.put(artifactR2Key(mission.id, file.path), textBytes(content));
+      if (content) await bucket.put(artifactR2Key(missionId, file.path), textBytes(content));
     } catch (error) {
       console.error("ARTIFACT PERSIST ERROR:", file.path, error);
     }
@@ -1020,12 +1024,16 @@ async function launchE2bWorkCardRunner(input: {
     objective: mission.objective,
     openaiApiKey: apiKey,
     callbackUrl: runnerCallbackUrl(),
+    heartbeatUrl: runnerHeartbeatUrl(),
     callbackToken: input.callbackToken,
   };
-  await e2b.writeFile(ref, `${RUNNER_DIR}/task.json`, JSON.stringify(task, null, 2));
-  await e2b.writeFile(ref, `${RUNNER_DIR}/runner.py`, AGENT_RUNNER_PY);
-  await e2b.writeFile(ref, `${RUNNER_DIR}/status.json`, JSON.stringify({ state: "starting", step: 0, lastAction: "runner staged" }, null, 2));
-  await e2b.runCommand(ref, `chmod +x /workspace/${RUNNER_DIR}/runner.py && nohup python3 /workspace/${RUNNER_DIR}/runner.py > /workspace/${RUNNER_DIR}/runner.log 2>&1 < /dev/null &`);
+  // Per-work-card run dir so concurrent runners in the same shared sandbox don't
+  // overwrite each other's task/status/log.
+  const runDir = `${RUNNER_DIR}/runs/${input.card.id}`;
+  await e2b.writeFile(ref, `${runDir}/task.json`, JSON.stringify(task, null, 2));
+  await e2b.writeFile(ref, `${runDir}/runner.py`, AGENT_RUNNER_PY);
+  await e2b.writeFile(ref, `${runDir}/status.json`, JSON.stringify({ state: "starting", step: 0, lastAction: "runner staged" }, null, 2));
+  await e2b.runCommand(ref, `chmod +x /workspace/${runDir}/runner.py && MISSIONRY_RUN_DIR=/workspace/${runDir} nohup python3 /workspace/${runDir}/runner.py > /workspace/${runDir}/runner.log 2>&1 < /dev/null &`);
   return ref;
 }
 
@@ -1109,7 +1117,10 @@ async function startWorkCard(workCardId: string, missionIdFilter?: string) {
     });
     return running ?? (await db.select().from(workCards).where(eq(workCards.id, workCardId)).limit(1))[0] ?? null;
   } catch (error) {
-    await db.update(workCards).set({ status: "failed", updatedAt: now() }).where(eq(workCards.id, workCardId));
+    // Only mark failed if the card is still running — don't clobber a user
+    // cancel/delete that happened during launch.
+    const [failedRow] = await db.update(workCards).set({ status: "failed", updatedAt: now() }).where(and(eq(workCards.id, workCardId), eq(workCards.status, "running"))).returning();
+    if (!failedRow) return (await db.select().from(workCards).where(eq(workCards.id, workCardId)).limit(1))[0] ?? null;
     await recordAudit({
       missionId,
       subjectType: "work_card",
@@ -1740,6 +1751,22 @@ app.use("/api/public/*", async (c, next) => {
 
 app.get("/api/public/health", (c) => c.json({ ok: true, service: "missionry-api", runtime: "edgespark", contract: "v0.6" }));
 
+// Runner heartbeat: keeps a legitimately long task alive by bumping updated_at so
+// the stuck-card reaper doesn't fail it. Auth via the card's callbackToken.
+app.post("/api/webhooks/work-card-heartbeat", async (c) => {
+  const token = c.req.header("x-callback-token") ?? "";
+  const body = (await c.req.json().catch(() => ({}))) as { cardId?: string };
+  const cardId = body.cardId ? assertSafeId(body.cardId, "work_card_id") : "";
+  if (!cardId || !token) return jsonError(c, "error.webhook.invalid", 400);
+  const [card] = await db.select().from(workCards).where(eq(workCards.id, cardId)).limit(1);
+  if (!card) return jsonError(c, "error.work_card.not_found", 404);
+  const cost = parseWorkCardCost(card);
+  if (!cost.runner?.callbackToken || cost.runner.callbackToken !== token) return jsonError(c, "error.webhook.unauthorized", 401);
+  if (card.status !== "running") return c.json({ status: "ignored", currentStatus: card.status });
+  await db.update(workCards).set({ updatedAt: now() }).where(and(eq(workCards.id, cardId), eq(workCards.status, "running")));
+  return c.json({ status: "alive", cardId });
+});
+
 app.post("/api/webhooks/work-card-callback", async (c) => {
   const token = c.req.header("x-callback-token") ?? "";
   const body = (await c.req.json().catch(() => ({}))) as {
@@ -1775,20 +1802,28 @@ app.post("/api/webhooks/work-card-callback", async (c) => {
   };
   const messageId = `mcm_${crypto.randomUUID().slice(0, 10)}`;
   const summary = String(body.summary || (nextStatus === "done" ? `Completed work card: ${card.title}` : `Work card failed: ${card.title}`)).slice(0, 12000);
-  await db.batch([
-    db.update(workCards).set({ status: nextStatus, costJson: JSON.stringify(cost), updatedAt: timestamp }).where(eq(workCards.id, cardId)),
-    db.insert(missionChatMessages).values({
-      id: messageId,
-      missionId: card.missionId,
-      authorType: "agent_instance",
-      authorId: instance.id,
-      body: summary,
-      mentionsJson: JSON.stringify([]),
-      isSilent: 0,
-      replyToMessageId: null,
-      createdAt: timestamp,
-    }),
-  ]);
+  // Atomic, conditional finalize: only if the card is STILL running. Closes the
+  // TOCTOU window where a user cancel/delete between the read above and here would
+  // otherwise be overwritten by a late callback.
+  const [finalized] = await db.update(workCards)
+    .set({ status: nextStatus, costJson: JSON.stringify(cost), updatedAt: timestamp })
+    .where(and(eq(workCards.id, cardId), eq(workCards.status, "running")))
+    .returning();
+  if (!finalized) {
+    const [currentCard] = await db.select({ status: workCards.status }).from(workCards).where(eq(workCards.id, cardId)).limit(1);
+    return c.json({ status: "ignored", cardId, currentStatus: currentCard?.status });
+  }
+  await db.insert(missionChatMessages).values({
+    id: messageId,
+    missionId: card.missionId,
+    authorType: "agent_instance",
+    authorId: instance.id,
+    body: summary,
+    mentionsJson: JSON.stringify([]),
+    isSilent: 0,
+    replyToMessageId: null,
+    createdAt: timestamp,
+  });
   await recordAudit({
     missionId: card.missionId,
     subjectType: "work_card",
@@ -1801,8 +1836,9 @@ app.post("/api/webhooks/work-card-callback", async (c) => {
   const sandboxAffinity = JSON.parse(card.sandboxAffinityJson) as SandboxAffinityInput;
   const billRef = sandboxAffinity.tier === "private" ? mission.stateJson.privateSandboxes[instance.id] : sandboxAffinity.tier === "mission" ? mission.stateJson.sharedSandbox : null;
   if (billRef) await billSandboxActiveInterval({ missionId: card.missionId, ref: billRef, agentId: agent.id, instanceId: instance.id, resetClock: true });
-  // Copy produced files to R2 (durable) before the sandbox can pause/expire.
-  if (files.length > 0) waitUntil(persistMissionArtifacts(mission, files));
+  // Copy produced files to R2 from the sandbox that actually ran the card (private
+  // vs shared), not always the shared one.
+  if (files.length > 0 && billRef) waitUntil(persistMissionArtifacts(billRef, card.missionId, files));
   waitUntil(Promise.resolve(dequeueNextForAgent(agent.id)));
   return c.json({ status: "completed", cardId, workCardStatus: nextStatus });
 });
