@@ -3,7 +3,7 @@ import { db } from "edgespark";
 import { and, eq } from "drizzle-orm";
 import { agentInstances, sandboxRuntime } from "../defs/db_schema";
 import { assertSafeId, assertSafeRelativePath } from "../lib/safe-paths";
-import { BudgetService, getMissionWithRuntimeSandboxes, updateMissionRuntimeSnapshot, updateSandboxRuntimeOnly, upsertSandboxRuntime, type SandboxRef } from "../state/missionState";
+import { BudgetService, claimSandboxStartLease, getMissionWithRuntimeSandboxes, releaseSandboxStartLease, updateMissionRuntimeSnapshot, updateSandboxRuntimeOnly, upsertSandboxRuntime, type SandboxRef } from "../state/missionState";
 
 type SandboxTarget = "mission" | "private";
 
@@ -193,7 +193,7 @@ async function envdFetch(ref: SandboxRef, path: string, init: RequestInit = {}, 
   return response.text();
 }
 
-async function envdRunCommand(ref: SandboxRef, command: string, cwd = WORKSPACE_ROOT, options: { throwOnNonZero?: boolean } = {}) {
+async function envdRunCommand(ref: SandboxRef, command: string, cwd = WORKSPACE_ROOT, options: { throwOnNonZero?: boolean; envs?: Record<string, string> } = {}) {
   const envd = requireEnvd(ref);
   // process.Process/Start is a Connect SERVER-STREAMING RPC. With
   // Content-Type application/connect+json the REQUEST body must be a single
@@ -205,7 +205,9 @@ async function envdRunCommand(ref: SandboxRef, command: string, cwd = WORKSPACE_
     process: {
       cmd: "/bin/sh",
       args: ["-lc", command],
-      envs: {},
+      // Inject the current mission env per-exec so a RESUMED sandbox (whose
+      // create-time envVars may be stale) still sees up-to-date values (#10).
+      envs: options.envs ?? {},
       cwd,
     },
     stdin: false,
@@ -334,6 +336,17 @@ async function loadPersistedLiveRouting(refSandboxId: string): Promise<LiveSandb
   };
 }
 
+// Poll for the routing the lease winner persists once its E2B sandbox is live.
+// Returns null if it never appears within tries*delayMs (caller then falls back).
+async function waitForPersistedRouting(sandboxId: string, tries: number, delayMs: number): Promise<LiveSandboxRouting | null> {
+  for (let attempt = 0; attempt < tries; attempt++) {
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+    const routing = await loadPersistedLiveRouting(sandboxId);
+    if (routing?.sandboxID) return routing;
+  }
+  return null;
+}
+
 async function createRealSandbox(input: { missionId: string; target: SandboxTarget; instanceId?: string }) {
   const templateID = vars.get("E2B_TEMPLATE_ID") || "base";
   const mission = await getMissionWithRuntimeSandboxes(input.missionId).catch(() => null);
@@ -442,8 +455,27 @@ async function startOrResume(input: { missionId: string; instanceId?: string; ta
     }
   }
   if (!routing) {
-    const created = await createRealSandbox(input);
-    routing = { sandboxID: created.sandboxID, envdAccessToken: created.envdAccessToken ?? null, envdHost: envdHostFor(created.sandboxID) };
+    // Concurrency guard (#3): only one caller may create the real E2B sandbox for
+    // this sandboxId. The winner creates; losers wait for the winner's routing.
+    const won = await claimSandboxStartLease({ sandboxId, missionId: input.missionId, tier: input.target, instanceId: input.instanceId });
+    if (won) {
+      try {
+        const created = await createRealSandbox(input);
+        routing = { sandboxID: created.sandboxID, envdAccessToken: created.envdAccessToken ?? null, envdHost: envdHostFor(created.sandboxID) };
+      } catch (error) {
+        await releaseSandboxStartLease(sandboxId).catch(() => {});
+        throw error;
+      }
+    } else {
+      // Another caller is creating it; poll for the routing it persists. If the
+      // winner never produces routing within the window, fall back to creating
+      // ourselves so this is never worse than the pre-lease behaviour.
+      routing = await waitForPersistedRouting(sandboxId, 16, 500);
+      if (!routing) {
+        const created = await createRealSandbox(input);
+        routing = { sandboxID: created.sandboxID, envdAccessToken: created.envdAccessToken ?? null, envdHost: envdHostFor(created.sandboxID) };
+      }
+    }
   }
   const ref = refFor(input, routing);
   await ensureWorkspaceRoot(ref);
@@ -460,7 +492,7 @@ async function ensureRunningRef(ref: SandboxRef) {
   return startOrResume({ missionId: missionIdFor(ref), target: ref.tier, instanceId: ref.ownerInstanceId });
 }
 
-export async function runCommand(ref: SandboxRef, command: string) {
+export async function runCommand(ref: SandboxRef, command: string, options: { envs?: Record<string, string> } = {}) {
   const running = await ensureRunningRef(ref);
   await BudgetService.assertCanSpend(missionIdFor(running), Math.max(1, sandboxCostCentsForSeconds(60)));
   if (await useMemoryMode()) {
@@ -472,7 +504,7 @@ export async function runCommand(ref: SandboxRef, command: string) {
       stderr: "",
     };
   }
-  const result = await envdRunCommand(running, `mkdir -p ${WORKSPACE_ROOT} && ${command}`, WORKSPACE_ROOT);
+  const result = await envdRunCommand(running, `mkdir -p ${WORKSPACE_ROOT} && ${command}`, WORKSPACE_ROOT, { envs: options.envs });
   await touchSandbox(running);
   return result;
 }

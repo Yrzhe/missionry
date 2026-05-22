@@ -142,6 +142,10 @@ function waitUntil(task: Promise<unknown>) {
   else if (typeof runtimeCtx.runInBackground === "function") runtimeCtx.runInBackground(task);
 }
 
+// Headroom held atomically before an interactive LLM reply (#9). Settled to the
+// real cost once usage is known; small because it is only a pre-flight hold.
+const LLM_RESERVE_CENTS = 5;
+
 function estimateLlmCostCents(model: string, usage: Record<string, unknown>) {
   const promptTokens = Number(usage.promptTokens ?? usage.inputTokens ?? 0);
   const completionTokens = Number(usage.completionTokens ?? usage.outputTokens ?? 0);
@@ -1037,7 +1041,11 @@ async function launchE2bWorkCardRunner(input: {
   await e2b.writeFile(ref, `${runDir}/task.json`, JSON.stringify(task, null, 2));
   await e2b.writeFile(ref, `${runDir}/runner.py`, AGENT_RUNNER_PY);
   await e2b.writeFile(ref, `${runDir}/status.json`, JSON.stringify({ state: "starting", step: 0, lastAction: "runner staged" }, null, 2));
-  await e2b.runCommand(ref, `chmod +x /workspace/${runDir}/runner.py && MISSIONRY_RUN_DIR=/workspace/${runDir} nohup python3 /workspace/${runDir}/runner.py > /workspace/${runDir}/runner.log 2>&1 < /dev/null &`);
+  // Inject the CURRENT mission env at launch (#10): a resumed sandbox keeps its
+  // create-time envVars, so re-supplying them here ensures the runner process
+  // always sees up-to-date mission variables regardless of sandbox age.
+  const missionEnvVars = mission.stateJson.environment?.vars ?? {};
+  await e2b.runCommand(ref, `chmod +x /workspace/${runDir}/runner.py && MISSIONRY_RUN_DIR=/workspace/${runDir} nohup python3 /workspace/${runDir}/runner.py > /workspace/${runDir}/runner.log 2>&1 < /dev/null &`, { envs: missionEnvVars });
   return ref;
 }
 
@@ -1460,7 +1468,7 @@ async function runAgentToolLoop(input: {
     });
     return input.stubBody;
   }
-  await BudgetService.assertCanSpend(input.missionId, 1);
+  const reservedUserCents = await BudgetService.reserve(input.missionId, LLM_RESERVE_CENTS);
   const openai = createOpenAI({ apiKey });
   const rosterRows = await loadMissionAgentRows(input.missionId).catch(() => []);
   const agentRoster = rosterRows.map((row) => [
@@ -1527,6 +1535,7 @@ async function runAgentToolLoop(input: {
         promptTokens: Number(usageRecord.promptTokens ?? usageRecord.inputTokens ?? 0),
         completionTokens: Number(usageRecord.completionTokens ?? usageRecord.outputTokens ?? 0),
         costCents: estimateLlmCostCents(modelName, usageRecord),
+        reservedUserCents,
         eventType: "cost_event",
       });
     },
@@ -3505,7 +3514,8 @@ app.post("/api/public/direct-threads/:threadId/messages", async (c) => {
   const thread = access.thread;
   const [instance] = await db.select().from(agentInstances).where(eq(agentInstances.id, thread.agentInstanceId)).limit(1);
   if (!instance) return jsonError(c, "error.agent_instance.not_found", 404);
-  // Budget pre-check before spending on the model — same gate as mission chat.
+  // Fast read pre-check so we don't insert the user message when already capped;
+  // the atomic reserve happens inside generateDirectAgentReply (#9).
   await BudgetService.assertCanSpend(thread.missionId, 1);
 
   const profile = currentUserProfile(c);
@@ -3575,6 +3585,7 @@ async function generateDirectAgentReply(agentId: string, instanceId: string, mis
     await emitCostEvent({ missionId, agentId, instanceId, promptTokens: 0, completionTokens: 0, costCents: 0, eventType: "cost_event" });
     return `Acknowledged. I will handle: ${userBody}`;
   }
+  const reservedUserCents = await BudgetService.reserve(missionId, LLM_RESERVE_CENTS);
   const boot = await loadAgentBootFiles(agentId);
   const modelName = boot.baseConfig.model ?? "gpt-5.5";
   const openai = createOpenAI({ apiKey });
@@ -3593,6 +3604,7 @@ async function generateDirectAgentReply(agentId: string, instanceId: string, mis
         promptTokens: Number(usageRecord.promptTokens ?? usageRecord.inputTokens ?? 0),
         completionTokens: Number(usageRecord.completionTokens ?? usageRecord.outputTokens ?? 0),
         costCents: estimateLlmCostCents(modelName, usageRecord),
+        reservedUserCents,
         eventType: "cost_event",
       });
     },

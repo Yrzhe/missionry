@@ -1,5 +1,5 @@
 import { db } from "edgespark";
-import { and, eq, inArray, lte, sql } from "drizzle-orm";
+import { and, eq, inArray, isNull, lt, lte, ne, or, sql } from "drizzle-orm";
 import { agents, auditEvents, missionSpend, missions, sandboxRuntime, usersProfile, workCards } from "../defs/db_schema";
 
 export type SandboxTier = "mission" | "private";
@@ -76,6 +76,10 @@ export type CostRecord = {
   sandboxId?: string;
   sandboxSeconds?: number;
   eventType: "cost_event" | "sandbox_burn" | "mission_spend_updated";
+  // Cents already reserved against the owner's daily budget via reserveUserSpend
+  // before this op ran. The settle subtracts it so the reserve isn't double
+  // counted; the full costCents still applies to mission spend.
+  reservedUserCents?: number;
 };
 
 export type AuditRecord = {
@@ -244,7 +248,10 @@ export async function recordCost(event: CostRecord): Promise<MissionRow> {
       return mission;
     });
   }
-  await addUserDailySpend(missionAfterSpend.ownerUserId ?? "system", event.costCents);
+  // Settle: the reserve (reserveUserSpend) already added reservedUserCents to the
+  // owner's daily spend, so only the delta to the actual cost is added now. The
+  // mission-spend update above always uses the full costCents.
+  await addUserDailySpend(missionAfterSpend.ownerUserId ?? "system", event.costCents - (event.reservedUserCents ?? 0));
   return missionAfterSpend;
 }
 
@@ -264,8 +271,45 @@ export async function assertUserBudgetForMission(missionId: string, estimatedCos
   throw new Error("error.user.daily_cap_hit");
 }
 
+// Atomic alternative to assertCanSpend for real spend commitments (e.g. an LLM
+// call): conditionally adds estimateCostCents to the owner's daily spend in a
+// single UPDATE that only applies while there is headroom. Two concurrent
+// callers can no longer both pass a stale read of the cap. Returns the reserved
+// cents so the caller can settle it via CostRecord.reservedUserCents once the
+// real cost is known. On error after reserving, the reserve stays counted until
+// the daily window resets (conservative — it can only over-count, never let
+// spend exceed the cap).
+export async function reserveUserSpend(missionId: string, estimateCostCents: number): Promise<number> {
+  const estimate = Math.max(0, Math.round(estimateCostCents));
+  const mission = await getMission(missionId);
+  const userId = mission.ownerUserId ?? "system";
+  await getOrCreateBudgetProfile(userId); // also resets the daily window if stale
+  if (estimate === 0) return 0;
+  const reserved = await db
+    .update(usersProfile)
+    .set({ dailySpendCents: sql`${usersProfile.dailySpendCents} + ${estimate}`, updatedAt: now() })
+    .where(and(
+      eq(usersProfile.userId, userId),
+      sql`${usersProfile.dailySpendCents} + ${estimate} <= ${usersProfile.dailyBudgetCents}`,
+    ))
+    .returning({ userId: usersProfile.userId });
+  if (reserved.length === 0) {
+    await recordAudit({
+      missionId,
+      subjectType: "user",
+      subjectId: userId,
+      actor: { type: "system", id: "budget" },
+      action: "daily_budget_cap_hit",
+      diffSummary: `reserve_estimate:${estimate};cap:${(await getOrCreateBudgetProfile(userId)).dailyBudgetCents}`,
+    });
+    throw new Error("error.user.daily_cap_hit");
+  }
+  return estimate;
+}
+
 export const BudgetService = {
   assertCanSpend: assertUserBudgetForMission,
+  reserve: reserveUserSpend,
 };
 
 export async function recordAudit(event: AuditRecord): Promise<string> {
@@ -363,6 +407,52 @@ export async function updateSandboxRuntimeOnly(ref: SandboxRef, missionId: strin
 
 export async function reserveMissionSandboxSlot(missionId: string) {
   await upsertSandboxRuntime(emptySandbox("mission", missionId), missionId);
+}
+
+// CAS lease so concurrent startOrResume calls for the SAME sandbox don't each
+// spin up a real E2B sandbox (the duplicate leaks and burns money). Returns true
+// to exactly one caller, who then creates the sandbox; losers wait for the
+// winner's routing. A row that already holds an e2bSandboxId is never claimed
+// (it already has live routing); a "starting" row older than staleMs is
+// reclaimable so a crashed claimer can't deadlock future starts.
+export async function claimSandboxStartLease(
+  input: { sandboxId: string; missionId: string; tier: SandboxTier; instanceId?: string },
+  staleMs = 90_000,
+): Promise<boolean> {
+  const timestamp = now();
+  const staleBefore = new Date(Date.now() - staleMs).toISOString();
+  const claimed = await db
+    .insert(sandboxRuntime)
+    .values({
+      sandboxId: input.sandboxId,
+      missionId: input.missionId,
+      instanceId: input.instanceId ?? null,
+      tier: input.tier,
+      state: "starting",
+      e2bSandboxId: null,
+      burnRateCentsPerMinute: 0,
+      updatedAt: timestamp,
+    })
+    .onConflictDoUpdate({
+      target: sandboxRuntime.sandboxId,
+      set: { state: "starting", updatedAt: timestamp },
+      where: and(
+        isNull(sandboxRuntime.e2bSandboxId),
+        or(ne(sandboxRuntime.state, "starting"), lt(sandboxRuntime.updatedAt, staleBefore)),
+      ),
+    })
+    .returning({ sandboxId: sandboxRuntime.sandboxId });
+  return claimed.length > 0;
+}
+
+// Release a start lease we won but failed to fulfil (createRealSandbox threw), so
+// a retry can reclaim immediately instead of waiting out the stale window. Only
+// clears a row that still has no live e2bSandboxId.
+export async function releaseSandboxStartLease(sandboxId: string) {
+  await db
+    .update(sandboxRuntime)
+    .set({ state: "error", updatedAt: now() })
+    .where(and(eq(sandboxRuntime.sandboxId, sandboxId), isNull(sandboxRuntime.e2bSandboxId)));
 }
 
 export async function reservePrivateSandboxSlot(missionId: string, instanceId: string) {
