@@ -218,11 +218,12 @@ def main():
     api_key = task.get("openaiApiKey")
     if not api_key:
         raise RuntimeError("openaiApiKey missing")
-    system = "\n\n".join([
+    system = "\n\n".join([part for part in [
         task.get("soul") or "You are a Missionry execution agent.",
         task.get("identity") or "",
+        task.get("memory") or "",
         "You are running inside the E2B VM at /workspace. Use local tools to run commands and read/write files. Produce real artifacts when useful. Finish with a concise summary of exact actions and files changed.",
-    ])
+    ] if part])
     user = "\n".join([
         "Work card: " + task.get("title", ""),
         "Description: " + (task.get("description") or ""),
