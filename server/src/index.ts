@@ -6,7 +6,7 @@ import { generateText, streamText, stepCountIs, tool } from "ai";
 import { z } from "zod";
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
-import { ensureAgentFiles, ensureAgentInstanceFiles, loadAgentBootFiles, loadSkill, buildMemoryContext, appendAgentMemory, appendUserProfile, loadAgentMemory, loadUserProfile, setAgentMemory, setUserProfile, setAgentSoulIdentity, writeAgentSkill, equipSkills, writeLibrarySkill } from "./agents/files";
+import { ensureAgentFiles, ensureAgentInstanceFiles, loadAgentBootFiles, loadSkill, buildMemoryContext, appendAgentMemory, appendUserProfile, loadAgentMemory, loadUserProfile, setAgentMemory, setUserProfile, setAgentSoulIdentity, writeAgentSkill, equipSkills, writeLibrarySkill, loadLibrarySkill, unequipSkill } from "./agents/files";
 import { esSystemAuthUser } from "./__generated__/sys_schema";
 import {
   adminChatMessages,
@@ -2623,6 +2623,44 @@ async function runAdminConcierge(userId: string, history: Array<{ authorType: st
 app.get("/api/public/concierge/overview", async (c) => {
   currentUserProfile(c);
   return c.json({ agents: await adminAgentsOverview(), missions: await adminMissionsOverview() });
+});
+
+// ── Team skill library (user-facing CRUD for the /skills page) ─────────────────
+async function skillEquippedAgentIds(skillId: string): Promise<string[]> {
+  const agentRows = await db.select({ id: agents.id, equipped: agents.equippedSkillIdsJson }).from(agents) as Array<{ id: string; equipped: string }>;
+  const out: string[] = [];
+  for (const a of agentRows) {
+    try { const parsed = JSON.parse(a.equipped) as unknown; if (Array.isArray(parsed) && parsed.includes(skillId)) out.push(a.id); } catch { /* skip */ }
+  }
+  return out;
+}
+
+app.get("/api/public/skills", async (c) => {
+  currentUserProfile(c);
+  const rows = await db.select().from(skills).orderBy(asc(skills.createdAt)) as Array<typeof skills.$inferSelect>;
+  const agentRows = await db.select({ id: agents.id, equipped: agents.equippedSkillIdsJson }).from(agents) as Array<{ id: string; equipped: string }>;
+  const equippedBy = (skillId: string) => agentRows.filter((a) => { try { return (JSON.parse(a.equipped) as string[]).includes(skillId); } catch { return false; } }).map((a) => a.id);
+  return c.json({ items: rows.map((s) => ({ id: s.id, name: s.name, description: s.description, source: s.source, createdAt: s.createdAt, equippedAgentIds: equippedBy(s.id) })) });
+});
+
+app.get("/api/public/skills/:skillId", async (c) => {
+  currentUserProfile(c);
+  const skillId = assertSafeId(c.req.param("skillId"), "skill_id");
+  const [row] = await db.select().from(skills).where(eq(skills.id, skillId)).limit(1) as Array<typeof skills.$inferSelect>;
+  if (!row) return jsonError(c, "error.skill.not_found", 404);
+  return c.json({ id: row.id, name: row.name, description: row.description, source: row.source, content: (await loadLibrarySkill(skillId)) ?? "", equippedAgentIds: await skillEquippedAgentIds(skillId) });
+});
+
+// Set exactly which agents have this skill equipped (checkbox UI saves the full set).
+app.put("/api/public/skills/:skillId/agents", async (c) => {
+  currentUserProfile(c);
+  const skillId = assertSafeId(c.req.param("skillId"), "skill_id");
+  const body = (await c.req.json().catch(() => ({}))) as { agentIds?: string[] };
+  const target = new Set((body.agentIds ?? []).map((id) => assertSafeId(id, "agent_id")));
+  const current = new Set(await skillEquippedAgentIds(skillId));
+  for (const agentId of target) if (!current.has(agentId)) await equipSkills(agentId, [skillId]);
+  for (const agentId of current) if (!target.has(agentId)) await unequipSkill(agentId, skillId);
+  return c.json({ status: "completed", skillId, equippedAgentIds: Array.from(target) });
 });
 
 app.get("/api/public/concierge/chat", async (c) => {

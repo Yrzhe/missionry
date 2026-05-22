@@ -930,6 +930,49 @@ strong { font-weight: 650; }
 .mp-card-discussion-hint { margin: 0; font-size: 12px; }
 .mp-field-hint { display: block; margin-top: 4px; font-size: 11px; line-height: 1.4; }
 
+/* Skill library page */
+.mp-skill-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 12px;
+}
+.mp-skill-card {
+  display: grid;
+  gap: 6px;
+  align-content: start;
+  text-align: left;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+  cursor: pointer;
+  font: inherit;
+  min-height: 96px;
+}
+.mp-skill-card:hover { border-color: #ded3bd; background: #fbf8f2; }
+.mp-skill-desc {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.mp-skill-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: auto; }
+.mp-skill-modal { max-width: 760px; width: 100%; }
+.mp-skill-modal-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(180px, 1fr);
+  gap: 16px;
+}
+.mp-skill-content { max-height: min(420px, 50vh); overflow: auto; }
+.mp-skill-agent-list { display: grid; gap: 6px; max-height: min(420px, 50vh); overflow: auto; }
+.mp-skill-agent { display: flex; align-items: center; gap: 8px; }
+@media (max-width: 820px) {
+  .mp-skill-modal-body { grid-template-columns: 1fr; }
+}
+
 /* Concierge (admin agent) page */
 .mp-concierge-layout {
   display: grid;

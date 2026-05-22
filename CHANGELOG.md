@@ -7,6 +7,10 @@ uses date-based entries.
 ## [Unreleased]
 
 ### Added
+- **Skill library page (`/skills`).** Browse the team skill library; click a skill
+  to see its SKILL.md and check which agents to equip it on (saves the full set).
+  Endpoints `GET /skills`, `GET /skills/:id`, `PUT /skills/:id/agents`. Nav entry「技能库」.
+  (`web/.../skill-library/SkillLibrary.tsx`, `server/src/index.ts`)
 - **Team shared skill library.** Skills now live in a shared library
   (`skills` table + R2 `skills/{id}/SKILL.md`) that any agent can be equipped with;
   agents resolve a skill from their own folder first, then the library
