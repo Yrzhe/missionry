@@ -2,7 +2,7 @@ export const buckets = {
   missionryWorkspaces: {
     bucket_name: "missionry-workspaces",
     versioning: true,
-    prefixes: ["agents/", "missions/", "artifacts/", "snapshots/"],
+    prefixes: ["agents/", "missions/", "artifacts/", "snapshots/", "skills/", "users/"],
   },
 } as const;
 

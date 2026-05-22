@@ -79,6 +79,18 @@ export const missionChatMessages = sqliteTable("mission_chat_messages", {
   createdAt: text("created_at").notNull(),
 });
 
+// Team-shared skill library. Skills live at R2 skills/{id}/SKILL.md; agents equip
+// them by id (resolved from the library, or the agent's own folder for bespoke ones).
+export const skills = sqliteTable("skills", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull(),
+  description: text("description").notNull(),
+  source: text("source"), // "authored" | "github:<url>"
+  createdBy: text("created_by"),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+});
+
 // Workspace-level chat with the Admin/Concierge agent (not tied to a mission).
 export const adminChatMessages = sqliteTable("admin_chat_messages", {
   id: text("id").primaryKey(),

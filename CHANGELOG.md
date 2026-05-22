@@ -7,6 +7,13 @@ uses date-based entries.
 ## [Unreleased]
 
 ### Added
+- **Team shared skill library.** Skills now live in a shared library
+  (`skills` table + R2 `skills/{id}/SKILL.md`) that any agent can be equipped with;
+  agents resolve a skill from their own folder first, then the library
+  (`loadAgentBootFiles`/`loadSkill`). Concierge tools: `list_library_skills`,
+  `add_library_skill` (author), `install_library_skill` (from GitHub, security-scanned),
+  `equip_skill(agentId, skillId)`. Migration `0006`; added `skills/` + `users/` R2
+  prefixes. (`server/src/index.ts`, `server/src/agents/files.ts`)
 - **Concierge can search GitHub for skills (`find_skills`).** Given a capability,
   it searches GitHub — code search for `SKILL.md` when `GITHUB_TOKEN` is set, else
   unauthenticated repo search — returns candidates, then installs a chosen one via
