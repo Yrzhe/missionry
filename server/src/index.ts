@@ -1659,6 +1659,92 @@ async function dispatchMissionChatReplies(missionId: string, source: typeof miss
     await updateAgentResponseCursor(missionId, mention.id, agentMessage);
     created.push(agentMessage);
   }
+  // Proactive chatter: let relevant non-leader, non-mentioned agents self-decide to
+  // chime in (cheap gate model). Run in the BACKGROUND — the gate + replies would
+  // otherwise add many sequential model calls to the request and risk the Worker
+  // wall-clock limit. Persisted replies surface to the client via the mission SSE.
+  const respondedIds = new Set<string>(mentionedInstanceIds);
+  if (leaderInstanceId) respondedIds.add(leaderInstanceId);
+  waitUntil(runProactiveChatter(mission, missionId, source, leaderInstanceId, respondedIds).then(() => undefined).catch((error) => console.error("PROACTIVE CHATTER ERROR:", error)));
+  return created;
+}
+
+const PROACTIVE_MAX_SPEAKERS = 2;
+const PROACTIVE_GATE_CANDIDATES = 5;
+const PROACTIVE_COOLDOWN_MSGS = 4;
+
+// Cheap two-tier proactive chatter: a cheap "gate" model decides per candidate agent
+// whether it's worth chiming in; only the top yes-voters then run the expensive
+// reply. Guardrails: only reacts to USER messages (no agent ping-pong), caps speakers,
+// per-agent cooldown, respects budget, and is killable via MISSIONRY_PROACTIVE_CHATTER.
+async function runProactiveChatter(
+  mission: Awaited<ReturnType<typeof getMissionWithRuntimeSandboxes>>,
+  missionId: string,
+  source: typeof missionChatMessages.$inferSelect,
+  leaderInstanceId: string | null,
+  respondedIds: Set<string>,
+): Promise<Array<typeof missionChatMessages.$inferSelect>> {
+  if (source.authorType !== "user") return [];
+  if ((vars.get("MISSIONRY_PROACTIVE_CHATTER") ?? "on") === "off") return [];
+  if (mission.stateJson.costGuardrailStatus === "daily_cap_hit") return [];
+  if (forceMockAi() || await e2b.useMemoryMode()) return [];
+  const apiKey = await Promise.resolve(secret.get("OPENAI_API_KEY")).catch(() => undefined);
+  if (!apiKey) return [];
+  const gateModel = vars.get("MISSIONRY_GATE_MODEL") || "gpt-5-mini";
+
+  const rows = await loadMissionAgentRows(missionId);
+  const recent = await db.select({ authorId: missionChatMessages.authorId }).from(missionChatMessages)
+    .where(and(eq(missionChatMessages.missionId, missionId), isNull(missionChatMessages.workCardId)))
+    .orderBy(desc(missionChatMessages.createdAt)).limit(PROACTIVE_COOLDOWN_MSGS);
+  const recentAuthors = new Set(recent.map((r: { authorId: string }) => r.authorId));
+  const candidates = rows
+    .filter((row) => row.instance.id !== leaderInstanceId && !respondedIds.has(row.instance.id) && !recentAuthors.has(row.instance.id))
+    .slice(0, PROACTIVE_GATE_CANDIDATES);
+  if (candidates.length === 0) return [];
+
+  const openai = createOpenAI({ apiKey });
+  const scored: Array<{ row: (typeof candidates)[number]; score: number }> = [];
+  for (const row of candidates) {
+    try {
+      const res = await generateText({
+        model: openai(gateModel),
+        prompt: [
+          `You are ${row.instance.displayAlias || row.agent.displayName} (role ${row.instance.role}, skills ${agentSkillIds(row.agent).join(",") || "none"}) in a team chat.`,
+          `Latest user message: "${String(source.body).slice(0, 800)}"`,
+          "Should YOU proactively chime in — only if you can genuinely add value given your role/skills? Be conservative; usually the answer is no.",
+          'Reply with JSON only: {"speak": true|false, "score": 0-100, "reason": "few words"}.',
+        ].join("\n"),
+      });
+      const parsed = JSON.parse(res.text.trim().match(/\{[\s\S]*\}/)?.[0] ?? "{}") as { speak?: boolean; score?: number };
+      if (parsed.speak === true) scored.push({ row, score: Number(parsed.score) || 50 });
+    } catch {
+      // Gate failed (e.g. bad model id) → fail safe: don't chime in.
+    }
+  }
+  scored.sort((a, b) => b.score - a.score);
+  const created: Array<typeof missionChatMessages.$inferSelect> = [];
+  for (const { row } of scored.slice(0, PROACTIVE_MAX_SPEAKERS)) {
+    const historyWindow = await historyWindowSinceLastResponse(missionId, row.instance.id);
+    const body = await generateMissionChatReply({
+      missionId,
+      agentId: row.agent.id,
+      instanceId: row.instance.id,
+      systemFallback: `You are ${row.agent.displayName}. You chose to proactively join the team chat because it's relevant to your role/skills. Add ONE genuinely useful, brief contribution — use your tools if needed. If on reflection you have nothing to add, reply [NO].`,
+      history: historyWindow,
+      stubBody: `[STUB] ${row.agent.displayName} proactive: ${source.body}`,
+    });
+    const replyMentions = await parseMissionMentions(missionId, body);
+    const message = await persistMissionChatMessage({
+      missionId,
+      authorType: "agent_instance",
+      authorId: row.instance.id,
+      body,
+      mentions: replyMentions,
+      replyToMessageId: source.id,
+    });
+    await updateAgentResponseCursor(missionId, row.instance.id, message);
+    created.push(message);
+  }
   return created;
 }
 
