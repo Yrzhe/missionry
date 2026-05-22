@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -83,6 +83,12 @@ export function Workroom() {
   const selectedAssignee = form.assigneeInstanceId || defaultAssignee;
   const leaderInstanceId = workroom?.mission.leaderInstanceId ?? (workroom?.mission.owner?.type === 'agent' ? workroom.mission.owner.agentInstanceId : undefined);
   const visibleMessages = showSilenced ? chatMessages : chatMessages.filter((message) => message.body !== '[NO]');
+  const chatScrollRef = useRef<HTMLDivElement>(null);
+  // Keep the chat pinned to the newest message (bottom) as messages arrive.
+  useEffect(() => {
+    const el = chatScrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [visibleMessages.length]);
   const mentionQuery = chatBody.match(/@([\w.-]*)$/)?.[1].toLowerCase();
   const mentionOptions = mentionQuery === undefined ? [] : (workroom?.agentInstances ?? []).filter((row) => row.agent.displayName.toLowerCase().includes(mentionQuery)).slice(0, 5);
   const missionEvents = useMemo(() => {
@@ -404,7 +410,16 @@ export function Workroom() {
           </div>
           {activeTab === 'plan' ? <PlanTab workroom={workroom} isGeneratingPlan={planAction} activeWorkCardId={workCardAction} onGeneratePlan={() => void generatePlan()} onStartWorkCard={(workCardId) => void startWorkCard(workCardId)} onNewCard={() => setModalOpen(true)} /> : null}
           {activeTab === 'activity' ? <ActivityTab events={missionEvents} /> : null}
-          {activeTab === 'artifacts' ? <FileBrowser missionId={workroom.mission.id} expanded /> : null}
+          {activeTab === 'artifacts' ? (
+            <div className="mp-artifacts-stack">
+              <ArtifactsBrowser missionId={workroom.mission.id} />
+              <details className="mp-artifacts-live">
+                <summary>{t('workroom.artifacts.liveTitle')}</summary>
+                <p className="mp-muted">{t('workroom.artifacts.liveSubtitle')}</p>
+                <FileBrowser missionId={workroom.mission.id} expanded />
+              </details>
+            </div>
+          ) : null}
         </section>
 
         <section className="mp-card mp-chat-panel">
@@ -415,7 +430,7 @@ export function Workroom() {
             </div>
             <label className="mp-inline-check"><input type="checkbox" checked={showSilenced} onChange={(event) => setShowSilenced(event.target.checked)} />{t('workroom.chat.showSilenced')}</label>
           </div>
-          <div className="mp-chat-scroll">
+          <div className="mp-chat-scroll" ref={chatScrollRef}>
             {visibleMessages.length ? visibleMessages.map((message) => <ChatMessage key={message.id} message={message} workroom={workroom} leaderInstanceId={leaderInstanceId} />) : <div className="mp-empty mp-empty-cta"><p>{t('workroom.chat.empty')}</p></div>}
           </div>
           <form className="mp-chat-composer" onSubmit={sendChat}>
@@ -654,6 +669,54 @@ function FileBrowser({ missionId, expanded = false }: { missionId: string; expan
               {selected.path.endsWith('.md') || selected.mimeType?.includes('markdown') ? <Markdown value={selected.content} /> : <pre>{selected.content}</pre>}
             </>
           ) : contentQuery.isError ? <p className="mp-denied">{t('workroom.files.previewError')} · {contentQuery.error instanceof Error ? contentQuery.error.message : ''} <button className="mp-button" onClick={() => void contentQuery.refetch()}>{t('common.retry')}</button></p> : contentQuery.isLoading ? <p className="mp-muted">{t('common.loading')}</p> : <p className="mp-muted">{t('workroom.files.select')}</p>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ArtifactsBrowser({ missionId }: { missionId: string }) {
+  const { t } = useTranslation();
+  const [selectedPath, setSelectedPath] = useState<string | null>(null);
+  const artifactsQuery = useQuery({
+    queryKey: queryKeys.missionArtifacts(missionId),
+    queryFn: () => api.missionArtifacts(missionId),
+    retry: 1,
+  });
+  const contentQuery = useQuery({
+    queryKey: queryKeys.missionArtifactFile(missionId, selectedPath ?? ''),
+    queryFn: () => api.missionArtifactFile(missionId, selectedPath ?? ''),
+    enabled: selectedPath !== null,
+    retry: 1,
+  });
+  const items = artifactsQuery.data?.items ?? [];
+  const selected = contentQuery.data;
+  return (
+    <div className="mp-file-browser expanded">
+      <div className="mp-section-title">
+        <div>
+          <strong>{t('workroom.artifacts.title')}</strong>
+          <p className="mp-muted">{t('workroom.artifacts.subtitle')}</p>
+        </div>
+      </div>
+      <div className="mp-file-grid">
+        <div className="mp-file-list">
+          {artifactsQuery.isLoading ? <div className="mp-muted">{t('common.loading')}</div> : null}
+          {items.length ? items.map((item) => (
+            <button className="mp-file-row" key={item.path} onClick={() => setSelectedPath(item.path)}>
+              <span>{t('workroom.files.kind.file')}</span>
+              <strong>{item.path}</strong>
+              <span className="mp-muted">{item.size ? `${Math.round(item.size / 1024)} KB` : ''}</span>
+            </button>
+          )) : !artifactsQuery.isLoading ? <div className="mp-empty"><p>{t('workroom.artifacts.empty')}</p></div> : null}
+        </div>
+        <div className="mp-file-preview">
+          {selected?.found ? (
+            <>
+              <div className="mp-label">{selected.path}</div>
+              {selected.path.endsWith('.md') ? <Markdown value={selected.content} /> : <pre>{selected.content}</pre>}
+            </>
+          ) : contentQuery.isLoading ? <p className="mp-muted">{t('common.loading')}</p> : <p className="mp-muted">{t('workroom.artifacts.select')}</p>}
         </div>
       </div>
     </div>

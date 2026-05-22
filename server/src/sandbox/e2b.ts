@@ -195,6 +195,28 @@ async function envdFetch(ref: SandboxRef, path: string, init: RequestInit = {}, 
 
 async function envdRunCommand(ref: SandboxRef, command: string, cwd = WORKSPACE_ROOT, options: { throwOnNonZero?: boolean } = {}) {
   const envd = requireEnvd(ref);
+  // process.Process/Start is a Connect SERVER-STREAMING RPC. With
+  // Content-Type application/connect+json the REQUEST body must be a single
+  // length-prefixed envelope: [1 flag byte = 0][4-byte big-endian length][JSON].
+  // Sending raw JSON.stringify(...) makes envd read the first JSON bytes as the
+  // length prefix ("promised N bytes") and silently run nothing, so every
+  // in-sandbox command (incl. the agent runner launch) was a no-op.
+  const payloadBytes = new TextEncoder().encode(JSON.stringify({
+    process: {
+      cmd: "/bin/sh",
+      args: ["-lc", command],
+      envs: {},
+      cwd,
+    },
+    stdin: false,
+  }));
+  const framed = new Uint8Array(5 + payloadBytes.length);
+  framed[0] = 0; // uncompressed data frame
+  framed[1] = (payloadBytes.length >>> 24) & 0xff;
+  framed[2] = (payloadBytes.length >>> 16) & 0xff;
+  framed[3] = (payloadBytes.length >>> 8) & 0xff;
+  framed[4] = payloadBytes.length & 0xff;
+  framed.set(payloadBytes, 5);
   const response = await fetch(`${envd.host}/process.Process/Start`, {
     method: "POST",
     headers: {
@@ -205,15 +227,7 @@ async function envdRunCommand(ref: SandboxRef, command: string, cwd = WORKSPACE_
       "Content-Type": "application/connect+json",
       "Accept": "application/connect+json",
     },
-    body: JSON.stringify({
-      process: {
-        cmd: "/bin/sh",
-        args: ["-lc", command],
-        envs: {},
-        cwd,
-      },
-      stdin: false,
-    }),
+    body: framed,
   });
   if (!response.ok) throw new Error(`error.e2b.envd_request_failed:${response.status}:${await response.text().catch(() => response.statusText)}`);
   const result = { stdout: "", stderr: "", exitCode: 0 };
@@ -274,7 +288,12 @@ function collectProcessEvent(frame: unknown, acc: { stdout: string; stderr: stri
     if (pty) acc.stdout += decodeBase64Text(pty);
   }
   if (end) {
-    acc.exitCode = Number(end.exitCode ?? end.exit_code ?? acc.exitCode);
+    // envd emits `{ exited: true, status: "exit status N" }`; older shapes use
+    // exitCode/exit_code. Parse the numeric code from whichever is present.
+    const statusText = typeof end.status === "string" ? end.status : "";
+    const statusMatch = statusText.match(/(-?\d+)/);
+    const parsedFromStatus = statusMatch ? Number(statusMatch[1]) : undefined;
+    acc.exitCode = Number(end.exitCode ?? end.exit_code ?? parsedFromStatus ?? acc.exitCode);
     if (end.error) acc.stderr += `${String(end.error)}\n`;
   }
 }

@@ -21,6 +21,8 @@ export const queryKeys = {
   missionAgentRequests: (missionId: string) => ['missions', missionId, 'agent-requests'] as const,
   missionFiles: (missionId: string, path = '') => ['missions', missionId, 'files', path] as const,
   missionFileContent: (missionId: string, path: string) => ['missions', missionId, 'file', path] as const,
+  missionArtifacts: (missionId: string) => ['missions', missionId, 'artifacts'] as const,
+  missionArtifactFile: (missionId: string, path: string) => ['missions', missionId, 'artifact', path] as const,
   agents: ['agents'] as const,
   agentWorkCards: (agentId: string) => ['agents', agentId, 'work-cards'] as const,
   directThread: (threadId: string) => ['direct-threads', threadId] as const,

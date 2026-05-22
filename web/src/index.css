@@ -1033,6 +1033,28 @@ strong { font-weight: 650; }
   display: grid;
   gap: 10px;
   min-width: 0;
+  /* Pack rows to the top. Without this the browser stretches the auto rows to
+     fill the tall panel, which vertically-centers the section title and leaves a
+     large empty gap above "任务文件". */
+  align-content: start;
+}
+
+/* 产物 tab: durable artifacts on top, collapsible live sandbox files below. */
+.mp-artifacts-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-height: 0;
+  overflow: auto;
+  padding-right: 4px;
+}
+.mp-artifacts-live > summary {
+  cursor: pointer;
+  font-weight: 600;
+  padding: 6px 0;
+}
+.mp-artifacts-live > .mp-muted {
+  margin: 2px 0 10px;
 }
 
 .mp-file-grid {
@@ -1044,6 +1066,9 @@ strong { font-weight: 650; }
 
 .mp-file-browser.expanded .mp-file-grid {
   grid-template-columns: minmax(210px, .36fr) minmax(0, 1fr);
+  /* Fill the panel height so the file list / preview area uses the space
+     instead of leaving a gap at the bottom. */
+  min-height: min(560px, calc(100vh - 300px));
 }
 
 .mp-file-list {

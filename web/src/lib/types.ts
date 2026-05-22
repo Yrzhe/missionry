@@ -352,3 +352,11 @@ export type MissionFileContent = {
   mimeType?: string;
   updatedAt?: string;
 };
+
+export type MissionArtifact = {
+  path: string;
+  size?: number;
+  cardId: string;
+  cardTitle: string;
+  completedAt?: string;
+};

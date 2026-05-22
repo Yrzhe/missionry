@@ -13,6 +13,7 @@ import type {
   MissionEnvironment,
   MissionEnvironmentVariable,
   MissionFileContent,
+  MissionArtifact,
   MissionAgentRequest,
   MissionSpendBreakdown,
   MissionSummary,
@@ -311,6 +312,8 @@ export const api = {
     };
   },
   missionFileContent: (missionId: string, path: string) => request<MissionFileContent>(`/missions/${missionId}/sandbox/file?path=${encodeURIComponent(workspaceRelativePath(path))}`),
+  missionArtifacts: (missionId: string) => request<{ items: MissionArtifact[] }>(`/missions/${missionId}/artifacts`),
+  missionArtifactFile: (missionId: string, path: string) => request<{ path: string; content: string; found: boolean }>(`/missions/${missionId}/artifacts/file?path=${encodeURIComponent(path)}`),
   decomposeMission: (missionId: string) => request<{ actionId?: string; status?: string; created?: Array<{ workCardId: string; status: string }> }>(`/missions/${missionId}/decompose`, { method: 'POST', body: '{}' }),
   startWorkCard: (missionId: string, workCardId: string) => request<{ actionId?: string; status?: string; workCard?: unknown; workCardId?: string }>(`/missions/${missionId}/work-cards/${workCardId}/start`, { method: 'POST', body: '{}' }),
   assignWorkCard: (missionId: string, workCardId: string, assigneeInstanceId: string) => request<{ actionId?: string; status?: string; workCard?: unknown; workCardId?: string }>(`/missions/${missionId}/work-cards/${workCardId}/assign`, {
