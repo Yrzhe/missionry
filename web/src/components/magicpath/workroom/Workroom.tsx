@@ -84,10 +84,17 @@ export function Workroom() {
   const leaderInstanceId = workroom?.mission.leaderInstanceId ?? (workroom?.mission.owner?.type === 'agent' ? workroom.mission.owner.agentInstanceId : undefined);
   const visibleMessages = showSilenced ? chatMessages : chatMessages.filter((message) => message.body !== '[NO]');
   const chatScrollRef = useRef<HTMLDivElement>(null);
-  // Keep the chat pinned to the newest message (bottom) as messages arrive.
+  // Keep the chat pinned to the newest message (bottom). Scroll after layout (rAF +
+  // a fallback) so it lands at the true bottom even after markdown reflows on first
+  // load / refresh — a plain synchronous scroll fires before content height settles.
   useEffect(() => {
     const el = chatScrollRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
+    if (!el) return;
+    const toBottom = () => { el.scrollTop = el.scrollHeight; };
+    toBottom();
+    const raf = requestAnimationFrame(toBottom);
+    const timer = setTimeout(toBottom, 150);
+    return () => { cancelAnimationFrame(raf); clearTimeout(timer); };
   }, [visibleMessages.length]);
   const mentionQuery = chatBody.match(/@([\w.-]*)$/)?.[1].toLowerCase();
   const mentionOptions = mentionQuery === undefined ? [] : (workroom?.agentInstances ?? []).filter((row) => row.agent.displayName.toLowerCase().includes(mentionQuery)).slice(0, 5);
@@ -987,7 +994,15 @@ function CardDiscussion({ missionId, cardId, workroom, leaderInstanceId }: { mis
     queryFn: () => api.workCardMessages(missionId, cardId),
   });
   const messages = messagesQuery.data?.items ?? EMPTY_MESSAGES;
-  useEffect(() => { const el = scrollRef.current; if (el) el.scrollTop = el.scrollHeight; }, [messages.length]);
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const toBottom = () => { el.scrollTop = el.scrollHeight; };
+    toBottom();
+    const raf = requestAnimationFrame(toBottom);
+    const timer = setTimeout(toBottom, 150);
+    return () => { cancelAnimationFrame(raf); clearTimeout(timer); };
+  }, [messages.length]);
   const sendMutation = useMutation({
     mutationFn: (body: string) => api.sendWorkCardMessage(missionId, cardId, body),
     onMutate: async (body: string) => {
