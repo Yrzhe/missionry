@@ -552,10 +552,32 @@ function AgentRequestsPanel({ requests, isLoading, error, activeRequestId, onApp
   );
 }
 
+type CardFilter = 'all' | 'queued' | 'running' | 'done';
+const DONE_STATES = ['done', 'failed', 'cancelled', 'blocked'];
+function cardFilterGroup(status: string): CardFilter {
+  if (status === 'running') return 'running';
+  if (DONE_STATES.includes(status)) return 'done';
+  return 'queued';
+}
+
 function PlanTab({ workroom, isGeneratingPlan, activeWorkCardId, onGeneratePlan, onStartWorkCard, onNewCard }: { workroom: WorkroomReadModel; isGeneratingPlan: boolean; activeWorkCardId: string | null; onGeneratePlan: () => void; onStartWorkCard: (workCardId: string) => void; onNewCard: () => void }) {
   const { t } = useTranslation();
   const queuePositions = useMemo(() => queuePositionByCard(workroom.workCards), [workroom.workCards]);
   const hasCards = workroom.workCards.length > 0;
+  const [filter, setFilter] = useState<CardFilter>('all');
+  const [detailCardId, setDetailCardId] = useState<string | null>(null);
+  // Newest created on top.
+  const sortedCards = useMemo(
+    () => [...workroom.workCards].sort((a, b) => Date.parse(b.createdAt ?? '') - Date.parse(a.createdAt ?? '')),
+    [workroom.workCards],
+  );
+  const counts = useMemo(() => {
+    const c = { all: sortedCards.length, queued: 0, running: 0, done: 0 } as Record<CardFilter, number>;
+    for (const card of sortedCards) c[cardFilterGroup(card.status)] += 1;
+    return c;
+  }, [sortedCards]);
+  const visibleCards = filter === 'all' ? sortedCards : sortedCards.filter((card) => cardFilterGroup(card.status) === filter);
+  const detailCard = detailCardId ? workroom.workCards.find((card) => card.id === detailCardId) ?? null : null;
   return (
     <div className="mp-tab-panel">
       <section className="mp-plan-cta">
@@ -563,20 +585,28 @@ function PlanTab({ workroom, isGeneratingPlan, activeWorkCardId, onGeneratePlan,
           <strong>{hasCards ? t('workroom.autonomy.title') : t('workroom.autonomy.waitingTitle')}</strong>
           <p className="mp-muted">{hasCards ? t('workroom.autonomy.body') : t('workroom.autonomy.waitingBody')}</p>
         </div>
-        {/* Plan auto-generates on mission create and auto-runs. Only offer a manual
-            "Generate plan" fallback when there are no cards yet; once cards exist the
-            flow is automatic, so no redundant regenerate button. */}
         {!hasCards ? (
           <button className="mp-button" disabled={isGeneratingPlan || !workroom.agentInstances.length} onClick={onGeneratePlan}>{isGeneratingPlan ? t('common.saving') : t('workroom.generatePlan.action')}</button>
         ) : null}
       </section>
       <div className="mp-section-title">
-        <strong>{t('workroom.cards')}</strong>
+        <div className="mp-card-filters">
+          {(['all', 'queued', 'running', 'done'] as CardFilter[]).map((key) => (
+            <button key={key} className={`mp-filter-pill ${filter === key ? 'active' : ''}`} onClick={() => setFilter(key)}>
+              {t(`workroom.cardFilter.${key}`)} <span className="mp-pill-count">{counts[key]}</span>
+            </button>
+          ))}
+        </div>
         <button className="mp-button" onClick={onNewCard}>{t('workroom.newCard')}</button>
       </div>
       <div className="mp-workcard-list">
-        {workroom.workCards.length ? workroom.workCards.map((card) => <WorkCardRow key={card.id} card={card} queuePosition={queuePositions.get(card.id)} workroom={workroom} isStarting={activeWorkCardId === card.id} onStart={() => onStartWorkCard(card.id)} />) : <div className="mp-empty mp-empty-cta"><h2>{t('workroom.autonomy.waitingTitle')}</h2><p>{t('workroom.autonomy.waitingBody')}</p></div>}
+        {visibleCards.length ? visibleCards.map((card) => (
+          <WorkCardRow key={card.id} card={card} queuePosition={queuePositions.get(card.id)} workroom={workroom} isStarting={activeWorkCardId === card.id} onStart={() => onStartWorkCard(card.id)} onOpen={() => setDetailCardId(card.id)} />
+        )) : <div className="mp-empty mp-empty-cta"><h2>{t('workroom.autonomy.waitingTitle')}</h2><p>{t('workroom.autonomy.waitingBody')}</p></div>}
       </div>
+      {detailCard ? (
+        <WorkCardDetail card={detailCard} queuePosition={queuePositions.get(detailCard.id)} workroom={workroom} isStarting={activeWorkCardId === detailCard.id} onStart={() => onStartWorkCard(detailCard.id)} onClose={() => setDetailCardId(null)} />
+      ) : null}
     </div>
   );
 }
@@ -886,31 +916,63 @@ function ChatMessage({ message, workroom, leaderInstanceId }: { message: Mission
   );
 }
 
-function WorkCardRow({ card, queuePosition, workroom, isStarting, onStart }: { card: WorkCard; queuePosition?: number; workroom: WorkroomReadModel; isStarting: boolean; onStart: () => void }) {
+function tierLabel(t: ReturnType<typeof useTranslation>['t'], tier: string) {
+  return t(tier === 'mission' ? 'workroom.tierMission' : tier === 'private' ? 'workroom.tierPrivate' : 'workroom.tier0');
+}
+
+function WorkCardRow({ card, queuePosition, workroom, isStarting, onStart, onOpen }: { card: WorkCard; queuePosition?: number; workroom: WorkroomReadModel; isStarting: boolean; onStart: () => void; onOpen: () => void }) {
+  const { t } = useTranslation();
+  const assignee = workroom.agentInstances.find((row) => row.instance.id === card.assigneeInstanceId);
+  const tier = card.sandboxAffinity?.tier ?? 'tier0';
+  const canRerun = ['done', 'failed'].includes(card.status);
+  return (
+    <article className={`mp-workcard-item status-${card.status}`} role="button" tabIndex={0} onClick={onOpen} onKeyDown={(e) => { if (e.key === 'Enter') onOpen(); }}>
+      <div className="mp-workcard-head">
+        <strong className="mp-workcard-title">{card.title}</strong>
+        <span className={`mp-chip ${card.status === 'running' ? 'dark' : ''}`}>{card.status === 'queued' && queuePosition ? t('workroom.queuePosition', { position: queuePosition }) : t(`status.${card.status}`, card.status)}</span>
+      </div>
+      {card.description ? <p className="mp-workcard-desc">{card.description}</p> : null}
+      <div className="mp-workcard-footer">
+        <span className="mp-muted">{t('workroom.assignee')}: <strong>{assignee?.agent.displayName ?? '-'}</strong></span>
+        <span className="mp-muted">{t('workroom.affinity')}: {tierLabel(t, tier)}</span>
+        <span className="mp-muted">{t('workroom.cost')}: {money(card.cost?.spentCents)}</span>
+        {canRerun ? <button className="mp-button mp-workcard-rerun" disabled={isStarting} onClick={(e) => { e.stopPropagation(); onStart(); }}>{isStarting ? t('common.saving') : t('workroom.rerunCard')}</button> : null}
+      </div>
+    </article>
+  );
+}
+
+function WorkCardDetail({ card, queuePosition, workroom, isStarting, onStart, onClose }: { card: WorkCard; queuePosition?: number; workroom: WorkroomReadModel; isStarting: boolean; onStart: () => void; onClose: () => void }) {
   const { t } = useTranslation();
   const assignee = workroom.agentInstances.find((row) => row.instance.id === card.assigneeInstanceId);
   const tier = card.sandboxAffinity?.tier ?? 'tier0';
   const canRerun = ['done', 'failed'].includes(card.status);
   const flow = workCardFlow(card.status);
   return (
-    <article className={`mp-workcard-item status-${card.status}`}>
-      <div className="mp-workcard-main">
+    <div className="mp-modal-backdrop" role="presentation" onClick={onClose}>
+      <div className="mp-modal" onClick={(e) => e.stopPropagation()}>
         <div className="mp-section-title">
-          <strong>{card.title}</strong>
-          <span className={`mp-chip ${card.status === 'running' ? 'dark' : ''}`}>{card.status === 'queued' && queuePosition ? t('workroom.queuePosition', { position: queuePosition }) : t(`status.${card.status}`, card.status)}</span>
+          <div>
+            <div className="mp-label">{t('workroom.cardDetail.label')}</div>
+            <h2>{card.title}</h2>
+          </div>
+          <button type="button" className="mp-button" onClick={onClose}>{t('common.close')}</button>
         </div>
         <div className="mp-workcard-flow" aria-label={t('workroom.flow.label')}>
           {(['queued', 'running', 'done'] as const).map((step) => <span key={step} className={`mp-flow-step ${flow[step]}`}>{t(`status.${step}`)}</span>)}
         </div>
-        <Markdown value={card.description ?? t('workroom.cardNoDescription')} compact />
+        <div className="mp-detail-grid">
+          <Info label={t('workroom.assignee')} value={assignee?.agent.displayName ?? '-'} />
+          <Info label={t('workroom.affinity')} value={tierLabel(t, tier)} />
+          <Info label={t('workroom.cost')} value={money(card.cost?.spentCents)} />
+          <Info label={t('common.status') as string} value={card.status === 'queued' && queuePosition ? t('workroom.queuePosition', { position: queuePosition }) : t(`status.${card.status}`, card.status)} />
+        </div>
+        <div className="mp-label">{t('workroom.cardDetail.description')}</div>
+        <Markdown value={card.description ?? t('workroom.cardNoDescription')} />
+        {canRerun ? <button className="mp-button dark" disabled={isStarting} onClick={onStart}>{isStarting ? t('common.saving') : t('workroom.rerunCard')}</button> : null}
+        <p className="mp-muted mp-detail-soon">{t('workroom.cardDetail.discussionSoon')}</p>
       </div>
-      <div className="mp-workcard-meta">
-        <Info label={t('workroom.assignee')} value={assignee?.agent.displayName ?? '-'} />
-        <Info label={t('workroom.affinity')} value={t(tier === 'mission' ? 'workroom.tierMission' : tier === 'private' ? 'workroom.tierPrivate' : 'workroom.tier0')} />
-        <Info label={t('workroom.cost')} value={money(card.cost?.spentCents)} />
-        {canRerun ? <button className="mp-button" disabled={isStarting} onClick={onStart}>{isStarting ? t('common.saving') : t('workroom.rerunCard')}</button> : null}
-      </div>
-    </article>
+    </div>
   );
 }
 

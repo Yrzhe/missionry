@@ -466,5 +466,12 @@
   "admin.empty.missions.body": "All Missions appear here once users create work.",
   "workroom.chat.you": "You",
   "workroom.chat.replying": "AI is replying…",
-  "common.close": "Close"
+  "common.close": "Close",
+  "workroom.cardFilter.all": "All",
+  "workroom.cardFilter.queued": "Queued",
+  "workroom.cardFilter.running": "Running",
+  "workroom.cardFilter.done": "Done",
+  "workroom.cardDetail.label": "Work card",
+  "workroom.cardDetail.discussionSoon": "Card discussion & collaboration coming soon: the executing agent will be able to @ other agents here to ask and delegate small tasks.",
+  "workroom.cardDetail.description": "Description"
 }

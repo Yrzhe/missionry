@@ -833,40 +833,98 @@ strong { font-weight: 650; }
 }
 
 .mp-workcard-item {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(190px, .32fr);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 13px;
+  border: 1px solid #eee7d8;
+  border-radius: 10px;
+  background: var(--panel);
+  cursor: pointer;
+  text-align: left;
+}
+
+.mp-workcard-item:hover {
+  border-color: #ded3bd;
+  background: #fbf8f2;
+}
+
+.mp-workcard-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.mp-workcard-title {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.mp-workcard-desc {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+
+.mp-workcard-footer {
+  display: flex;
+  align-items: center;
   gap: 14px;
-  align-items: start;
-  padding: 13px 0;
-  border-top: 1px solid #eee7d8;
+  flex-wrap: wrap;
+  font-size: 12px;
 }
 
-.mp-workcard-main {
-  min-width: 0;
-  display: grid;
-  gap: 7px;
-}
-
-.mp-workcard-main .mp-section-title {
-  align-items: start;
-}
-
-.mp-workcard-meta {
-  display: grid;
-  gap: 4px;
-  min-width: 0;
-}
-
-.mp-workcard-meta .mp-kv {
-  grid-template-columns: 1fr;
-  padding: 5px 0;
+.mp-workcard-rerun {
+  margin-left: auto;
 }
 
 .mp-workcard-item.status-running {
+  border-color: #d8c9a6;
   background: #fbf8f2;
-  margin: 0 -8px;
-  padding: 13px 8px;
-  border-radius: 8px;
+}
+
+.mp-card-filters {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.mp-filter-pill {
+  border: 1px solid var(--line);
+  background: var(--panel);
+  border-radius: 999px;
+  padding: 5px 11px;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  color: var(--muted);
+}
+
+.mp-filter-pill.active {
+  border-color: var(--ink, #1a1a1a);
+  background: #f3eee3;
+  color: var(--ink, #1a1a1a);
+  font-weight: 600;
+}
+
+.mp-pill-count {
+  opacity: .6;
+  font-size: 12px;
+}
+
+.mp-detail-soon {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--line);
+  font-size: 12px;
 }
 
 .mp-workcard-flow {
