@@ -61,7 +61,10 @@ export async function emitAuditEvent(event: AuditRecord): Promise<string> {
 }
 
 export async function emitCostEvent(event: CostRecord): Promise<MissionSseEvent> {
-  if (event.costCents > 0) await BudgetService.assertCanSpend(event.missionId, event.costCents);
+  // Only the portion NOT already reserved (reserveUserSpend) needs a budget
+  // check here; the reserved cents already hold headroom for this op (#9).
+  const unreservedCents = event.costCents - (event.reservedUserCents ?? 0);
+  if (unreservedCents > 0) await BudgetService.assertCanSpend(event.missionId, unreservedCents);
   await recordCost(event);
   const auditEventId = await recordAudit({
     missionId: event.missionId,

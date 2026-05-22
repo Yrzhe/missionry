@@ -6,6 +6,27 @@ uses date-based entries.
 
 ## [Unreleased]
 
+### Fixed
+- **Concurrency hardening (#3/#9/#10).** Three race/correctness fixes in the
+  sandbox + budget path:
+  - **#3 sandbox start race.** Concurrent `startOrResume` for the same sandbox no
+    longer each spin up a real E2B sandbox (the duplicate leaked + burned money).
+    A CAS lease (`claimSandboxStartLease`, `INSERT…ON CONFLICT DO UPDATE…WHERE…
+    RETURNING`) lets exactly one caller create; losers wait for the winner's
+    routing, with a stale-lease (90s) reclaim and a create-it-yourself fallback so
+    it is never worse than before. Only engages on cold start.
+  - **#9 atomic budget reserve.** The daily-cap check was read-then-check, so two
+    concurrent ops could both pass and overspend. New `reserveUserSpend` does a
+    single conditional UPDATE (reserve iff under cap), applied to the mission-chat
+    and direct-thread replies and settled to real cost via
+    `CostRecord.reservedUserCents`. Conservative on error (can only over-count).
+  - **#10 stale env on resume.** Mission env was injected only at sandbox CREATE;
+    a resumed sandbox kept stale values. The current mission env is now injected
+    per-exec (threaded through `runCommand`→`envdRunCommand`) at runner launch, so
+    the runner always sees up-to-date variables regardless of sandbox age.
+  (`server/src/state/missionState.ts`, `server/src/sandbox/e2b.ts`,
+  `server/src/sse/events.ts`, `server/src/index.ts`)
+
 ### Added
 - **Skill library page (`/skills`).** Browse the team skill library; click a skill
   to see its SKILL.md and check which agents to equip it on (saves the full set).
