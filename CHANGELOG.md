@@ -7,6 +7,10 @@ uses date-based entries.
 ## [Unreleased]
 
 ### Added
+- **Memory editor in the Agent Library.** The agent edit modal now shows and edits
+  the agent's `MEMORY.md` (long-term memory) and the owner's shared `USER.md`
+  profile. New endpoints `GET/PUT /agents/:agentId/memory` and
+  `GET/PUT /me/memory-profile`. (`server/src/index.ts`, `web/.../agent-library/AgentLibrary.tsx`)
 - **Layered agent memory (Hermes-style).** Agents now have long-term memory:
   `agents/{id}/MEMORY.md` (cross-mission lessons/conventions, cap ~2.4k) and a
   shared `users/{userId}/USER.md` owner profile (cap ~1.5k); the raw message log

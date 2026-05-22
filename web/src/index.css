@@ -928,6 +928,7 @@ strong { font-weight: 650; }
   gap: 8px;
 }
 .mp-card-discussion-hint { margin: 0; font-size: 12px; }
+.mp-field-hint { display: block; margin-top: 4px; font-size: 11px; line-height: 1.4; }
 .mp-card-chat-scroll {
   display: flex;
   flex-direction: column;

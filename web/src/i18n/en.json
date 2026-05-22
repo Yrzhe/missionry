@@ -476,5 +476,11 @@
   "workroom.cardDetail.discussion": "Card discussion",
   "workroom.cardDetail.discussionHint": "@ another agent here to ask or delegate a small task — no new card needed; the mentioned agent replies and acts here.",
   "workroom.cardDetail.discussionEmpty": "No discussion yet. @ an agent to start collaborating.",
-  "workroom.cardDetail.discussionPlaceholder": "@Agent say something… (Enter to send, Shift+Enter for newline)"
+  "workroom.cardDetail.discussionPlaceholder": "@Agent say something… (Enter to send, Shift+Enter for newline)",
+  "agents.edit.memory": "Long-term memory (MEMORY.md)",
+  "agents.edit.memoryPlaceholder": "This agent's cross-mission lessons / conventions / tool quirks…",
+  "agents.edit.memoryHint": "Specific to this agent; the self-review appends here, and you can edit it.",
+  "agents.edit.userProfile": "About you (USER.md)",
+  "agents.edit.userProfilePlaceholder": "How to address you, communication preferences, things to avoid…",
+  "agents.edit.userProfileHint": "Your profile shared by all agents; the self-review keeps it updated."
 }

@@ -5,7 +5,7 @@ import { and, asc, desc, eq, inArray, isNull, lte, ne, sql } from "drizzle-orm";
 import { generateText, streamText, stepCountIs } from "ai";
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
-import { ensureAgentFiles, ensureAgentInstanceFiles, loadAgentBootFiles, loadSkill, buildMemoryContext, appendAgentMemory, appendUserProfile, loadAgentMemory } from "./agents/files";
+import { ensureAgentFiles, ensureAgentInstanceFiles, loadAgentBootFiles, loadSkill, buildMemoryContext, appendAgentMemory, appendUserProfile, loadAgentMemory, loadUserProfile, setAgentMemory, setUserProfile } from "./agents/files";
 import { esSystemAuthUser } from "./__generated__/sys_schema";
 import {
   agentInstances,
@@ -2349,6 +2349,33 @@ app.patch("/api/public/agents/:agentId", async (c) => {
     diffSummary: JSON.stringify(Object.keys(body)),
   });
   return c.json({ actionId: crypto.randomUUID(), status: "completed", agent: agentListItem(updated, 0), auditEventId });
+});
+
+// Agent long-term memory (MEMORY.md) — view + edit.
+app.get("/api/public/agents/:agentId/memory", async (c) => {
+  const agentId = assertSafeId(c.req.param("agentId"), "agent_id");
+  const denied = await assertAgentAccess(c, agentId);
+  if (denied) return denied;
+  return c.json({ memory: await loadAgentMemory(agentId) });
+});
+app.put("/api/public/agents/:agentId/memory", async (c) => {
+  const agentId = assertSafeId(c.req.param("agentId"), "agent_id");
+  const denied = await assertAgentAccess(c, agentId);
+  if (denied) return denied;
+  const body = (await c.req.json().catch(() => ({}))) as { content?: string };
+  await setAgentMemory(agentId, String(body.content ?? ""));
+  return c.json({ status: "completed", memory: await loadAgentMemory(agentId) });
+});
+
+// Owner profile (USER.md) — shared across the owner's agents.
+app.get("/api/public/me/memory-profile", async (c) => {
+  return c.json({ profile: await loadUserProfile(currentUserProfile(c).userId) });
+});
+app.put("/api/public/me/memory-profile", async (c) => {
+  const body = (await c.req.json().catch(() => ({}))) as { content?: string };
+  const userId = currentUserProfile(c).userId;
+  await setUserProfile(userId, String(body.content ?? ""));
+  return c.json({ status: "completed", profile: await loadUserProfile(userId) });
 });
 
 app.post("/api/public/agents", async (c) => {

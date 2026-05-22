@@ -476,5 +476,11 @@
   "workroom.cardDetail.discussion": "卡内讨论",
   "workroom.cardDetail.discussionHint": "在这里 @ 其他 Agent 提问或派小任务,无需新建卡片;被 @ 的 Agent 会在此回复并动手。",
   "workroom.cardDetail.discussionEmpty": "还没有讨论。@ 一个 Agent 开始协作吧。",
-  "workroom.cardDetail.discussionPlaceholder": "@Agent 说点什么…(Enter 发送,Shift+Enter 换行)"
+  "workroom.cardDetail.discussionPlaceholder": "@Agent 说点什么…(Enter 发送,Shift+Enter 换行)",
+  "agents.edit.memory": "长期记忆 (MEMORY.md)",
+  "agents.edit.memoryPlaceholder": "这个 agent 跨任务积累的经验/约定/工具习惯…",
+  "agents.edit.memoryHint": "该 agent 专属;自我复盘会自动往里追加,你也可手动编辑。",
+  "agents.edit.userProfile": "关于你 (USER.md)",
+  "agents.edit.userProfilePlaceholder": "你的称呼、沟通偏好、要避免的事…",
+  "agents.edit.userProfileHint": "所有 agent 共享的你的画像;自我复盘会自动更新。"
 }
