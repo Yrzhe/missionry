@@ -482,5 +482,20 @@
   "agents.edit.memoryHint": "该 agent 专属;自我复盘会自动往里追加,你也可手动编辑。",
   "agents.edit.userProfile": "关于你 (USER.md)",
   "agents.edit.userProfilePlaceholder": "你的称呼、沟通偏好、要避免的事…",
-  "agents.edit.userProfileHint": "所有 agent 共享的你的画像;自我复盘会自动更新。"
+  "agents.edit.userProfileHint": "所有 agent 共享的你的画像;自我复盘会自动更新。",
+  "nav.concierge": "管家",
+  "concierge.title": "管家 (Admin)",
+  "concierge.name": "管家",
+  "concierge.subtitle": "你的工作区总管",
+  "concierge.overview": "全局概览",
+  "concierge.intro": "我能帮你造 agent、建 mission 并指派 leader、查看所有 agent 和 mission 的状态。我不下场干活,只做编排。",
+  "concierge.empty": "跟我说:比如「造一个会写文案的 agent」或「建个 mission:做一份周报,让 Forge 当 leader」。",
+  "concierge.placeholder": "让管家做点什么…(Enter 发送)",
+  "concierge.thinking": "管家思考中…",
+  "concierge.sendError": "发送失败",
+  "concierge.agents": "Agent",
+  "concierge.missions": "Mission",
+  "concierge.inMissions": "在 {{count}} 个 mission",
+  "concierge.running": "{{count}} 个在跑",
+  "concierge.noCards": "暂无卡片"
 }

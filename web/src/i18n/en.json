@@ -482,5 +482,20 @@
   "agents.edit.memoryHint": "Specific to this agent; the self-review appends here, and you can edit it.",
   "agents.edit.userProfile": "About you (USER.md)",
   "agents.edit.userProfilePlaceholder": "How to address you, communication preferences, things to avoid…",
-  "agents.edit.userProfileHint": "Your profile shared by all agents; the self-review keeps it updated."
+  "agents.edit.userProfileHint": "Your profile shared by all agents; the self-review keeps it updated.",
+  "nav.concierge": "Concierge",
+  "concierge.title": "Concierge (Admin)",
+  "concierge.name": "Concierge",
+  "concierge.subtitle": "Your workspace chief-of-staff",
+  "concierge.overview": "Overview",
+  "concierge.intro": "I can build agents, create missions and assign a leader, and show you what every agent and mission is doing. I orchestrate — I don't do task work myself.",
+  "concierge.empty": "Try: \"build an agent that writes copy\" or \"create a mission: weekly report, with Forge as leader\".",
+  "concierge.placeholder": "Ask the concierge to do something… (Enter to send)",
+  "concierge.thinking": "Concierge is thinking…",
+  "concierge.sendError": "Failed to send",
+  "concierge.agents": "Agents",
+  "concierge.missions": "Missions",
+  "concierge.inMissions": "in {{count}} mission(s)",
+  "concierge.running": "{{count}} running",
+  "concierge.noCards": "no cards"
 }

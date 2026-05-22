@@ -45,6 +45,7 @@ export function Shell({ title, meta, actions, children }: ShellProps) {
           </div>
         </div>
         <nav className="mp-nav">
+          <NavItem to="/concierge" label={t('nav.concierge')} mark="✦" />
           <NavItem to="/missions" label={t('nav.missions')} mark="●" count={missionsQuery.data?.items.length || undefined} />
           <NavItem to="/agents" label={t('nav.agents')} mark="◐" />
           <NavItem to="/artifacts" label={t('nav.artifacts')} mark="□" />

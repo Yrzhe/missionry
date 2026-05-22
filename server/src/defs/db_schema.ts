@@ -79,6 +79,15 @@ export const missionChatMessages = sqliteTable("mission_chat_messages", {
   createdAt: text("created_at").notNull(),
 });
 
+// Workspace-level chat with the Admin/Concierge agent (not tied to a mission).
+export const adminChatMessages = sqliteTable("admin_chat_messages", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").notNull(),
+  authorType: text("author_type").notNull(), // "user" | "assistant"
+  body: text("body").notNull(),
+  createdAt: text("created_at").notNull(),
+});
+
 export const agentResponseCursors = sqliteTable(
   "agent_response_cursors",
   {
