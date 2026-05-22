@@ -174,6 +174,37 @@ export async function loadAgentBootFiles(agentId: string): Promise<AgentBootFile
   return { soul, identity, baseConfig: { model, tools: ["run_command", "use_skill"] }, skillsIndex, equippedSkillIds: skillsIndex.map((skill) => skill.id) };
 }
 
+// Write the agent's persona files (only the provided ones).
+export async function setAgentSoulIdentity(agentId: string, soul?: string, identity?: string) {
+  agentId = assertSafeId(agentId, "agent_id");
+  const bucket = storage.from(buckets.missionryWorkspaces);
+  if (soul && soul.trim()) await bucket.put(`agents/${agentId}/soul.md`, textBytes(soul));
+  if (identity && identity.trim()) await bucket.put(`agents/${agentId}/identity.md`, textBytes(identity));
+}
+
+// Install a skill INTO this agent's own folder (per-agent, no shared library).
+export async function writeAgentSkill(agentId: string, skillId: string, content: string) {
+  agentId = assertSafeId(agentId, "agent_id");
+  skillId = assertSafeId(skillId, "skill_id");
+  await storage.from(buckets.missionryWorkspaces).put(`agents/${agentId}/skills/${skillId}/SKILL.md`, textBytes(content));
+}
+
+// Add skill ids to the agent's equipped list (deduped).
+export async function equipSkills(agentId: string, skillIds: string[]) {
+  agentId = assertSafeId(agentId, "agent_id");
+  const [row] = await db.select({ equipped: agents.equippedSkillIdsJson }).from(agents).where(eq(agents.id, agentId)).limit(1);
+  let current: string[] = [];
+  try { const parsed = row?.equipped ? JSON.parse(row.equipped) : []; if (Array.isArray(parsed)) current = parsed.filter((s): s is string => typeof s === "string"); } catch { current = []; }
+  const merged = Array.from(new Set([...current, ...skillIds]));
+  await db.update(agents).set({ equippedSkillIdsJson: JSON.stringify(merged), updatedAt: new Date().toISOString() }).where(eq(agents.id, agentId));
+  return merged;
+}
+
+export async function listAgentSkillIds(agentId: string): Promise<string[]> {
+  const [row] = await db.select({ equipped: agents.equippedSkillIdsJson }).from(agents).where(eq(agents.id, assertSafeId(agentId, "agent_id"))).limit(1);
+  try { const parsed = row?.equipped ? JSON.parse(row.equipped) : []; return Array.isArray(parsed) ? parsed.filter((s): s is string => typeof s === "string") : []; } catch { return []; }
+}
+
 export async function loadSkill(agentId: string, skillId: string): Promise<string> {
   agentId = assertSafeId(agentId, "agent_id");
   skillId = assertSafeId(skillId, "skill_id");

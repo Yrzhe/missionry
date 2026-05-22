@@ -7,6 +7,13 @@ uses date-based entries.
 ## [Unreleased]
 
 ### Added
+- **Concierge can craft agents + manage per-agent skills.** `create_agent` now
+  writes a tailored SOUL/identity and authors+equips skills in one shot. New tools:
+  `add_skill` (author a SKILL.md into an agent's own folder + equip) and
+  `install_skill_from_github` (fetch a SKILL.md from a GitHub blob/raw URL → **security
+  scan** for exfiltration / destructive commands / RCE / prompt-injection → install +
+  equip only if safe, else refuse with the risks). Skills stay per-agent (downloaded
+  into that agent's `skills/` folder). (`server/src/index.ts`, `server/src/agents/files.ts`)
 - **Concierge (Admin) agent — control-plane orchestrator.** A new top-level
   「管家」 page where you chat with a workspace concierge that can inspect all agents
   and missions, **create agents**, and **create missions + assign a leader**
