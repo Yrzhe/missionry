@@ -159,6 +159,48 @@ function estimateLlmCostCents(model: string, usage: Record<string, unknown>) {
   return Math.max(1, Math.ceil(dollars * 100));
 }
 
+// Run a non-streaming LLM call under the atomic daily-budget reserve (#9): hold
+// headroom before the call, settle to the real cost after, release on error.
+// Mission-scoped spends record a cost event (and count toward mission spend);
+// user-scoped spends (e.g. the concierge, which has no mission) settle directly
+// against the owner's daily total. Throws error.user.daily_cap_hit if capped, so
+// callers in best-effort paths should keep their try/catch.
+async function spendGuardedGenerateText<TArgs extends Parameters<typeof generateText>[0]>(
+  budget: { missionId: string; agentId?: string; instanceId?: string; clientActionId?: string } | { userId: string },
+  modelName: string,
+  args: TArgs,
+): Promise<Awaited<ReturnType<typeof generateText>>> {
+  const reserved = "userId" in budget
+    ? await BudgetService.reserveByUser(budget.userId, LLM_RESERVE_CENTS)
+    : await BudgetService.reserve(budget.missionId, LLM_RESERVE_CENTS);
+  try {
+    const result = await generateText(args);
+    const usage = result.usage as unknown as Record<string, unknown>;
+    const costCents = estimateLlmCostCents(modelName, usage);
+    if ("userId" in budget) {
+      await BudgetService.settleByUser(budget.userId, reserved, costCents);
+    } else {
+      await emitCostEvent({
+        missionId: budget.missionId,
+        agentId: budget.agentId,
+        instanceId: budget.instanceId,
+        clientActionId: budget.clientActionId,
+        model: modelName,
+        promptTokens: Number(usage.promptTokens ?? usage.inputTokens ?? 0),
+        completionTokens: Number(usage.completionTokens ?? usage.outputTokens ?? 0),
+        costCents,
+        reservedUserCents: reserved,
+        eventType: "cost_event",
+      });
+    }
+    return result;
+  } catch (error) {
+    if ("userId" in budget) await BudgetService.releaseByUser(budget.userId, reserved).catch(() => {});
+    else await BudgetService.release(budget.missionId, reserved).catch(() => {});
+    throw error;
+  }
+}
+
 async function billSandboxActiveInterval(input: { missionId: string; ref: SandboxRef; agentId?: string; instanceId?: string; resetClock?: boolean }) {
   if (input.ref.state !== "running") return { seconds: 0, costCents: 0 };
   const seconds = e2b.sandboxActiveSeconds(input.ref);
@@ -1327,18 +1369,24 @@ async function decomposeMission(missionId: string) {
       `globalRole=${agentRole(row.agent)}`,
       `skills=${agentSkillIds(row.agent).join(",") || "none"}`,
     ].join(" ")).join("\n");
-    const result = await generateText({
-      model: openai("gpt-5.5"),
-      prompt: [
-        "Decompose this Missionry objective into 2-4 executable work cards.",
-        "You are the team lead. Prefer delegation: suggest the mission agent whose role/skills fit each card. Only suggest the Leader if it is genuinely the best fit or no other agent exists.",
-        "Return JSON only as {\"cards\":[{\"title\":\"...\",\"description\":\"...\",\"suggestedAssignee\":\"agent display name or instance id\",\"sandboxAffinity\":{\"tier\":\"tier0|mission|private\",\"reason\":\"...\"}}]}.",
-        `Mission title: ${mission.title}`,
-        `Objective: ${mission.objective}`,
-        roster ? `Mission roster:\n${roster}` : "",
-      ].join("\n"),
-    });
-    proposed = parseProposedCards(result.text);
+    try {
+      const result = await spendGuardedGenerateText({ missionId }, "gpt-5.5", {
+        model: openai("gpt-5.5"),
+        prompt: [
+          "Decompose this Missionry objective into 2-4 executable work cards.",
+          "You are the team lead. Prefer delegation: suggest the mission agent whose role/skills fit each card. Only suggest the Leader if it is genuinely the best fit or no other agent exists.",
+          "Return JSON only as {\"cards\":[{\"title\":\"...\",\"description\":\"...\",\"suggestedAssignee\":\"agent display name or instance id\",\"sandboxAffinity\":{\"tier\":\"tier0|mission|private\",\"reason\":\"...\"}}]}.",
+          `Mission title: ${mission.title}`,
+          `Objective: ${mission.objective}`,
+          roster ? `Mission roster:\n${roster}` : "",
+        ].join("\n"),
+      });
+      proposed = parseProposedCards(result.text);
+    } catch {
+      // Budget cap or LLM error → still create the mission with deterministic cards.
+      mock = true;
+      proposed = deterministicProposedCards(mission.objective);
+    }
   } else {
     mock = true;
     proposed = deterministicProposedCards(mission.objective);
@@ -1740,7 +1788,7 @@ async function runProactiveChatter(
   const scored: Array<{ row: (typeof candidates)[number]; score: number }> = [];
   for (const row of candidates) {
     try {
-      const res = await generateText({
+      const res = await spendGuardedGenerateText({ missionId, agentId: row.agent.id, instanceId: row.instance.id }, gateModel, {
         model: openai(gateModel),
         prompt: [
           `You are ${row.instance.displayAlias || row.agent.displayName} (role ${row.instance.role}, skills ${agentSkillIds(row.agent).join(",") || "none"}) in a team chat.`,
@@ -1799,7 +1847,7 @@ async function reviewMemory(missionId: string, ownerUserId: string | undefined, 
     if (!responder.body || responder.body.trim() === "[NO]") continue;
     try {
       const currentMem = await loadAgentMemory(responder.agentId);
-      const res = await generateText({
+      const res = await spendGuardedGenerateText({ missionId, agentId: responder.agentId }, model, {
         model: openai(model),
         prompt: [
           "You maintain an AI agent's long-term memory after a chat exchange. Extract ONLY durable, reusable facts — never one-off task details.",
@@ -2622,7 +2670,7 @@ async function runAdminConcierge(userId: string, history: Array<{ authorType: st
     }),
   };
   try {
-    const result = await generateText({ model: openai("gpt-5.5"), system: ADMIN_SYSTEM, messages, tools, stopWhen: stepCountIs(6) });
+    const result = await spendGuardedGenerateText({ userId }, "gpt-5.5", { model: openai("gpt-5.5"), system: ADMIN_SYSTEM, messages, tools, stopWhen: stepCountIs(6) });
     return result.text?.trim() || "(done)";
   } catch (error) {
     return "Admin error: " + (error instanceof Error ? error.message : String(error));

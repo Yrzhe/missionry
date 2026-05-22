@@ -17,9 +17,14 @@ uses date-based entries.
     it is never worse than before. Only engages on cold start.
   - **#9 atomic budget reserve.** The daily-cap check was read-then-check, so two
     concurrent ops could both pass and overspend. New `reserveUserSpend` does a
-    single conditional UPDATE (reserve iff under cap), applied to the mission-chat
-    and direct-thread replies and settled to real cost via
-    `CostRecord.reservedUserCents`. Conservative on error (can only over-count).
+    single conditional UPDATE (reserve iff under cap), settled to real cost via
+    `CostRecord.reservedUserCents`. Applied to the mission-chat and direct-thread
+    replies, then extended via a `spendGuardedGenerateText` wrapper to **all**
+    server-side LLM spends: mission decomposition, proactive chatter gate, memory
+    review, and the concierge (user-scoped, settled against the owner's daily
+    total). Conservative on error — reserve is released, can only over-count.
+    (Skill-content security scan is the one remaining ungated call: no
+    mission/user context, infrequent, user-initiated.)
   - **#10 stale env on resume.** Mission env was injected only at sandbox CREATE;
     a resumed sandbox kept stale values. The current mission env is now injected
     per-exec (threaded through `runCommand`→`envdRunCommand`) at runner launch, so

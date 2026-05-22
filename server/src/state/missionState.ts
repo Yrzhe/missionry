@@ -279,10 +279,8 @@ export async function assertUserBudgetForMission(missionId: string, estimatedCos
 // real cost is known. On error after reserving, the reserve stays counted until
 // the daily window resets (conservative — it can only over-count, never let
 // spend exceed the cap).
-export async function reserveUserSpend(missionId: string, estimateCostCents: number): Promise<number> {
+export async function reserveUserSpendByUser(userId: string, estimateCostCents: number, missionId?: string): Promise<number> {
   const estimate = Math.max(0, Math.round(estimateCostCents));
-  const mission = await getMission(missionId);
-  const userId = mission.ownerUserId ?? "system";
   await getOrCreateBudgetProfile(userId); // also resets the daily window if stale
   if (estimate === 0) return 0;
   const reserved = await db
@@ -307,9 +305,38 @@ export async function reserveUserSpend(missionId: string, estimateCostCents: num
   return estimate;
 }
 
+export async function reserveUserSpend(missionId: string, estimateCostCents: number): Promise<number> {
+  const mission = await getMission(missionId);
+  return reserveUserSpendByUser(mission.ownerUserId ?? "system", estimateCostCents, missionId);
+}
+
+// Settle a user-level reserve once the real cost is known (used where there is no
+// mission to attribute the spend to, e.g. the concierge). Adds the delta to the
+// owner's daily spend so the net effect equals actualCents.
+export async function settleUserSpendByUser(userId: string, reservedCents: number, actualCents: number) {
+  const delta = Math.round(actualCents) - Math.round(reservedCents);
+  if (delta !== 0) await addUserDailySpend(userId, delta);
+}
+
+// Hand back a reserve that was never spent (the guarded op threw before recording
+// a real cost), so it doesn't sit on the daily total until the window resets.
+export async function releaseUserReserveByUser(userId: string, reservedCents: number) {
+  if (reservedCents > 0) await addUserDailySpend(userId, -Math.round(reservedCents));
+}
+
+export async function releaseUserReserve(missionId: string, reservedCents: number) {
+  if (reservedCents <= 0) return;
+  const mission = await getMission(missionId).catch(() => null);
+  await releaseUserReserveByUser(mission?.ownerUserId ?? "system", reservedCents);
+}
+
 export const BudgetService = {
   assertCanSpend: assertUserBudgetForMission,
   reserve: reserveUserSpend,
+  reserveByUser: reserveUserSpendByUser,
+  settleByUser: settleUserSpendByUser,
+  release: releaseUserReserve,
+  releaseByUser: releaseUserReserveByUser,
 };
 
 export async function recordAudit(event: AuditRecord): Promise<string> {
