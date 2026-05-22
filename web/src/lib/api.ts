@@ -334,6 +334,10 @@ export const api = {
       agentReplies: (response.agentReplies ?? []).map(normalizeMissionChatMessage),
     };
   },
+  agentMemory: (agentId: string) => request<{ memory: string }>(`/agents/${agentId}/memory`),
+  updateAgentMemory: (agentId: string, content: string) => request<{ memory: string }>(`/agents/${agentId}/memory`, { method: 'PUT', body: JSON.stringify({ content }) }),
+  memoryProfile: () => request<{ profile: string }>(`/me/memory-profile`),
+  updateMemoryProfile: (content: string) => request<{ profile: string }>(`/me/memory-profile`, { method: 'PUT', body: JSON.stringify({ content }) }),
   workCardMessages: async (missionId: string, cardId: string) => {
     const response = await request<{ items: RawMissionChatMessage[] }>(`/missions/${missionId}/work-cards/${cardId}/messages`);
     return { items: response.items.map(normalizeMissionChatMessage) };

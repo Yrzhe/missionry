@@ -58,6 +58,8 @@ export function AgentLibrary() {
   const [editAgent, setEditAgent] = useState<AgentLibraryItem | null>(null);
   const [form, setForm] = useState<AgentForm>({ displayName: '', role: 'agent', avatarSeed: '' });
   const [editForm, setEditForm] = useState<AgentEditForm>({ displayName: '', role: '', soul: '', identity: '', skills: '' });
+  const [editMemory, setEditMemory] = useState('');
+  const [editProfile, setEditProfile] = useState('');
   const [error, setError] = useState<string | null>(null);
   const createAgentMutation = useMutation({
     mutationFn: api.createAgent,
@@ -123,15 +125,26 @@ export function AgentLibrary() {
       identity: agent.identity ?? agent.globalIdentity?.baseConfigSummary ?? '',
       skills: (agent.skills ?? []).join(', '),
     });
+    setEditMemory('');
+    setEditProfile('');
+    void Promise.all([api.agentMemory(agent.id), api.memoryProfile()])
+      .then(([mem, prof]) => { setEditMemory(mem.memory ?? ''); setEditProfile(prof.profile ?? ''); })
+      .catch(() => undefined);
   }
 
   async function submitEdit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!editAgent) return;
+    const agentId = editAgent.id;
     setError(null);
     try {
+      // Save memory (MEMORY.md) + owner profile (USER.md) alongside the config.
+      await Promise.all([
+        api.updateAgentMemory(agentId, editMemory),
+        api.updateMemoryProfile(editProfile),
+      ]);
       await updateAgentMutation.mutateAsync({
-        agentId: editAgent.id,
+        agentId,
         input: {
           displayName: editForm.displayName.trim(),
           role: editForm.role.trim(),
@@ -218,6 +231,8 @@ export function AgentLibrary() {
             <label>{t('agents.edit.soul')}<textarea value={editForm.soul} onChange={(event) => setEditForm((current) => ({ ...current, soul: event.target.value }))} /></label>
             <label>{t('agents.edit.identity')}<textarea value={editForm.identity} onChange={(event) => setEditForm((current) => ({ ...current, identity: event.target.value }))} /></label>
             <label>{t('agents.edit.skills')}<input value={editForm.skills} onChange={(event) => setEditForm((current) => ({ ...current, skills: event.target.value }))} placeholder={t('agents.edit.skillsPlaceholder')} /></label>
+            <label>{t('agents.edit.memory')}<textarea value={editMemory} onChange={(event) => setEditMemory(event.target.value)} placeholder={t('agents.edit.memoryPlaceholder')} /><span className="mp-muted mp-field-hint">{t('agents.edit.memoryHint')}</span></label>
+            <label>{t('agents.edit.userProfile')}<textarea value={editProfile} onChange={(event) => setEditProfile(event.target.value)} placeholder={t('agents.edit.userProfilePlaceholder')} /><span className="mp-muted mp-field-hint">{t('agents.edit.userProfileHint')}</span></label>
             {error ? <div className="mp-denied">{error}</div> : null}
             <button className="mp-button dark" disabled={busy}>{busy ? t('common.saving') : t('common.save')}</button>
           </form>

@@ -236,6 +236,16 @@ export async function appendUserProfile(userId: string, lines: string[]) {
   await storage.from(buckets.missionryWorkspaces).put(key, textBytes(next));
 }
 
+// Full-replace setters for the memory editor (capped, never empty-bodies).
+export async function setAgentMemory(agentId: string, content: string) {
+  const trimmed = (content ?? "").slice(0, AGENT_MEMORY_CAP);
+  await storage.from(buckets.missionryWorkspaces).put(agentMemoryKey(agentId), textBytes(trimmed));
+}
+export async function setUserProfile(userId: string, content: string) {
+  const trimmed = (content ?? "").slice(0, USER_PROFILE_CAP);
+  await storage.from(buckets.missionryWorkspaces).put(userProfileKey(userId), textBytes(trimmed));
+}
+
 // Build the injectable memory block for an agent's system context.
 export async function buildMemoryContext(agentId: string, userId?: string): Promise<string> {
   const [mem, user] = await Promise.all([
