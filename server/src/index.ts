@@ -2903,22 +2903,23 @@ app.get("/api/public/missions/:id/chat", async (c) => {
   if (denied) return denied;
   const missionId = assertSafeId(c.req.param("id"), "mission_id");
   const limit = Math.min(100, Math.max(1, Number(c.req.query("limit") ?? 50)));
+  // Cursor is a createdAt timestamp (message ids are random, NOT time-ordered, so
+  // `id < before` would skip/duplicate rows). Paginate by createdAt instead.
   const before = c.req.query("before");
-  if (before) assertSafeId(before, "chat_message_id");
   const allRows = await db
     .select()
     .from(missionChatMessages)
     .where(and(eq(missionChatMessages.missionId, missionId), isNull(missionChatMessages.workCardId)))
     .orderBy(desc(missionChatMessages.createdAt));
   // allRows is newest-first (desc) so we can take the latest `limit` and paginate
-  // backwards with `before`. The cursor is the OLDEST row of this page (last in desc).
-  const pageRows = before ? allRows.filter((row: typeof missionChatMessages.$inferSelect) => row.id < before).slice(0, limit) : allRows.slice(0, limit);
+  // backwards with `before`. The cursor is the OLDEST row's createdAt of this page.
+  const pageRows = before ? allRows.filter((row: typeof missionChatMessages.$inferSelect) => row.createdAt < before).slice(0, limit) : allRows.slice(0, limit);
   // Return ascending (oldest -> newest) so the chat renders newest at the bottom,
   // matching the optimistic-update sort and the column (non-reversed) layout.
   const orderedRows = [...pageRows].reverse();
   return c.json({
     items: await Promise.all(orderedRows.map(chatMessageJson)),
-    nextCursor: pageRows.length === limit ? pageRows.at(-1)?.id : null,
+    nextCursor: pageRows.length === limit ? pageRows.at(-1)?.createdAt : null,
   });
 });
 
@@ -3058,7 +3059,12 @@ app.patch("/api/public/missions/:id/work-cards/:workCardId", async (c) => {
   const nextStatus = body.status === "running" && before.status !== "running" ? "queued" : body.status ?? before.status;
   await db.update(workCards).set({ status: nextStatus, updatedAt: now() }).where(eq(workCards.id, workCardId));
   let promoted: string | null = null;
-  if (body.status === "done" || body.status === "failed") promoted = await dequeueNextForAgent(await agentForInstance(before.assigneeInstanceId ?? ""));
+  // Only chain the next card when this one actually has an assignee — an
+  // unassigned card would otherwise call agentForInstance("") and throw a 500
+  // after the status was already changed.
+  if ((body.status === "done" || body.status === "failed") && before.assigneeInstanceId) {
+    promoted = await dequeueNextForAgent(await agentForInstance(before.assigneeInstanceId));
+  }
   if (body.status === "running" && before.status !== "running") waitUntil(startWorkCard(workCardId));
   return c.json({ actionId: crypto.randomUUID(), status: "completed", workCardId, promoted });
 });
@@ -3101,6 +3107,8 @@ app.post("/api/public/direct-threads/:threadId/messages", async (c) => {
   const thread = access.thread;
   const [instance] = await db.select().from(agentInstances).where(eq(agentInstances.id, thread.agentInstanceId)).limit(1);
   if (!instance) return jsonError(c, "error.agent_instance.not_found", 404);
+  // Budget pre-check before spending on the model — same gate as mission chat.
+  await BudgetService.assertCanSpend(thread.missionId, 1);
 
   const profile = currentUserProfile(c);
   const userAuditEventId = await recordAudit({

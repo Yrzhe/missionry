@@ -44,6 +44,18 @@ uses date-based entries.
   every agent (incl. the leader) it could reply `[NO]`; a direct @mention now
   forces a real, tool-using answer. (`server/src/index.ts`)
 
+### Fixed (logic-review batch 2)
+- **PATCH work-card 500 on unassigned cards** — marking an unassigned card
+  done/failed called `agentForInstance("")` and threw after the status was already
+  changed; now it only chains the next card when an assignee exists.
+- **Chat pagination skipped/duplicated rows** — the `before` cursor compared random
+  message ids (`mcm_…`, not time-ordered); it now paginates by `createdAt`.
+- **Direct-thread replies bypassed the budget gate** — they now run
+  `BudgetService.assertCanSpend` before the model call, like mission chat.
+
+  Deferred (need careful CAS + load testing): #3 sandbox start-race lease,
+  #9 atomic budget reservation, #10 environment versioning on sandbox resume.
+
 ### Fixed (logic-review batch, from Codex review)
 - **Concurrent runners overwrote each other** — runner files now stage to a
   per-work-card dir `.missionry/runs/{cardId}/` (was a shared fixed path), so two
