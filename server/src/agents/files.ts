@@ -10,32 +10,57 @@ export type AgentBootFiles = {
   equippedSkillIds: string[];
 };
 
+// EdgeSpark storage.get() returns { body, metadata } (no .text()), so decode
+// whatever `body` is. Never String(obj) — that yields "[object Object]".
+async function decodeValue(value: unknown): Promise<string | null> {
+  if (value == null) return null;
+  if (typeof value === "string") return value;
+  if (value instanceof Uint8Array) return new TextDecoder().decode(value);
+  if (value instanceof ArrayBuffer) return new TextDecoder().decode(new Uint8Array(value));
+  if (ArrayBuffer.isView(value)) return new TextDecoder().decode(new Uint8Array((value as ArrayBufferView).buffer));
+  const v = value as Record<string, unknown>;
+  if (typeof v.text === "function") return await (v.text as () => Promise<string>).call(value);
+  if (typeof v.arrayBuffer === "function") return new TextDecoder().decode(await (v.arrayBuffer as () => Promise<ArrayBuffer>).call(value));
+  if (typeof v.getReader === "function") {
+    const reader = (value as ReadableStream<Uint8Array>).getReader();
+    const chunks: Uint8Array[] = [];
+    for (;;) {
+      const { done, value: chunk } = await reader.read();
+      if (done) break;
+      if (chunk) chunks.push(chunk);
+    }
+    const total = chunks.reduce((n, c) => n + c.length, 0);
+    const merged = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of chunks) { merged.set(chunk, offset); offset += chunk.length; }
+    return new TextDecoder().decode(merged);
+  }
+  return null;
+}
+
 async function getText(key: string): Promise<string | null> {
   const obj = await storage.from(buckets.missionryWorkspaces).get(key);
   if (!obj) return null;
+  const direct = await decodeValue(obj);
+  if (direct != null) return direct;
   const wrapped = obj as unknown as Record<string, unknown>;
-  const maybeText = wrapped.text;
-  if (typeof maybeText === "function") return maybeText.call(obj);
-  if (typeof maybeText === "string") return maybeText;
-  const maybeArrayBuffer = wrapped.arrayBuffer;
-  if (typeof maybeArrayBuffer === "function") return new TextDecoder().decode(await maybeArrayBuffer.call(obj));
-  for (const key of ["body", "content", "data", "value"]) {
-    const value = wrapped[key];
-    if (typeof value === "string") return value;
-    if (value instanceof Uint8Array) return new TextDecoder().decode(value);
-    if (value && typeof value === "object") {
-      const nestedText = (value as Record<string, unknown>).text;
-      if (typeof nestedText === "function") return nestedText.call(value);
-      if (typeof nestedText === "string") return nestedText;
-    }
+  for (const k of ["body", "content", "data", "value"]) {
+    const decoded = await decodeValue(wrapped[k]);
+    if (decoded != null) return decoded;
   }
-  return String(obj);
+  return null;
+}
+
+// storage.put stores an EMPTY body for a raw string — encode to ArrayBuffer.
+function textBytes(text: string): ArrayBuffer {
+  const u8 = new TextEncoder().encode(text);
+  return u8.buffer.slice(u8.byteOffset, u8.byteOffset + u8.byteLength) as ArrayBuffer;
 }
 
 async function putIfMissing(key: string, value: string) {
   const bucket = storage.from(buckets.missionryWorkspaces);
   const existing = await bucket.get(key);
-  if (!existing) await bucket.put(key, value);
+  if (!existing) await bucket.put(key, textBytes(value));
 }
 
 export async function ensureAgentFiles(agentId: string, displayName = agentId) {
