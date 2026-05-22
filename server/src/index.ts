@@ -729,6 +729,33 @@ function runnerCallbackUrl() {
   return `${publicOrigin()}/api/webhooks/work-card-callback`;
 }
 
+// Durable artifacts: produced files live in the ephemeral sandbox and disappear
+// from the UI when it pauses. On completion we copy them to R2 so 产物 can show
+// them even after the sandbox is gone. The SDK has no list(), so the canonical
+// file list comes from each card's cost_json.runner.resultFiles.
+const ARTIFACT_MAX_BYTES = 512 * 1024;
+function artifactR2Key(missionId: string, relPath: string) {
+  const clean = relPath.replace(/^\/+/, "").replace(/\.\.(\/|$)/g, "");
+  return `missions/${missionId}/artifacts/${clean}`;
+}
+async function persistMissionArtifacts(
+  mission: Awaited<ReturnType<typeof getMissionWithRuntimeSandboxes>>,
+  files: Array<{ path: string; size?: number }>,
+) {
+  const ref = mission.stateJson.sharedSandbox;
+  if (!ref || ref.state !== "running") return;
+  const bucket = storage.from(buckets.missionryWorkspaces);
+  for (const file of files.slice(0, 50)) {
+    if (typeof file.path !== "string" || !file.path.trim()) continue;
+    try {
+      const { content } = await e2b.readWorkspaceFile(ref, file.path, ARTIFACT_MAX_BYTES);
+      if (content) await bucket.put(artifactR2Key(mission.id, file.path), content);
+    } catch (error) {
+      console.error("ARTIFACT PERSIST ERROR:", file.path, error);
+    }
+  }
+}
+
 function normalizeMentionHandle(value: string) {
   return value.trim().toLowerCase().replace(/[\s_]+/g, "-");
 }
@@ -1535,13 +1562,19 @@ async function dispatchMissionChatReplies(missionId: string, source: typeof miss
   const created: Array<typeof missionChatMessages.$inferSelect> = [];
   const leader = await resolveMissionLeader(mission);
   const leaderInstanceId = leader?.instance.id ?? null;
+  const mentionedInstanceIds = new Set(mentions.filter((m) => m.type === "agent_instance").map((m) => m.id));
+  const leaderDirectlyMentioned = leaderInstanceId ? mentionedInstanceIds.has(leaderInstanceId) : false;
   if (leader) {
     const leaderHistory = await db.select().from(missionChatMessages).where(eq(missionChatMessages.missionId, missionId)).orderBy(asc(missionChatMessages.createdAt));
     const leaderBody = await generateMissionChatReply({
       missionId,
       agentId: leader.agent.id,
       instanceId: leader.instance.id,
-      systemFallback: "You are the Leader agent of this Mission. Coordinate. Respond [NO] if the message is not worth answering.",
+      // A direct @mention is an explicit question to the leader — it MUST answer.
+      // Only allow the [NO] no-op when reacting to chatter it was not addressed in.
+      systemFallback: leaderDirectlyMentioned
+        ? "You are the Leader agent of this Mission and were DIRECTLY @mentioned by the user. You MUST give a direct, helpful answer to their message — inspect the mission's data/files with your tools if needed. Do NOT reply [NO]."
+        : "You are the Leader agent of this Mission. Coordinate. Respond [NO] if the message is not worth answering.",
       history: leaderHistory,
       stubBody: `[STUB] Leader received: ${source.body}`,
     });
@@ -1566,7 +1599,8 @@ async function dispatchMissionChatReplies(missionId: string, source: typeof miss
       missionId,
       agentId: instanceRow.agent.id,
       instanceId: mention.id,
-      systemFallback: `You are ${instanceRow.agent.displayName}, a Missionry agent. Respond once when mentioned. Reply [NO] if no response is needed.`,
+      // Reaching this loop means the agent was directly @mentioned — it must answer.
+      systemFallback: `You are ${instanceRow.agent.displayName}, a Missionry agent. You were DIRECTLY @mentioned. You MUST give a direct, helpful answer to the message — use your tools to inspect mission data/files if needed. Do NOT reply [NO].`,
       history: historyWindow,
       stubBody: `[STUB] ${instanceRow.agent.displayName} received ${historyWindow.length} messages since last response: ${source.body}`,
     });
@@ -1664,6 +1698,7 @@ app.use("/api/public/*", async (c, next) => {
   await scheduleStartupSeed();
   if (c.req.path === "/api/public/health") return next();
   if (c.req.path === "/api/public/internal/reap") return next();
+  if (c.req.path === "/api/public/internal/tick") return next();
   if (c.req.path === "/api/public/auth/whitelist-check") return next();
   const profile = await resolveRequestProfile(c);
   if (!profile) return jsonError(c, "error.auth.not_whitelisted", 403);
@@ -1736,6 +1771,8 @@ app.post("/api/webhooks/work-card-callback", async (c) => {
   const sandboxAffinity = JSON.parse(card.sandboxAffinityJson) as SandboxAffinityInput;
   const billRef = sandboxAffinity.tier === "private" ? mission.stateJson.privateSandboxes[instance.id] : sandboxAffinity.tier === "mission" ? mission.stateJson.sharedSandbox : null;
   if (billRef) await billSandboxActiveInterval({ missionId: card.missionId, ref: billRef, agentId: agent.id, instanceId: instance.id, resetClock: true });
+  // Copy produced files to R2 (durable) before the sandbox can pause/expire.
+  if (files.length > 0) waitUntil(persistMissionArtifacts(mission, files));
   waitUntil(Promise.resolve(dequeueNextForAgent(agent.id)));
   return c.json({ status: "completed", cardId, workCardStatus: nextStatus });
 });
@@ -2640,6 +2677,36 @@ app.get("/api/public/missions/:id/sandbox/file", async (c) => {
   }
 });
 
+// Durable artifacts (persisted to R2 on card completion) — survive sandbox pause/expiry.
+app.get("/api/public/missions/:id/artifacts", async (c) => {
+  const denied = await assertMissionAccess(c);
+  if (denied) return denied;
+  const missionId = assertSafeId(c.req.param("id"), "mission_id");
+  const cards = await db.select().from(workCards).where(eq(workCards.missionId, missionId)).orderBy(asc(workCards.updatedAt));
+  const byPath = new Map<string, { path: string; size?: number; cardId: string; cardTitle: string; completedAt?: string }>();
+  for (const card of cards as Array<typeof workCards.$inferSelect>) {
+    const cost = parseWorkCardCost(card);
+    for (const file of cost.runner?.resultFiles ?? []) {
+      if (typeof file.path !== "string" || !file.path.trim()) continue;
+      byPath.set(file.path, { path: file.path, size: file.size, cardId: card.id, cardTitle: card.title, completedAt: cost.runner?.completedAt });
+    }
+  }
+  const items = Array.from(byPath.values()).sort((a, b) => (b.completedAt ?? "").localeCompare(a.completedAt ?? ""));
+  return c.json({ items });
+});
+
+app.get("/api/public/missions/:id/artifacts/file", async (c) => {
+  const denied = await assertMissionAccess(c);
+  if (denied) return denied;
+  const missionId = assertSafeId(c.req.param("id"), "mission_id");
+  const rel = (c.req.query("path") ?? "").replace(/^\/+/, "").replace(/\.\.(\/|$)/g, "").trim();
+  if (!rel) return jsonError(c, "error.artifact.invalid_path", 400);
+  const obj = await storage.from(buckets.missionryWorkspaces).get(artifactR2Key(missionId, rel));
+  if (!obj) return c.json({ path: rel, content: "", found: false });
+  const content = await storageObjectText(obj);
+  return c.json({ path: rel, content, found: true });
+});
+
 app.get("/api/public/missions/:id/chat", async (c) => {
   const denied = await assertMissionAccess(c);
   if (denied) return denied;
@@ -2652,10 +2719,15 @@ app.get("/api/public/missions/:id/chat", async (c) => {
     .from(missionChatMessages)
     .where(eq(missionChatMessages.missionId, missionId))
     .orderBy(desc(missionChatMessages.createdAt));
-  const rows = before ? allRows.filter((row: typeof missionChatMessages.$inferSelect) => row.id < before).slice(0, limit) : allRows.slice(0, limit);
+  // allRows is newest-first (desc) so we can take the latest `limit` and paginate
+  // backwards with `before`. The cursor is the OLDEST row of this page (last in desc).
+  const pageRows = before ? allRows.filter((row: typeof missionChatMessages.$inferSelect) => row.id < before).slice(0, limit) : allRows.slice(0, limit);
+  // Return ascending (oldest -> newest) so the chat renders newest at the bottom,
+  // matching the optimistic-update sort and the column (non-reversed) layout.
+  const orderedRows = [...pageRows].reverse();
   return c.json({
-    items: await Promise.all(rows.map(chatMessageJson)),
-    nextCursor: rows.length === limit ? rows.at(-1)?.id : null,
+    items: await Promise.all(orderedRows.map(chatMessageJson)),
+    nextCursor: pageRows.length === limit ? pageRows.at(-1)?.id : null,
   });
 });
 
@@ -2915,6 +2987,20 @@ app.post("/api/public/internal/reap", async (c) => {
   if (c.req.header("x-internal-token") !== expected) return jsonError(c, "error.internal.unauthorized", 401);
   if (c.req.query("throw") === "1") throw new Error("smoke internal throw");
   return c.json(await reapIdleSandboxes());
+});
+
+// External heartbeat (EdgeSpark has no cron): an outside scheduler (GitHub Actions
+// cron, a standalone CF Worker, etc.) POSTs here to (1) recover stalled chains by
+// failing stuck cards, (2) start any queued cards nobody triggered, and (3) pause
+// idle sandboxes. Token-gated with the same INTERNAL_REAP_TOKEN secret.
+app.post("/api/public/internal/tick", async (c) => {
+  const expected = await secret.get("INTERNAL_REAP_TOKEN");
+  if (!expected) return jsonError(c, "error.reap.token_not_configured", 503);
+  if (c.req.header("x-internal-token") !== expected) return jsonError(c, "error.internal.unauthorized", 401);
+  const stuck = await reapStuckWorkCards();
+  const dequeued = await tryDequeue();
+  const idle = await reapIdleSandboxes();
+  return c.json({ status: "ticked", stuck, dequeued, idle });
 });
 
 app.post("/api/public/audit-events/:auditEventId/rollback", async (c) => {

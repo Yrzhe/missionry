@@ -1,0 +1,39 @@
+name: Missionry tick
+
+# EdgeSpark has no cron, so this external scheduler pokes the app's heartbeat
+# endpoint. It (1) fails stuck work cards, (2) starts queued cards nobody
+# triggered, and (3) pauses idle sandboxes — so a mission keeps progressing even
+# when nobody has the web app open.
+#
+# Setup (one-time):
+#   1. In GitHub repo Settings → Secrets and variables → Actions, add a secret
+#      MISSIONRY_INTERNAL_TOKEN whose value EQUALS the EdgeSpark secret
+#      INTERNAL_REAP_TOKEN.
+#   2. (Optional) add a repo variable MISSIONRY_ORIGIN to override the URL below.
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'   # every 5 minutes (GitHub's minimum granularity; may be delayed)
+  workflow_dispatch: {}      # allow manual runs from the Actions tab
+
+concurrency:
+  group: missionry-tick
+  cancel-in-progress: false
+
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping heartbeat
+        env:
+          ORIGIN: ${{ vars.MISSIONRY_ORIGIN || 'https://champion-penguin-9133.edgespark.app' }}
+          TOKEN: ${{ secrets.MISSIONRY_INTERNAL_TOKEN }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "::error::MISSIONRY_INTERNAL_TOKEN secret is not set"; exit 1
+          fi
+          code=$(curl -sS -o /tmp/tick.out -w '%{http_code}' \
+            -X POST "$ORIGIN/api/public/internal/tick" \
+            -H "x-internal-token: $TOKEN")
+          echo "HTTP $code"; cat /tmp/tick.out; echo
+          [ "$code" = "200" ] || { echo "::error::tick failed ($code)"; exit 1; }

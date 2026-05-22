@@ -152,7 +152,7 @@ def call_openai(api_key, model, messages):
     req = urllib.request.Request(
         "https://api.openai.com/v1/chat/completions",
         data=body,
-        headers={"Authorization": "Bearer " + api_key, "Content-Type": "application/json"},
+        headers={"Authorization": "Bearer " + api_key, "Content-Type": "application/json", "User-Agent": "Missionry-Runner/1.0"},
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=120) as resp:
@@ -178,7 +178,10 @@ def post_callback(task, result):
     req = urllib.request.Request(
         task["callbackUrl"],
         data=data,
-        headers={"Content-Type": "application/json", "x-callback-token": task.get("callbackToken", "")},
+        # A custom User-Agent is REQUIRED: the default "Python-urllib/x" UA is
+        # blocked by Cloudflare WAF (403) in front of the Worker, so the callback
+        # never lands and the card hangs until the stuck-reaper fails it.
+        headers={"Content-Type": "application/json", "x-callback-token": task.get("callbackToken", ""), "User-Agent": "Missionry-Runner/1.0"},
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=30) as resp:

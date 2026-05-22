@@ -1,6 +1,6 @@
 import { db } from "edgespark";
-import { and, eq, lte, sql } from "drizzle-orm";
-import { agents, auditEvents, missionSpend, missions, sandboxRuntime, usersProfile } from "../defs/db_schema";
+import { and, eq, inArray, lte, sql } from "drizzle-orm";
+import { agents, auditEvents, missionSpend, missions, sandboxRuntime, usersProfile, workCards } from "../defs/db_schema";
 
 export type SandboxTier = "mission" | "private";
 export type SandboxState = "none" | "starting" | "running" | "paused" | "resuming" | "killed" | "error";
@@ -375,8 +375,18 @@ export async function listIdleSandboxes(idleMs: number, timestamp = Date.now()) 
     .select()
     .from(sandboxRuntime)
     .where(and(eq(sandboxRuntime.state, "running"), lte(sandboxRuntime.lastActivityAt, cutoff)));
+  if (rows.length === 0) return [];
+  // Never pause a sandbox whose mission still has an in-flight work card: the
+  // agent runner executes INSIDE the sandbox, so pausing would freeze the task
+  // mid-run and make its files vanish from the artifacts view.
+  const activeCardRows = await db
+    .select({ missionId: workCards.missionId })
+    .from(workCards)
+    .where(inArray(workCards.status, ["running", "allocated", "assigned"]));
+  const activeCardMissionIds = new Set(activeCardRows.map((row: { missionId: string }) => row.missionId));
   const idle: Array<{ mission: MissionRow; ref: SandboxRef; target: "mission" | "private"; instanceId?: string }> = [];
   for (const row of rows) {
+    if (activeCardMissionIds.has(row.missionId)) continue;
     const instanceId = row.instanceId ?? undefined;
     const mission = await getMissionWithRuntimeSandboxes(row.missionId);
     idle.push({ mission, ref: sandboxRefFromRuntime(row), target: row.tier === "mission" ? "mission" : "private", instanceId });
