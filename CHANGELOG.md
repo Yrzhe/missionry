@@ -7,6 +7,14 @@ uses date-based entries.
 ## [Unreleased]
 
 ### Added
+- **Per-work-card discussion threads (Phase 2.1).** Each work card now has its own
+  discussion (in the card detail modal): the user (and agents) can post messages,
+  and **@mentioning an agent really triggers it** to reply/act scoped to that card —
+  delegate "small tasks" without creating a new card. Messages carry a new
+  `work_card_id` column (migration `0004`); card threads are excluded from the
+  mission team chat. New endpoints `GET/POST /missions/:id/work-cards/:cardId/messages`.
+  (`server/src/index.ts`, `server/src/defs/db_schema.ts`, `web/.../workroom/Workroom.tsx`)
+
 - **Durable artifacts (产物 persist to R2).** On work-card completion the produced
   files are copied from the sandbox to R2 (`missions/{id}/artifacts/...`), so the
   Artifacts tab shows them even after the sandbox pauses/expires. New endpoints

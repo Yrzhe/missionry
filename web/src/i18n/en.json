@@ -472,6 +472,9 @@
   "workroom.cardFilter.running": "Running",
   "workroom.cardFilter.done": "Done",
   "workroom.cardDetail.label": "Work card",
-  "workroom.cardDetail.discussionSoon": "Card discussion & collaboration coming soon: the executing agent will be able to @ other agents here to ask and delegate small tasks.",
-  "workroom.cardDetail.description": "Description"
+  "workroom.cardDetail.description": "Description",
+  "workroom.cardDetail.discussion": "Card discussion",
+  "workroom.cardDetail.discussionHint": "@ another agent here to ask or delegate a small task — no new card needed; the mentioned agent replies and acts here.",
+  "workroom.cardDetail.discussionEmpty": "No discussion yet. @ an agent to start collaborating.",
+  "workroom.cardDetail.discussionPlaceholder": "@Agent say something… (Enter to send, Shift+Enter for newline)"
 }

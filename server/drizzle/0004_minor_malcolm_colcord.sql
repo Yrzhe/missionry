@@ -1,0 +1,1 @@
+ALTER TABLE `mission_chat_messages` ADD `work_card_id` text;

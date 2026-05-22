@@ -472,6 +472,9 @@
   "workroom.cardFilter.running": "运行中",
   "workroom.cardFilter.done": "已完成",
   "workroom.cardDetail.label": "工作卡",
-  "workroom.cardDetail.discussionSoon": "卡内讨论与协作即将上线:执行 Agent 将能在此 @ 其他 Agent 提问、派小任务。",
-  "workroom.cardDetail.description": "描述"
+  "workroom.cardDetail.description": "描述",
+  "workroom.cardDetail.discussion": "卡内讨论",
+  "workroom.cardDetail.discussionHint": "在这里 @ 其他 Agent 提问或派小任务,无需新建卡片;被 @ 的 Agent 会在此回复并动手。",
+  "workroom.cardDetail.discussionEmpty": "还没有讨论。@ 一个 Agent 开始协作吧。",
+  "workroom.cardDetail.discussionPlaceholder": "@Agent 说点什么…(Enter 发送,Shift+Enter 换行)"
 }
