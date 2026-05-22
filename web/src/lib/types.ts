@@ -353,6 +353,24 @@ export type MissionFileContent = {
   updatedAt?: string;
 };
 
+export type SkillListItem = {
+  id: string;
+  name: string;
+  description: string;
+  source?: string | null;
+  createdAt: string;
+  equippedAgentIds: string[];
+};
+
+export type SkillDetail = {
+  id: string;
+  name: string;
+  description: string;
+  source?: string | null;
+  content: string;
+  equippedAgentIds: string[];
+};
+
 export type ConciergeChatMessage = {
   id: string;
   authorType: 'user' | 'assistant';

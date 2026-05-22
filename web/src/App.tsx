@@ -6,6 +6,7 @@ import { useTranslation } from 'react-i18next';
 import { AdminConsole } from './components/magicpath/admin-console/AdminConsole';
 import { AgentLibrary } from './components/magicpath/agent-library/AgentLibrary';
 import { Concierge } from './components/magicpath/concierge/Concierge';
+import { SkillLibrary } from './components/magicpath/skill-library/SkillLibrary';
 import { AgentProfileControlCenter } from './components/magicpath/agent-profile-control-center/AgentProfileControlCenter';
 import { DirectAgentThread } from './components/magicpath/direct-agent-thread/DirectAgentThread';
 import { GrowthCenter } from './components/magicpath/growth-center/GrowthCenter';
@@ -100,6 +101,7 @@ function RouterRoutes({ firstMissionId }: { firstMissionId?: string }) {
       <Route path="/missions/:id/agents/:instanceId" element={<AgentProfileControlCenter />} />
       <Route path="/agents" element={<AgentLibrary />} />
       <Route path="/concierge" element={<Concierge />} />
+      <Route path="/skills" element={<SkillLibrary />} />
       <Route path="/artifacts" element={<MagicPathSurface page="artifacts" />} />
       <Route path="/growth" element={<GrowthCenter />} />
       <Route path="/settings/budget" element={<SettingsBudget />} />

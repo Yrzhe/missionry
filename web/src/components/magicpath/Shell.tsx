@@ -48,6 +48,7 @@ export function Shell({ title, meta, actions, children }: ShellProps) {
           <NavItem to="/concierge" label={t('nav.concierge')} mark="✦" />
           <NavItem to="/missions" label={t('nav.missions')} mark="●" count={missionsQuery.data?.items.length || undefined} />
           <NavItem to="/agents" label={t('nav.agents')} mark="◐" />
+          <NavItem to="/skills" label={t('nav.skills')} mark="✚" />
           <NavItem to="/artifacts" label={t('nav.artifacts')} mark="□" />
           <NavItem to="/growth" label={t('nav.growth')} mark="↻" />
           <details className={`mp-nav-group ${settingsOpen ? 'active' : ''}`} open={settingsOpen}>

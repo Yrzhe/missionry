@@ -16,6 +16,8 @@ import type {
   MissionArtifact,
   ConciergeChatMessage,
   ConciergeOverview,
+  SkillListItem,
+  SkillDetail,
   MissionAgentRequest,
   MissionSpendBreakdown,
   MissionSummary,
@@ -336,6 +338,9 @@ export const api = {
       agentReplies: (response.agentReplies ?? []).map(normalizeMissionChatMessage),
     };
   },
+  skills: () => request<{ items: SkillListItem[] }>(`/skills`),
+  skill: (skillId: string) => request<SkillDetail>(`/skills/${skillId}`),
+  setSkillAgents: (skillId: string, agentIds: string[]) => request<{ status: string; equippedAgentIds: string[] }>(`/skills/${skillId}/agents`, { method: 'PUT', body: JSON.stringify({ agentIds }) }),
   conciergeOverview: () => request<ConciergeOverview>(`/concierge/overview`),
   conciergeChat: () => request<{ items: ConciergeChatMessage[] }>(`/concierge/chat`),
   sendConciergeChat: (body: string) => request<{ message: ConciergeChatMessage; reply: ConciergeChatMessage }>(`/concierge/chat`, { method: 'POST', body: JSON.stringify({ body }) }),

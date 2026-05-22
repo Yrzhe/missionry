@@ -205,6 +205,16 @@ export async function equipSkills(agentId: string, skillIds: string[]) {
   return merged;
 }
 
+export async function unequipSkill(agentId: string, skillId: string) {
+  agentId = assertSafeId(agentId, "agent_id");
+  const [row] = await db.select({ equipped: agents.equippedSkillIdsJson }).from(agents).where(eq(agents.id, agentId)).limit(1);
+  let current: string[] = [];
+  try { const parsed = row?.equipped ? JSON.parse(row.equipped) : []; if (Array.isArray(parsed)) current = parsed.filter((s): s is string => typeof s === "string"); } catch { current = []; }
+  const next = current.filter((s) => s !== skillId);
+  await db.update(agents).set({ equippedSkillIdsJson: JSON.stringify(next), updatedAt: new Date().toISOString() }).where(eq(agents.id, agentId));
+  return next;
+}
+
 export async function listAgentSkillIds(agentId: string): Promise<string[]> {
   const [row] = await db.select({ equipped: agents.equippedSkillIdsJson }).from(agents).where(eq(agents.id, assertSafeId(agentId, "agent_id"))).limit(1);
   try { const parsed = row?.equipped ? JSON.parse(row.equipped) : []; return Array.isArray(parsed) ? parsed.filter((s): s is string => typeof s === "string") : []; } catch { return []; }

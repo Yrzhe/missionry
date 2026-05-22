@@ -497,5 +497,19 @@
   "concierge.missions": "Missions",
   "concierge.inMissions": "in {{count}} mission(s)",
   "concierge.running": "{{count}} running",
-  "concierge.noCards": "no cards"
+  "concierge.noCards": "no cards",
+  "nav.skills": "Skills",
+  "skills.title": "Skill library",
+  "skills.subtitle": "Team shared skills",
+  "skills.libraryTitle": "Team skill library",
+  "skills.intro": "Shared team skills. Open a skill and check the agents to equip it on.",
+  "skills.equippedCount": "on {{count}} agent(s)",
+  "skills.skill": "Skill",
+  "skills.equipOn": "Equip on these agents",
+  "skills.saveEquip": "Save",
+  "skills.saveError": "Save failed",
+  "skills.noContent": "(empty)",
+  "skills.noAgents": "No agents yet",
+  "skills.emptyTitle": "The library is empty",
+  "skills.emptyBody": "Ask the Concierge to find/author skills, or import one from GitHub."
 }

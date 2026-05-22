@@ -497,5 +497,19 @@
   "concierge.missions": "Mission",
   "concierge.inMissions": "在 {{count}} 个 mission",
   "concierge.running": "{{count}} 个在跑",
-  "concierge.noCards": "暂无卡片"
+  "concierge.noCards": "暂无卡片",
+  "nav.skills": "技能库",
+  "skills.title": "技能库",
+  "skills.subtitle": "团队共享技能",
+  "skills.libraryTitle": "团队技能库",
+  "skills.intro": "团队共享的技能;点开任意技能,勾选要装备的 Agent 即可一键安装。",
+  "skills.equippedCount": "已装 {{count}} 个 Agent",
+  "skills.skill": "技能",
+  "skills.equipOn": "装备到这些 Agent",
+  "skills.saveEquip": "保存装备",
+  "skills.saveError": "保存失败",
+  "skills.noContent": "(无内容)",
+  "skills.noAgents": "还没有 Agent",
+  "skills.emptyTitle": "技能库还是空的",
+  "skills.emptyBody": "去「管家」让它找/写技能加进库,或导入一个 GitHub 技能。"
 }
