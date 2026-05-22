@@ -7,6 +7,15 @@ uses date-based entries.
 ## [Unreleased]
 
 ### Added
+- **Proactive agent chatter (Phase 2.2).** Non-leader agents no longer speak only
+  when @mentioned. On each USER team-chat message, a cheap gate model
+  (`MISSIONRY_GATE_MODEL`, default `gpt-5-mini`) decides per candidate agent whether
+  it's worth chiming in; the top 1–2 yes-voters then post a real reply (with tools).
+  Guardrails: only reacts to user messages (no agent ping-pong), ≤2 speakers,
+  per-agent cooldown (skips agents who spoke in the last 4 messages), skips when the
+  daily budget cap is hit, kill switch `MISSIONRY_PROACTIVE_CHATTER=off`. Runs in the
+  background (avoids Worker wall-clock limits); replies surface via the mission SSE.
+  (`server/src/index.ts`, `server/src/defs/runtime.ts`)
 - **Per-work-card discussion threads (Phase 2.1).** Each work card now has its own
   discussion (in the card detail modal): the user (and agents) can post messages,
   and **@mentioning an agent really triggers it** to reply/act scoped to that card —
