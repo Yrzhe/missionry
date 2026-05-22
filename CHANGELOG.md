@@ -7,6 +7,10 @@ uses date-based entries.
 ## [Unreleased]
 
 ### Added
+- **Concierge can search GitHub for skills (`find_skills`).** Given a capability,
+  it searches GitHub — code search for `SKILL.md` when `GITHUB_TOKEN` is set, else
+  unauthenticated repo search — returns candidates, then installs a chosen one via
+  the security-scanned `install_skill_from_github`. (`server/src/index.ts`)
 - **Concierge can craft agents + manage per-agent skills.** `create_agent` now
   writes a tailored SOUL/identity and authors+equips skills in one shot. New tools:
   `add_skill` (author a SKILL.md into an agent's own folder + equip) and

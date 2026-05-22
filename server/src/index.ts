@@ -2475,10 +2475,35 @@ async function fetchSkillFromGithub(url: string): Promise<string> {
   return (await resp.text()).slice(0, 40000);
 }
 
+// Search GitHub for published skills. Prefer code search (precise SKILL.md hits)
+// when GITHUB_TOKEN is set; otherwise fall back to repo search (works unauthenticated).
+async function searchGithubSkills(query: string): Promise<{ source: string; results: Array<{ repo?: string; path?: string; url: string; description?: string }>; note?: string }> {
+  const token = await Promise.resolve(secret.get("GITHUB_TOKEN" as any)).catch(() => undefined);
+  const headers: Record<string, string> = { "User-Agent": "Missionry-Concierge/1.0", "Accept": "application/vnd.github+json" };
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
+    const q = encodeURIComponent(`${query} filename:SKILL.md`);
+    const resp = await fetch(`https://api.github.com/search/code?q=${q}&per_page=8`, { headers });
+    if (resp.ok) {
+      const data = (await resp.json()) as { items?: Array<{ repository?: { full_name?: string }; path?: string; html_url?: string }> };
+      return { source: "code", results: (data.items ?? []).slice(0, 8).map((it) => ({ repo: it.repository?.full_name, path: it.path, url: it.html_url ?? "" })).filter((r) => r.url) };
+    }
+  }
+  const q = encodeURIComponent(`${query} skill in:name,description,readme`);
+  const resp = await fetch(`https://api.github.com/search/repositories?q=${q}&per_page=8&sort=stars`, { headers });
+  if (!resp.ok) throw new Error(`github search failed (${resp.status})`);
+  const data = (await resp.json()) as { items?: Array<{ full_name?: string; html_url?: string; description?: string }> };
+  return {
+    source: "repo",
+    results: (data.items ?? []).slice(0, 8).map((it) => ({ repo: it.full_name, url: it.html_url ?? "", description: it.description ?? undefined })).filter((r) => r.url),
+    note: "Repo-level results (set GITHUB_TOKEN for precise SKILL.md code search). To install, point install_skill_from_github at a SKILL.md in the repo, e.g. <repo>/blob/main/SKILL.md or <repo>/blob/main/skills/<name>/SKILL.md.",
+  };
+}
+
 const ADMIN_SYSTEM = [
   "You are the workspace Concierge (Admin) for Missionry, talking to the owner.",
   "When asked to BUILD an agent, craft it well: write a tailored SOUL (persona — identity, voice, how it works, boundaries) and a short identity, and equip relevant skills. Skills are authored or installed INTO that agent's own folder.",
-  "Skills: you can author a new skill (add_skill) or install one from a GitHub URL (install_skill_from_github) — installs are security-scanned and refused if risky; relay the risks if so.",
+  "Skills: you can SEARCH GitHub for an existing skill (find_skills), author a new one (add_skill), or install one from a GitHub URL (install_skill_from_github). When the owner asks for a capability, prefer find_skills first, show the candidates, then install the chosen one. All installs are security-scanned and refused if risky — relay the risks if so.",
   "You CAN also: inspect all agents and what they're doing, inspect all missions, and create missions with a leader (auto-plans).",
   "You CANNOT do task work yourself — no running code, no sandboxes, no producing artifacts. You orchestrate only.",
   "Be concise. Actually call the tools, then confirm with the created id(s) and what you equipped.",
@@ -2516,6 +2541,14 @@ async function runAdminConcierge(userId: string, history: Array<{ authorType: st
         }
         if (equipped.length) await equipSkills(agent.id, equipped);
         return { agentId: agent.id, displayName: agent.displayName, equippedSkills: equipped };
+      },
+    }),
+    find_skills: tool({
+      description: "Search GitHub for published agent skills (SKILL.md) matching a query. Returns candidates; then install a chosen one with install_skill_from_github (it gets security-scanned). For 'repo' source results, point the install at the repo's SKILL.md.",
+      inputSchema: z.object({ query: z.string() }),
+      execute: async (input) => {
+        try { return await searchGithubSkills(input.query); }
+        catch (error) { return { source: "error", results: [], error: error instanceof Error ? error.message : String(error) }; }
       },
     }),
     add_skill: tool({
