@@ -74,6 +74,8 @@ export const missionChatMessages = sqliteTable("mission_chat_messages", {
   mentionsJson: text("mentions_json").notNull(),
   isSilent: integer("is_silent").notNull().default(0),
   replyToMessageId: text("reply_to_message_id"),
+  // Null = mission-level team chat. Set = a per-work-card discussion thread.
+  workCardId: text("work_card_id"),
   createdAt: text("created_at").notNull(),
 });
 

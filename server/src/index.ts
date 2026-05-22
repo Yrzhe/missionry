@@ -1,7 +1,7 @@
 import { createOpenAI } from "@ai-sdk/openai";
 import { db, storage, secret, vars, ctx } from "edgespark";
 import { auth } from "edgespark/http";
-import { and, asc, desc, eq, inArray, lte, ne, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, lte, ne, sql } from "drizzle-orm";
 import { generateText, streamText, stepCountIs } from "ai";
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
@@ -1364,6 +1364,7 @@ async function persistMissionChatMessage(input: {
   body: string;
   mentions: ChatMention[];
   replyToMessageId?: string | null;
+  workCardId?: string | null;
 }) {
   const timestamp = now();
   const [message] = await db
@@ -1377,6 +1378,7 @@ async function persistMissionChatMessage(input: {
       mentionsJson: JSON.stringify(input.mentions),
       isSilent: input.body.trim() === "[NO]" ? 1 : 0,
       replyToMessageId: input.replyToMessageId ?? null,
+      workCardId: input.workCardId ?? null,
       createdAt: timestamp,
     })
     .returning();
@@ -1414,7 +1416,7 @@ async function historyWindowSinceLastResponse(missionId: string, instanceId: str
     .from(agentResponseCursors)
     .where(and(eq(agentResponseCursors.missionId, missionId), eq(agentResponseCursors.instanceId, instanceId)))
     .limit(1);
-  const rows = await db.select().from(missionChatMessages).where(eq(missionChatMessages.missionId, missionId)).orderBy(asc(missionChatMessages.createdAt));
+  const rows = await db.select().from(missionChatMessages).where(and(eq(missionChatMessages.missionId, missionId), isNull(missionChatMessages.workCardId))).orderBy(asc(missionChatMessages.createdAt));
   return cursor?.lastRespondedAt ? rows.filter((row: typeof missionChatMessages.$inferSelect) => row.createdAt > cursor.lastRespondedAt!) : rows;
 }
 
@@ -1606,7 +1608,7 @@ async function dispatchMissionChatReplies(missionId: string, source: typeof miss
   const mentionedInstanceIds = new Set(mentions.filter((m) => m.type === "agent_instance").map((m) => m.id));
   const leaderDirectlyMentioned = leaderInstanceId ? mentionedInstanceIds.has(leaderInstanceId) : false;
   if (leader) {
-    const leaderHistory = await db.select().from(missionChatMessages).where(eq(missionChatMessages.missionId, missionId)).orderBy(asc(missionChatMessages.createdAt));
+    const leaderHistory = await db.select().from(missionChatMessages).where(and(eq(missionChatMessages.missionId, missionId), isNull(missionChatMessages.workCardId))).orderBy(asc(missionChatMessages.createdAt));
     const leaderBody = await generateMissionChatReply({
       missionId,
       agentId: leader.agent.id,
@@ -1656,6 +1658,43 @@ async function dispatchMissionChatReplies(missionId: string, source: typeof miss
     });
     await updateAgentResponseCursor(missionId, mention.id, agentMessage);
     created.push(agentMessage);
+  }
+  return created;
+}
+
+// Per-work-card discussion: only @mentioned agents respond (no leader auto-reply),
+// scoped to the card thread, with the card title/description as context. A direct
+// @ really triggers the agent to answer / do the small task with its tools.
+async function dispatchCardChatReplies(missionId: string, card: typeof workCards.$inferSelect, source: typeof missionChatMessages.$inferSelect, mentions: ChatMention[]) {
+  const created: Array<typeof missionChatMessages.$inferSelect> = [];
+  const cardHistory = await db.select().from(missionChatMessages)
+    .where(and(eq(missionChatMessages.missionId, missionId), eq(missionChatMessages.workCardId, card.id)))
+    .orderBy(asc(missionChatMessages.createdAt));
+  const seen = new Set<string>();
+  for (const mention of mentions) {
+    if (mention.type !== "agent_instance" || seen.has(mention.id)) continue;
+    seen.add(mention.id);
+    const instanceRow = await loadMissionAgentRowByInstance(missionId, mention.id);
+    if (!instanceRow) continue;
+    const body = await generateMissionChatReply({
+      missionId,
+      agentId: instanceRow.agent.id,
+      instanceId: mention.id,
+      systemFallback: `You are ${instanceRow.agent.displayName}, collaborating in the discussion thread of work card "${card.title}".\nCard description: ${card.description ?? "(none)"}.\nYou were directly @mentioned. Give a direct, helpful answer or do the small task being asked — use your tools (run commands, read/write files in the mission sandbox) when useful. Keep it scoped to this card. Do NOT reply [NO].`,
+      history: cardHistory,
+      stubBody: `[STUB] ${instanceRow.agent.displayName} (card ${card.id}) received: ${source.body}`,
+    });
+    const replyMentions = await parseMissionMentions(missionId, body);
+    const message = await persistMissionChatMessage({
+      missionId,
+      authorType: "agent_instance",
+      authorId: mention.id,
+      body,
+      mentions: replyMentions,
+      replyToMessageId: source.id,
+      workCardId: card.id,
+    });
+    created.push(message);
   }
   return created;
 }
@@ -2783,7 +2822,7 @@ app.get("/api/public/missions/:id/chat", async (c) => {
   const allRows = await db
     .select()
     .from(missionChatMessages)
-    .where(eq(missionChatMessages.missionId, missionId))
+    .where(and(eq(missionChatMessages.missionId, missionId), isNull(missionChatMessages.workCardId)))
     .orderBy(desc(missionChatMessages.createdAt));
   // allRows is newest-first (desc) so we can take the latest `limit` and paginate
   // backwards with `before`. The cursor is the OLDEST row of this page (last in desc).
@@ -2814,6 +2853,46 @@ app.post("/api/public/missions/:id/chat", async (c) => {
     replyToMessageId,
   });
   const agentReplies = await dispatchMissionChatReplies(missionId, message, mentions);
+  return c.json({
+    actionId: crypto.randomUUID(),
+    status: "completed",
+    message: await chatMessageJson(message),
+    agentReplies: await Promise.all(agentReplies.map(chatMessageJson)),
+  }, 201);
+});
+
+// Per-work-card discussion thread.
+app.get("/api/public/missions/:id/work-cards/:cardId/messages", async (c) => {
+  const denied = await assertMissionAccess(c);
+  if (denied) return denied;
+  const missionId = assertSafeId(c.req.param("id"), "mission_id");
+  const cardId = assertSafeId(c.req.param("cardId"), "work_card_id");
+  const rows = await db.select().from(missionChatMessages)
+    .where(and(eq(missionChatMessages.missionId, missionId), eq(missionChatMessages.workCardId, cardId)))
+    .orderBy(asc(missionChatMessages.createdAt));
+  return c.json({ items: await Promise.all(rows.map(chatMessageJson)) });
+});
+
+app.post("/api/public/missions/:id/work-cards/:cardId/messages", async (c) => {
+  const denied = await assertMissionAccess(c);
+  if (denied) return denied;
+  const missionId = assertSafeId(c.req.param("id"), "mission_id");
+  const cardId = assertSafeId(c.req.param("cardId"), "work_card_id");
+  const [card] = await db.select().from(workCards).where(and(eq(workCards.id, cardId), eq(workCards.missionId, missionId))).limit(1);
+  if (!card) return jsonError(c, "error.work_card.not_found", 404);
+  const body = (await c.req.json().catch(() => ({}))) as { body?: string };
+  const text = (body.body ?? "").trim();
+  if (!text) return jsonError(c, "error.request.invalid", 400);
+  const mentions = await parseMissionMentions(missionId, text);
+  const message = await persistMissionChatMessage({
+    missionId,
+    authorType: "user",
+    authorId: currentUserProfile(c).userId,
+    body: text,
+    mentions,
+    workCardId: cardId,
+  });
+  const agentReplies = await dispatchCardChatReplies(missionId, card, message, mentions);
   return c.json({
     actionId: crypto.randomUUID(),
     status: "completed",

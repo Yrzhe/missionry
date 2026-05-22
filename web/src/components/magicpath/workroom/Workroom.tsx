@@ -970,8 +970,66 @@ function WorkCardDetail({ card, queuePosition, workroom, isStarting, onStart, on
         <div className="mp-label">{t('workroom.cardDetail.description')}</div>
         <Markdown value={card.description ?? t('workroom.cardNoDescription')} />
         {canRerun ? <button className="mp-button dark" disabled={isStarting} onClick={onStart}>{isStarting ? t('common.saving') : t('workroom.rerunCard')}</button> : null}
-        <p className="mp-muted mp-detail-soon">{t('workroom.cardDetail.discussionSoon')}</p>
+        <CardDiscussion missionId={card.missionId ?? workroom.mission.id} cardId={card.id} workroom={workroom} leaderInstanceId={workroom.mission.leaderInstanceId ?? undefined} />
       </div>
+    </div>
+  );
+}
+
+function CardDiscussion({ missionId, cardId, workroom, leaderInstanceId }: { missionId: string; cardId: string; workroom: WorkroomReadModel; leaderInstanceId?: string }) {
+  const { t } = useTranslation();
+  const queryClient = useQueryClient();
+  const [draft, setDraft] = useState('');
+  const [err, setErr] = useState<string | null>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const messagesQuery = useQuery({
+    queryKey: queryKeys.workCardMessages(missionId, cardId),
+    queryFn: () => api.workCardMessages(missionId, cardId),
+  });
+  const messages = messagesQuery.data?.items ?? EMPTY_MESSAGES;
+  useEffect(() => { const el = scrollRef.current; if (el) el.scrollTop = el.scrollHeight; }, [messages.length]);
+  const sendMutation = useMutation({
+    mutationFn: (body: string) => api.sendWorkCardMessage(missionId, cardId, body),
+    onMutate: async (body: string) => {
+      await queryClient.cancelQueries({ queryKey: queryKeys.workCardMessages(missionId, cardId) });
+      const optimisticId = `optimistic_${Date.now()}`;
+      const optimistic: MissionChatMessage = { id: optimisticId, missionId, body, authorType: 'user', authorName: t('workroom.chat.you'), createdAt: new Date().toISOString() };
+      queryClient.setQueryData<{ items: MissionChatMessage[] }>(queryKeys.workCardMessages(missionId, cardId), (e) => ({ items: [...(e?.items ?? []), optimistic] }));
+      setDraft('');
+      return { optimisticId };
+    },
+    onSuccess: (response, _b, ctx) => {
+      queryClient.setQueryData<{ items: MissionChatMessage[] }>(queryKeys.workCardMessages(missionId, cardId), (e) => {
+        const byId = new Map((e?.items ?? []).filter((m) => m.id !== ctx?.optimisticId).map((m) => [m.id, m]));
+        if (response.message) byId.set(response.message.id, response.message);
+        response.agentReplies.forEach((r) => byId.set(r.id, r));
+        return { items: Array.from(byId.values()).sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt)) };
+      });
+    },
+    onError: (sendError, _b, ctx) => {
+      if (ctx?.optimisticId) queryClient.setQueryData<{ items: MissionChatMessage[] }>(queryKeys.workCardMessages(missionId, cardId), (ex) => ({ items: (ex?.items ?? []).filter((m) => m.id !== ctx.optimisticId) }));
+      setErr(sendError instanceof Error ? sendError.message : t('workroom.chat.sendError'));
+    },
+  });
+  function submit() {
+    const body = draft.trim();
+    if (!body || sendMutation.isPending) return;
+    setErr(null);
+    sendMutation.mutate(body);
+  }
+  return (
+    <div className="mp-card-discussion">
+      <div className="mp-label">{t('workroom.cardDetail.discussion')}</div>
+      <p className="mp-muted mp-card-discussion-hint">{t('workroom.cardDetail.discussionHint')}</p>
+      <div className="mp-card-chat-scroll" ref={scrollRef}>
+        {messages.length ? messages.map((m) => <ChatMessage key={m.id} message={m} workroom={workroom} leaderInstanceId={leaderInstanceId} />) : <p className="mp-muted">{t('workroom.cardDetail.discussionEmpty')}</p>}
+        {sendMutation.isPending ? <div className="mp-chat-replying"><span className="mp-typing-dot" /><span className="mp-typing-dot" /><span className="mp-typing-dot" />{t('workroom.chat.replying')}</div> : null}
+      </div>
+      <div className="mp-card-composer">
+        <textarea value={draft} onChange={(e) => setDraft(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submit(); } }} placeholder={t('workroom.cardDetail.discussionPlaceholder')} />
+        <button className="mp-button dark" disabled={sendMutation.isPending || !draft.trim()} onClick={submit}>{sendMutation.isPending ? t('common.saving') : t('common.send')}</button>
+      </div>
+      {err ? <div className="mp-denied">{err}</div> : null}
     </div>
   );
 }

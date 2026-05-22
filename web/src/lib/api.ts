@@ -334,6 +334,20 @@ export const api = {
       agentReplies: (response.agentReplies ?? []).map(normalizeMissionChatMessage),
     };
   },
+  workCardMessages: async (missionId: string, cardId: string) => {
+    const response = await request<{ items: RawMissionChatMessage[] }>(`/missions/${missionId}/work-cards/${cardId}/messages`);
+    return { items: response.items.map(normalizeMissionChatMessage) };
+  },
+  sendWorkCardMessage: async (missionId: string, cardId: string, body: string) => {
+    const response = await request<{ message?: RawMissionChatMessage; agentReplies?: RawMissionChatMessage[] }>(`/missions/${missionId}/work-cards/${cardId}/messages`, {
+      method: 'POST',
+      body: JSON.stringify({ body }),
+    });
+    return {
+      message: response.message ? normalizeMissionChatMessage(response.message) : undefined,
+      agentReplies: (response.agentReplies ?? []).map(normalizeMissionChatMessage),
+    };
+  },
   directThread: (threadId: string) => request<DirectThreadReadModel>(`/direct-threads/${threadId}/messages`),
   createDirectThread: (missionId: string, instanceId: string) => request<{ chatThreadId: string; created?: boolean }>(`/missions/${missionId}/agent-instances/${instanceId}/direct-thread`, { method: 'POST', body: '{}' }),
   sendDirectThreadMessage: (threadId: string, body: string) => request<{ message?: DirectThreadReadModel['messages'][number]; agentReply?: DirectThreadReadModel['messages'][number] }>(`/direct-threads/${threadId}/messages`, {
