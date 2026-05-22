@@ -1,5 +1,7 @@
-import { storage } from "edgespark";
+import { storage, db } from "edgespark";
+import { eq } from "drizzle-orm";
 import { buckets } from "../defs/storage_schema";
+import { agents } from "../defs/db_schema";
 import { assertSafeId } from "../lib/safe-paths";
 
 export type AgentBootFiles = {
@@ -63,11 +65,44 @@ async function putIfMissing(key: string, value: string) {
   if (!existing) await bucket.put(key, textBytes(value));
 }
 
+// Write the default if the object is missing OR blank. Self-heals files that the
+// old string-put bug stored as empty bodies, without clobbering real content.
+async function putIfMissingOrEmpty(key: string, value: string) {
+  const current = await getText(key);
+  if (current === null || current.trim() === "") {
+    await storage.from(buckets.missionryWorkspaces).put(key, textBytes(value));
+  }
+}
+
+function defaultSoul(displayName: string) {
+  // SOUL.md = persona/system prompt (OpenClaw/Hermes convention): identity, how you
+  // work, and boundaries. Self-evolution / the owner can refine it later.
+  return [
+    "---",
+    "model: gpt-5.5",
+    "---",
+    `# ${displayName}`,
+    "",
+    `You are ${displayName}, an agent in the Missionry multi-agent workspace.`,
+    "",
+    "## How you work",
+    "- Bias to action: use your tools to produce real artifacts, not just descriptions.",
+    "- Be concise and concrete. Finish with a short summary of what you did and which files changed.",
+    "- Collaborate: when another agent or skill is a better fit, hand off or ask.",
+    "",
+    "## Boundaries",
+    "- Stay within the current Mission's sandbox and scope.",
+    "- Don't fabricate results; if something failed, say so plainly.",
+  ].join("\n");
+}
+
 export async function ensureAgentFiles(agentId: string, displayName = agentId) {
   agentId = assertSafeId(agentId, "agent_id");
-  await putIfMissing(`agents/${agentId}/soul.md`, `---\nmodel: gpt-4o-mini\n---\nYou are ${displayName}, a Missionry demo agent.`);
-  await putIfMissing(`agents/${agentId}/identity.md`, `# ${displayName}\n\nPhase 1 demo agent.`);
-  await putIfMissing(`agents/${agentId}/base-config.yaml`, "model: gpt-4o-mini\ndefaultSandboxTier: tier0\n");
+  // Use missing-or-empty for the core persona files so the empty bodies left by the
+  // old string-put bug get repaired on next load.
+  await putIfMissingOrEmpty(`agents/${agentId}/soul.md`, defaultSoul(displayName));
+  await putIfMissingOrEmpty(`agents/${agentId}/identity.md`, `# ${displayName}\n\nMission agent. Role and background are refined as the agent works.`);
+  await putIfMissingOrEmpty(`agents/${agentId}/base-config.yaml`, "model: gpt-5.5\ndefaultSandboxTier: tier0\n");
   await putIfMissing(
     `agents/${agentId}/skills/demo-sandbox/SKILL.md`,
     "---\nname: demo-sandbox\ndescription: Use for Missionry sandbox demo tasks.\n---\nRun only the requested demo tool.",
@@ -111,7 +146,17 @@ export async function loadAgentBootFiles(agentId: string): Promise<AgentBootFile
   const identity = (await getText(`agents/${agentId}/identity.md`)) ?? "";
   const base = (await getText(`agents/${agentId}/base-config.yaml`)) ?? "";
   const model = base.match(/model:\s*(.+)/)?.[1]?.trim();
-  const skillIds = agentId === "agt_forge" ? ["demo-sandbox", "prd-template-v2"] : ["demo-sandbox"];
+  // Equipped skills come from the agent's DB row (equipped_skill_ids_json), not a
+  // hardcoded list. Fall back to the demo skill if the row is missing/empty.
+  let skillIds: string[] = [];
+  try {
+    const [row] = await db.select({ equipped: agents.equippedSkillIdsJson }).from(agents).where(eq(agents.id, agentId)).limit(1);
+    const parsed = row?.equipped ? JSON.parse(row.equipped) : [];
+    if (Array.isArray(parsed)) skillIds = parsed.filter((s): s is string => typeof s === "string");
+  } catch {
+    skillIds = [];
+  }
+  if (skillIds.length === 0) skillIds = ["demo-sandbox"];
   const skillsIndex = (
     await Promise.all(
       skillIds.map(async (id) => {

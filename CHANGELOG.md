@@ -44,6 +44,17 @@ uses date-based entries.
   every agent (incl. the leader) it could reply `[NO]`; a direct @mention now
   forces a real, tool-using answer. (`server/src/index.ts`)
 
+### Fixed (agent data)
+- **Agents loaded with empty souls.** The old string-put bug left seeded agents'
+  `soul.md`/`identity.md`/`base-config.yaml` as empty bodies, and `putIfMissing`
+  wouldn't overwrite them. `ensureAgentFiles` now uses missing-or-empty writes that
+  self-heal blank persona files on next load, with a richer default SOUL.md scaffold
+  (identity / how-you-work / boundaries — OpenClaw/Hermes convention). Verified live:
+  the runner now loads a real soul. (`server/src/agents/files.ts`)
+- **Equipped skills were hardcoded.** `loadAgentBootFiles` now reads each agent's
+  `equipped_skill_ids_json` from the DB (fallback to the demo skill) instead of a
+  hardcoded per-agent list. (`server/src/agents/files.ts`)
+
 ### Fixed (logic-review batch 2)
 - **PATCH work-card 500 on unassigned cards** — marking an unassigned card
   done/failed called `agentForInstance("")` and threw after the status was already
