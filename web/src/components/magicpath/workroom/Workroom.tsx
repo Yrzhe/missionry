@@ -8,6 +8,7 @@ import type { TFunction } from 'i18next';
 import type {
   CreateWorkCardInput,
   MissionAgentRow,
+  MissionArtifact,
   MissionChatMessage,
   MissionEnvironmentVariable,
   MissionEvent,
@@ -73,7 +74,6 @@ export function Workroom() {
   const [chatBody, setChatBody] = useState('');
   const [showSilenced, setShowSilenced] = useState(false);
   const [chatError, setChatError] = useState<string | null>(null);
-  const [isSendingChat, setIsSendingChat] = useState(false);
   const [sandboxAction, setSandboxAction] = useState<string | null>(null);
   const [planAction, setPlanAction] = useState(false);
   const [workCardAction, setWorkCardAction] = useState<string | null>(null);
@@ -128,16 +128,43 @@ export function Workroom() {
 
   const sendChatMutation = useMutation({
     mutationFn: (body: string) => api.sendMissionChat(id ?? '', body),
-    onSuccess: async (response) => {
+    // Optimistically show the user's message + clear the input immediately, so it
+    // doesn't sit in the box as "saving" while the agent reply is generated.
+    onMutate: async (body: string) => {
+      if (!id) return { optimisticId: '' };
+      await queryClient.cancelQueries({ queryKey: queryKeys.missionChat(id) });
+      const optimisticId = `optimistic_${Date.now()}`;
+      const optimistic: MissionChatMessage = {
+        id: optimisticId,
+        missionId: id,
+        body,
+        authorType: 'user',
+        authorName: t('workroom.chat.you'),
+        createdAt: new Date().toISOString(),
+      };
+      queryClient.setQueryData<{ items: MissionChatMessage[] }>(queryKeys.missionChat(id), (existing) => ({
+        items: [...(existing?.items ?? []), optimistic],
+      }));
+      setChatBody('');
+      return { optimisticId };
+    },
+    onSuccess: async (response, _body, context) => {
       if (!id) return;
       queryClient.setQueryData<{ items: MissionChatMessage[] }>(queryKeys.missionChat(id), (existing) => {
-        const byId = new Map((existing?.items ?? []).map((message) => [message.id, message]));
+        const byId = new Map((existing?.items ?? []).filter((m) => m.id !== context?.optimisticId).map((message) => [message.id, message]));
         if (response.message) byId.set(response.message.id, response.message);
         response.agentReplies.forEach((reply) => byId.set(reply.id, reply));
         return { items: Array.from(byId.values()).sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt)) };
       });
       await queryClient.invalidateQueries({ queryKey: queryKeys.missionChat(id) });
-      setChatBody('');
+    },
+    onError: (sendError, _body, context) => {
+      if (id && context?.optimisticId) {
+        queryClient.setQueryData<{ items: MissionChatMessage[] }>(queryKeys.missionChat(id), (existing) => ({
+          items: (existing?.items ?? []).filter((m) => m.id !== context.optimisticId),
+        }));
+      }
+      setChatError(sendError instanceof Error ? sendError.message : t('workroom.chat.sendError'));
     },
   });
 
@@ -250,18 +277,16 @@ export function Workroom() {
     }
   }
 
+  function submitChat() {
+    const body = chatBody.trim();
+    if (!id || !body || sendChatMutation.isPending) return;
+    setChatError(null);
+    sendChatMutation.mutate(body);
+  }
+
   async function sendChat(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!id || !chatBody.trim()) return;
-    setChatError(null);
-    setIsSendingChat(true);
-    try {
-      await sendChatMutation.mutateAsync(chatBody.trim());
-    } catch (sendError) {
-      setChatError(sendError instanceof Error ? sendError.message : t('workroom.chat.sendError'));
-    } finally {
-      setIsSendingChat(false);
-    }
+    submitChat();
   }
 
   async function deleteMission() {
@@ -432,17 +457,23 @@ export function Workroom() {
           </div>
           <div className="mp-chat-scroll" ref={chatScrollRef}>
             {visibleMessages.length ? visibleMessages.map((message) => <ChatMessage key={message.id} message={message} workroom={workroom} leaderInstanceId={leaderInstanceId} />) : <div className="mp-empty mp-empty-cta"><p>{t('workroom.chat.empty')}</p></div>}
+            {sendChatMutation.isPending ? <div className="mp-chat-replying"><span className="mp-typing-dot" /><span className="mp-typing-dot" /><span className="mp-typing-dot" />{t('workroom.chat.replying')}</div> : null}
           </div>
           <form className="mp-chat-composer" onSubmit={sendChat}>
             <div className="mp-mention-wrap">
-              <textarea value={chatBody} onChange={(event) => setChatBody(event.target.value)} placeholder={t('workroom.chat.placeholder')} />
+              <textarea
+                value={chatBody}
+                onChange={(event) => setChatBody(event.target.value)}
+                onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); submitChat(); } }}
+                placeholder={t('workroom.chat.placeholder')}
+              />
               {mentionOptions.length ? (
                 <div className="mp-mention-menu">
                   {mentionOptions.map((row) => <button type="button" key={row.instance.id} data-mention-id={row.instance.id} onClick={() => insertMention(row)}>@{row.agent.displayName}</button>)}
                 </div>
               ) : null}
             </div>
-            <button className="mp-button dark" disabled={isSendingChat || !chatBody.trim()}>{isSendingChat ? t('common.saving') : t('common.send')}</button>
+            <button className="mp-button dark" disabled={sendChatMutation.isPending || !chatBody.trim()}>{sendChatMutation.isPending ? t('common.saving') : t('common.send')}</button>
           </form>
           {chatError ? <div className="mp-denied">{chatError}</div> : null}
         </section>
@@ -691,6 +722,19 @@ function ArtifactsBrowser({ missionId }: { missionId: string }) {
   });
   const items = artifactsQuery.data?.items ?? [];
   const selected = contentQuery.data;
+  // Group artifacts into a folder hierarchy by their directory path.
+  const groups = useMemo(() => {
+    const byDir = new Map<string, MissionArtifact[]>();
+    for (const item of items) {
+      const segments = item.path.split('/').filter(Boolean);
+      const dir = segments.slice(0, -1).join('/');
+      if (!byDir.has(dir)) byDir.set(dir, []);
+      byDir.get(dir)!.push(item);
+    }
+    return Array.from(byDir.entries())
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([dir, files]) => ({ dir, files: files.sort((a, b) => a.path.localeCompare(b.path)) }));
+  }, [items]);
   return (
     <div className="mp-file-browser expanded">
       <div className="mp-section-title">
@@ -702,21 +746,34 @@ function ArtifactsBrowser({ missionId }: { missionId: string }) {
       <div className="mp-file-grid">
         <div className="mp-file-list">
           {artifactsQuery.isLoading ? <div className="mp-muted">{t('common.loading')}</div> : null}
-          {items.length ? items.map((item) => (
-            <button className="mp-file-row" key={item.path} onClick={() => setSelectedPath(item.path)}>
-              <span>{t('workroom.files.kind.file')}</span>
-              <strong>{item.path}</strong>
-              <span className="mp-muted">{item.size ? `${Math.round(item.size / 1024)} KB` : ''}</span>
-            </button>
+          {items.length ? groups.map((group) => (
+            <div className="mp-artifact-group" key={group.dir || '__root__'}>
+              {group.dir ? <div className="mp-artifact-folder">📁 {group.dir}/</div> : null}
+              {group.files.map((item) => {
+                const name = item.path.split('/').filter(Boolean).at(-1) ?? item.path;
+                return (
+                  <button className={`mp-file-row ${selectedPath === item.path ? 'active' : ''} ${group.dir ? 'nested' : ''}`} key={item.path} onClick={() => setSelectedPath(item.path)}>
+                    <span>{t('workroom.files.kind.file')}</span>
+                    <strong>{name}</strong>
+                    <span className="mp-muted">{item.size ? `${Math.round(item.size / 1024)} KB` : ''}</span>
+                  </button>
+                );
+              })}
+            </div>
           )) : !artifactsQuery.isLoading ? <div className="mp-empty"><p>{t('workroom.artifacts.empty')}</p></div> : null}
         </div>
         <div className="mp-file-preview">
+          {selectedPath !== null ? (
+            <div className="mp-preview-head">
+              <div className="mp-label">{selectedPath}</div>
+              <button className="mp-preview-close" title={t('common.close')} onClick={() => setSelectedPath(null)}>×</button>
+            </div>
+          ) : null}
           {selected?.found ? (
-            <>
-              <div className="mp-label">{selected.path}</div>
-              {selected.path.endsWith('.md') ? <Markdown value={selected.content} /> : <pre>{selected.content}</pre>}
-            </>
-          ) : contentQuery.isLoading ? <p className="mp-muted">{t('common.loading')}</p> : <p className="mp-muted">{t('workroom.artifacts.select')}</p>}
+            selected.path.endsWith('.md') ? <Markdown value={selected.content} /> : <pre>{selected.content}</pre>
+          ) : selected && !selected.found ? <p className="mp-muted">{t('workroom.artifacts.empty')}</p>
+            : contentQuery.isLoading ? <p className="mp-muted">{t('common.loading')}</p>
+            : <p className="mp-muted">{t('workroom.artifacts.select')}</p>}
         </div>
       </div>
     </div>

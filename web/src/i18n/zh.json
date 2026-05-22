@@ -463,5 +463,8 @@
   "admin.empty.whitelist.title": "暂无白名单条目",
   "admin.empty.whitelist.body": "添加邮箱或域名后缀以授予工作区访问权限。",
   "admin.empty.missions.title": "暂无任务",
-  "admin.empty.missions.body": "用户创建任务后，全部任务会显示在这里。"
+  "admin.empty.missions.body": "用户创建任务后，全部任务会显示在这里。",
+  "workroom.chat.you": "你",
+  "workroom.chat.replying": "AI 回复中…",
+  "common.close": "关闭"
 }

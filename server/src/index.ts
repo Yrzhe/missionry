@@ -184,24 +184,46 @@ function e2bSnapshotMetadata(ref: SandboxRef, pausedAt: string, bill: { seconds:
   };
 }
 
-async function storageObjectText(obj: unknown): Promise<string> {
-  const wrapped = obj as Record<string, unknown> | null;
-  const maybeText = wrapped?.text;
-  if (typeof maybeText === "function") return maybeText.call(obj);
-  if (typeof maybeText === "string") return maybeText;
-  const maybeArrayBuffer = wrapped?.arrayBuffer;
-  if (typeof maybeArrayBuffer === "function") return new TextDecoder().decode(await maybeArrayBuffer.call(obj));
-  for (const key of ["body", "content", "data", "value"]) {
-    const value = wrapped?.[key];
-    if (typeof value === "string") return value;
-    if (value instanceof Uint8Array) return new TextDecoder().decode(value);
-    if (value && typeof value === "object") {
-      const nestedText = (value as Record<string, unknown>).text;
-      if (typeof nestedText === "function") return nestedText.call(value);
-      if (typeof nestedText === "string") return nestedText;
+async function decodeStorageValue(value: unknown): Promise<string | null> {
+  if (value == null) return null;
+  if (typeof value === "string") return value;
+  if (value instanceof Uint8Array) return new TextDecoder().decode(value);
+  if (value instanceof ArrayBuffer) return new TextDecoder().decode(new Uint8Array(value));
+  if (ArrayBuffer.isView(value)) return new TextDecoder().decode(new Uint8Array((value as ArrayBufferView).buffer));
+  const v = value as Record<string, unknown>;
+  if (typeof v.text === "function") return await (v.text as () => Promise<string>).call(value);
+  if (typeof v.arrayBuffer === "function") return new TextDecoder().decode(await (v.arrayBuffer as () => Promise<ArrayBuffer>).call(value));
+  if (typeof v.getReader === "function") {
+    const reader = (value as ReadableStream<Uint8Array>).getReader();
+    const chunks: Uint8Array[] = [];
+    for (;;) {
+      const { done, value: chunk } = await reader.read();
+      if (done) break;
+      if (chunk) chunks.push(chunk);
     }
+    const total = chunks.reduce((n, c) => n + c.length, 0);
+    const merged = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of chunks) { merged.set(chunk, offset); offset += chunk.length; }
+    return new TextDecoder().decode(merged);
   }
-  return String(obj ?? "");
+  return null;
+}
+
+// EdgeSpark's storage.get() returns { body, metadata } (NOT a Cloudflare
+// R2ObjectBody with .text()), so we must dig into `body` and decode whatever it
+// is (string / ArrayBuffer / typed array / ReadableStream / Blob-like). Never
+// fall back to String(obj) — that yields "[object Object]".
+async function storageObjectText(obj: unknown): Promise<string> {
+  if (obj == null) return "";
+  const direct = await decodeStorageValue(obj);
+  if (direct != null) return direct;
+  const wrapped = obj as Record<string, unknown>;
+  for (const key of ["body", "content", "data", "value"]) {
+    const decoded = await decodeStorageValue(wrapped[key]);
+    if (decoded != null) return decoded;
+  }
+  return "";
 }
 
 function scheduleStartupSeed() {
@@ -734,6 +756,12 @@ function runnerCallbackUrl() {
 // them even after the sandbox is gone. The SDK has no list(), so the canonical
 // file list comes from each card's cost_json.runner.resultFiles.
 const ARTIFACT_MAX_BYTES = 512 * 1024;
+// storage.put stores an EMPTY body when given a raw string — it needs an
+// ArrayBuffer. Encode text to bytes for every put.
+function textBytes(text: string): ArrayBuffer {
+  const u8 = new TextEncoder().encode(text);
+  return u8.buffer.slice(u8.byteOffset, u8.byteOffset + u8.byteLength) as ArrayBuffer;
+}
 function artifactR2Key(missionId: string, relPath: string) {
   const clean = relPath.replace(/^\/+/, "").replace(/\.\.(\/|$)/g, "");
   return `missions/${missionId}/artifacts/${clean}`;
@@ -749,7 +777,9 @@ async function persistMissionArtifacts(
     if (typeof file.path !== "string" || !file.path.trim()) continue;
     try {
       const { content } = await e2b.readWorkspaceFile(ref, file.path, ARTIFACT_MAX_BYTES);
-      if (content) await bucket.put(artifactR2Key(mission.id, file.path), content);
+      // storage.put requires ArrayBuffer | ArrayBufferView; a raw string stores
+      // an EMPTY body. Always encode text to bytes.
+      if (content) await bucket.put(artifactR2Key(mission.id, file.path), textBytes(content));
     } catch (error) {
       console.error("ARTIFACT PERSIST ERROR:", file.path, error);
     }
@@ -2083,8 +2113,8 @@ app.patch("/api/public/agents/:agentId", async (c) => {
   if (Array.isArray(body.equippedSkillIds)) patch.equippedSkillIdsJson = JSON.stringify(body.equippedSkillIds.map((id) => assertSafeId(id, "skill_id")));
   const bucket = storage.from(buckets.missionryWorkspaces);
   const writes = [];
-  if (body.soul !== undefined) writes.push(bucket.put(`agents/${agentId}/soul.md`, body.soul));
-  if (body.identity !== undefined) writes.push(bucket.put(`agents/${agentId}/identity.md`, body.identity));
+  if (body.soul !== undefined) writes.push(bucket.put(`agents/${agentId}/soul.md`, textBytes(body.soul)));
+  if (body.identity !== undefined) writes.push(bucket.put(`agents/${agentId}/identity.md`, textBytes(body.identity)));
   const [updated] = await db.update(agents).set(patch).where(eq(agents.id, agentId)).returning();
   await Promise.all(writes);
   const auditEventId = await recordAudit({
@@ -2453,7 +2483,7 @@ app.post("/api/public/agents/:agentId/self-update", async (c) => {
   const before = await bucket.get(key);
   const previousBody = body.previousBody ?? storageBodyCache.get(key) ?? (before ? await storageObjectText(before) : "");
   const [agentBeforeUpdate] = await db.select({ auditHeadId: agents.auditHeadId }).from(agents).where(eq(agents.id, agentId)).limit(1);
-  await bucket.put(key, body.content);
+  await bucket.put(key, textBytes(body.content));
   storageBodyCache.set(key, body.content);
   const auditEventId = await recordAudit({
     missionId,
@@ -3024,7 +3054,7 @@ app.post("/api/public/audit-events/:auditEventId/rollback", async (c) => {
   const bucket = storage.from(buckets.missionryWorkspaces);
   const versions = bucket.listVersions ? await bucket.listVersions(payload.r2Key) : [];
   if (versions.length > 1 && bucket.restoreObjectVersion) await bucket.restoreObjectVersion(payload.r2Key, versions[1].versionId);
-  if (payload.previousBody !== undefined) await bucket.put(payload.r2Key, payload.previousBody);
+  if (payload.previousBody !== undefined) await bucket.put(payload.r2Key, textBytes(payload.previousBody));
   if (payload.previousBody !== undefined) storageBodyCache.set(payload.r2Key, payload.previousBody);
   const restored = await bucket.get(payload.r2Key);
   const restoredBody = payload.previousBody ?? (restored ? await storageObjectText(restored) : "");

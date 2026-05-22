@@ -463,5 +463,8 @@
   "admin.empty.whitelist.title": "No whitelist entries yet",
   "admin.empty.whitelist.body": "Add an email or domain suffix to grant workspace access.",
   "admin.empty.missions.title": "No Missions yet",
-  "admin.empty.missions.body": "All Missions appear here once users create work."
+  "admin.empty.missions.body": "All Missions appear here once users create work.",
+  "workroom.chat.you": "You",
+  "workroom.chat.replying": "AI is replying…",
+  "common.close": "Close"
 }

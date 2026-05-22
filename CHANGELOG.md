@@ -28,6 +28,21 @@ uses date-based entries.
   forces a real, tool-using answer. (`server/src/index.ts`)
 
 ### Fixed
+- **R2 stored EMPTY bodies (artifacts previewed as `[object Object]`).**
+  `storage.put` requires `ArrayBuffer | ArrayBufferView`; passing a raw **string**
+  stored a zero-byte body. Every text put (artifacts, agent soul/identity, tool
+  write_file/write_artifact, env var content, audit rollback) now encodes via
+  `TextEncoder`. Also `storage.get()` returns `{ body: ArrayBuffer, metadata }`
+  (no `.text()`), so the read helpers now decode `body`
+  (ArrayBuffer/typed-array/stream) and never fall back to `String(obj)`.
+  Verified: artifact bytes restored and the preview renders.
+  (`server/src/index.ts`, `server/src/agents/files.ts`, `server/src/tools/index.ts`)
+- **Chat send blocked with the text stuck in the box.** Sending is now optimistic:
+  the message appears immediately, the input clears, and an "AI replying…"
+  indicator shows while the reply generates. **Enter sends, Shift+Enter newlines.**
+  (`web/.../workroom/Workroom.tsx`)
+- **Artifacts folder hierarchy + closeable preview.** The Saved-artifacts list is
+  grouped by directory, and the preview pane has a close (×) button.
 - **Work cards always failed: the in-sandbox runner never executed.**
   `envdRunCommand` POSTed a non-enveloped `JSON.stringify(...)` body to
   `process.Process/Start`, which is a Connect **server-streaming** RPC and

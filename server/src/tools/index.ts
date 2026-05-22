@@ -37,24 +37,35 @@ async function resolveSandbox(ctx: ToolContext, target: "mission" | "private"): 
   return e2b.startShared(ctx.missionId);
 }
 
+// storage.put needs an ArrayBuffer (a raw string stores an EMPTY body).
+function textBytes(text: string): ArrayBuffer {
+  const u8 = new TextEncoder().encode(text);
+  return u8.buffer.slice(u8.byteOffset, u8.byteOffset + u8.byteLength) as ArrayBuffer;
+}
+
+// EdgeSpark storage.get() returns { body: ArrayBuffer, metadata } (no .text()).
+async function decodeStorageValue(value: unknown): Promise<string | null> {
+  if (value == null) return null;
+  if (typeof value === "string") return value;
+  if (value instanceof Uint8Array) return new TextDecoder().decode(value);
+  if (value instanceof ArrayBuffer) return new TextDecoder().decode(new Uint8Array(value));
+  if (ArrayBuffer.isView(value)) return new TextDecoder().decode(new Uint8Array((value as ArrayBufferView).buffer));
+  const v = value as Record<string, unknown>;
+  if (typeof v.text === "function") return await (v.text as () => Promise<string>).call(value);
+  if (typeof v.arrayBuffer === "function") return new TextDecoder().decode(await (v.arrayBuffer as () => Promise<ArrayBuffer>).call(value));
+  return null;
+}
+
 async function storageObjectText(obj: unknown): Promise<string> {
-  const wrapped = obj as Record<string, unknown> | null;
-  const maybeText = wrapped?.text;
-  if (typeof maybeText === "function") return maybeText.call(obj);
-  if (typeof maybeText === "string") return maybeText;
-  const maybeArrayBuffer = wrapped?.arrayBuffer;
-  if (typeof maybeArrayBuffer === "function") return new TextDecoder().decode(await maybeArrayBuffer.call(obj));
+  if (obj == null) return "";
+  const direct = await decodeStorageValue(obj);
+  if (direct != null) return direct;
+  const wrapped = obj as Record<string, unknown>;
   for (const key of ["body", "content", "data", "value"]) {
-    const value = wrapped?.[key];
-    if (typeof value === "string") return value;
-    if (value instanceof Uint8Array) return new TextDecoder().decode(value);
-    if (value && typeof value === "object") {
-      const nestedText = (value as Record<string, unknown>).text;
-      if (typeof nestedText === "function") return nestedText.call(value);
-      if (typeof nestedText === "string") return nestedText;
-    }
+    const decoded = await decodeStorageValue(wrapped[key]);
+    if (decoded != null) return decoded;
   }
-  return String(obj ?? "");
+  return "";
 }
 
 async function withUsageAndSpend<T>(name: string, ctx: ToolContext, handler: () => Promise<T>) {
@@ -230,7 +241,7 @@ export function missionryToolKit(ctx: ToolContext) {
           const artifactId = assertSafeId(input.artifactId, "artifact_id");
           const filename = assertSafeRelativePath(input.filename);
           const key = `missions/${ctx.missionId}/artifacts/${artifactId}/${filename}`;
-          await storage.from(buckets.missionryWorkspaces).put(key, input.content);
+          await storage.from(buckets.missionryWorkspaces).put(key, textBytes(input.content));
           return { key, capabilityStatus: "real" as const };
         }),
     }),
@@ -463,7 +474,7 @@ export function missionryToolKit(ctx: ToolContext) {
           const before = await storage.from(buckets.missionryWorkspaces).get(key);
           const previousBody = before ? await storageObjectText(before) : "";
           const [agentBeforeUpdate] = await db.select({ auditHeadId: agents.auditHeadId }).from(agents).where(eq(agents.id, ctx.agentId)).limit(1);
-          await storage.from(buckets.missionryWorkspaces).put(key, input.content);
+          await storage.from(buckets.missionryWorkspaces).put(key, textBytes(input.content));
           const auditEventId = await recordAudit({
             missionId: ctx.missionId,
             subjectType: "agent",
