@@ -7,6 +7,16 @@ uses date-based entries.
 ## [Unreleased]
 
 ### Added
+- **Layered agent memory (Hermes-style).** Agents now have long-term memory:
+  `agents/{id}/MEMORY.md` (cross-mission lessons/conventions, cap ~2.4k) and a
+  shared `users/{userId}/USER.md` owner profile (cap ~1.5k); the raw message log
+  (mission_chat_messages + audit) is the `state.db` equivalent and isn't auto-loaded.
+  Memory is injected into both chat replies and the in-sandbox runner. A background
+  **self-improvement review** (cheap model, after each chat exchange) extracts
+  durable agent lessons + owner-profile facts and saves them — capped, budget-gated,
+  killable via `MISSIONRY_MEMORY_REVIEW=off`. Verified live: the runner task now
+  carries a `memory` field. (`server/src/agents/files.ts`, `server/src/index.ts`,
+  `server/src/runtime/agentRunner.ts`)
 - **Proactive agent chatter (Phase 2.2).** Non-leader agents no longer speak only
   when @mentioned. On each USER team-chat message, a cheap gate model
   (`MISSIONRY_GATE_MODEL`, default `gpt-5-mini`) decides per candidate agent whether

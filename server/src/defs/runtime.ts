@@ -17,7 +17,9 @@ export type VarKey =
   | "MISSIONRY_DEV_HEADER_SECRET"
   // Proactive chatter (phase 2.2): cheap gate model id + on/off kill switch.
   | "MISSIONRY_GATE_MODEL"
-  | "MISSIONRY_PROACTIVE_CHATTER";
+  | "MISSIONRY_PROACTIVE_CHATTER"
+  // Layered memory: proactive self-improvement review on/off.
+  | "MISSIONRY_MEMORY_REVIEW";
 
 export type RuntimeConfig = {
   secrets: SecretKey[];
@@ -30,5 +32,5 @@ export const runtimeConfig: RuntimeConfig = {
   // super-admin falls back to the persisted users_profile role. Keeping them out
   // of the required list lets deploy proceed without forcing browser secret entry.
   secrets: ["E2B_API_KEY", "OPENAI_API_KEY", "INTERNAL_REAP_TOKEN"],
-  vars: ["MISSIONRY_IDLE_MS", "MISSIONRY_R2_PREFIX", "E2B_TEMPLATE_ID", "MISSIONRY_E2B_CENTS_PER_MIN", "MISSIONRY_PUBLIC_ORIGIN", "DEMO_E2B_MODE", "EDGESPARK_ENV", "NODE_ENV", "EDGESPARK_DEV_AS_ADMIN", "MISSIONRY_FORCE_MOCK_AI", "MISSIONRY_SUPER_ADMIN_USER_IDS", "MISSIONRY_DEV_HEADER_SECRET", "MISSIONRY_GATE_MODEL", "MISSIONRY_PROACTIVE_CHATTER"],
+  vars: ["MISSIONRY_IDLE_MS", "MISSIONRY_R2_PREFIX", "E2B_TEMPLATE_ID", "MISSIONRY_E2B_CENTS_PER_MIN", "MISSIONRY_PUBLIC_ORIGIN", "DEMO_E2B_MODE", "EDGESPARK_ENV", "NODE_ENV", "EDGESPARK_DEV_AS_ADMIN", "MISSIONRY_FORCE_MOCK_AI", "MISSIONRY_SUPER_ADMIN_USER_IDS", "MISSIONRY_DEV_HEADER_SECRET", "MISSIONRY_GATE_MODEL", "MISSIONRY_PROACTIVE_CHATTER", "MISSIONRY_MEMORY_REVIEW"],
 };

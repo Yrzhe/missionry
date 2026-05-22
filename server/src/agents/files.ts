@@ -181,3 +181,69 @@ export async function loadSkill(agentId: string, skillId: string): Promise<strin
   if (!body) throw new Error("error.skill.not_found");
   return body;
 }
+
+// ── Layered memory (Hermes-style) ─────────────────────────────────────────────
+// MEMORY.md = the agent's cross-mission lessons/conventions/tool quirks (the brain).
+// USER.md   = the owner's profile/preferences, shared across all agents.
+// The raw message log (state.db equivalent) already lives in mission_chat_messages
+// + audit and is NOT auto-loaded.
+const AGENT_MEMORY_CAP = 2400;
+const USER_PROFILE_CAP = 1500;
+
+function agentMemoryKey(agentId: string) {
+  return `agents/${assertSafeId(agentId, "agent_id")}/MEMORY.md`;
+}
+function userProfileKey(userId: string) {
+  // userId comes from auth (better-auth) — keep it filesystem-safe.
+  const safe = String(userId || "system").replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 80) || "system";
+  return `users/${safe}/USER.md`;
+}
+
+export async function loadAgentMemory(agentId: string): Promise<string> {
+  return (await getText(agentMemoryKey(agentId)))?.trim() ?? "";
+}
+export async function loadUserProfile(userId: string): Promise<string> {
+  return (await getText(userProfileKey(userId)))?.trim() ?? "";
+}
+
+// Append bullet lines, dedup exact repeats, and trim oldest lines past the cap.
+function mergeMemory(current: string, additions: string[], cap: number): string {
+  const existing = current.split("\n").map((l) => l.trim()).filter(Boolean);
+  const seen = new Set(existing.map((l) => l.replace(/^[-*]\s*/, "")));
+  for (const raw of additions) {
+    const line = `- ${raw.trim().replace(/^[-*]\s*/, "")}`;
+    const norm = line.replace(/^[-*]\s*/, "");
+    if (norm && !seen.has(norm)) { existing.push(line); seen.add(norm); }
+  }
+  let out = existing.join("\n");
+  while (out.length > cap && existing.length > 1) {
+    existing.shift(); // drop oldest
+    out = existing.join("\n");
+  }
+  return out;
+}
+
+export async function appendAgentMemory(agentId: string, lines: string[]) {
+  if (!lines.length) return;
+  const key = agentMemoryKey(agentId);
+  const next = mergeMemory(await loadAgentMemory(agentId), lines, AGENT_MEMORY_CAP);
+  await storage.from(buckets.missionryWorkspaces).put(key, textBytes(next));
+}
+export async function appendUserProfile(userId: string, lines: string[]) {
+  if (!lines.length) return;
+  const key = userProfileKey(userId);
+  const next = mergeMemory(await loadUserProfile(userId), lines, USER_PROFILE_CAP);
+  await storage.from(buckets.missionryWorkspaces).put(key, textBytes(next));
+}
+
+// Build the injectable memory block for an agent's system context.
+export async function buildMemoryContext(agentId: string, userId?: string): Promise<string> {
+  const [mem, user] = await Promise.all([
+    loadAgentMemory(agentId),
+    userId ? loadUserProfile(userId) : Promise.resolve(""),
+  ]);
+  const parts: string[] = [];
+  if (mem) parts.push(`## Your long-term memory (lessons across missions)\n${mem}`);
+  if (user) parts.push(`## What you know about the owner\n${user}`);
+  return parts.join("\n\n");
+}

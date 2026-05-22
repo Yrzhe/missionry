@@ -5,7 +5,7 @@ import { and, asc, desc, eq, inArray, isNull, lte, ne, sql } from "drizzle-orm";
 import { generateText, streamText, stepCountIs } from "ai";
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
-import { ensureAgentFiles, ensureAgentInstanceFiles, loadAgentBootFiles, loadSkill } from "./agents/files";
+import { ensureAgentFiles, ensureAgentInstanceFiles, loadAgentBootFiles, loadSkill, buildMemoryContext, appendAgentMemory, appendUserProfile, loadAgentMemory } from "./agents/files";
 import { esSystemAuthUser } from "./__generated__/sys_schema";
 import {
   agentInstances,
@@ -1022,6 +1022,7 @@ async function launchE2bWorkCardRunner(input: {
     soul: boot?.soul ?? "",
     identity: boot?.identity ?? "",
     objective: mission.objective,
+    memory: await buildMemoryContext(input.agent.id, mission.ownerUserId ?? undefined).catch(() => ""),
     openaiApiKey: apiKey,
     callbackUrl: runnerCallbackUrl(),
     heartbeatUrl: runnerHeartbeatUrl(),
@@ -1539,16 +1540,29 @@ async function generateMissionChatReply(input: {
   history: Array<typeof missionChatMessages.$inferSelect>;
   stubBody: string;
 }) {
+  // Inject the agent's layered memory (cross-mission lessons + owner profile).
+  const ownerUserId = await missionOwnerUserId(input.missionId);
+  const memory = await buildMemoryContext(input.agentId, ownerUserId).catch(() => "");
+  const systemFallback = memory ? `${input.systemFallback}\n\n${memory}` : input.systemFallback;
   return runAgentToolLoop({
     missionId: input.missionId,
     agentId: input.agentId,
     instanceId: input.instanceId,
     turnId: `turn_${crypto.randomUUID().slice(0, 8)}`,
-    systemFallback: input.systemFallback,
+    systemFallback,
     messages: chatRowsToAiMessages(input.history),
     missionContext: "Mission chat turn. If the user asks for work, use tools rather than only describing the work.",
     stubBody: input.stubBody,
   });
+}
+
+async function missionOwnerUserId(missionId: string): Promise<string | undefined> {
+  try {
+    const [row] = await db.select({ ownerUserId: missions.ownerUserId }).from(missions).where(eq(missions.id, missionId)).limit(1);
+    return row?.ownerUserId ?? undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 async function runLeaderDispatchPass(missionId: string, reason: string) {
@@ -1603,6 +1617,7 @@ async function runLeaderDispatchPass(missionId: string, reason: string) {
 async function dispatchMissionChatReplies(missionId: string, source: typeof missionChatMessages.$inferSelect, mentions: ChatMention[]) {
   const mission = await getMissionWithRuntimeSandboxes(missionId);
   const created: Array<typeof missionChatMessages.$inferSelect> = [];
+  const responders: Array<{ agentId: string; body: string }> = [];
   const leader = await resolveMissionLeader(mission);
   const leaderInstanceId = leader?.instance.id ?? null;
   const mentionedInstanceIds = new Set(mentions.filter((m) => m.type === "agent_instance").map((m) => m.id));
@@ -1632,6 +1647,7 @@ async function dispatchMissionChatReplies(missionId: string, source: typeof miss
     });
     await updateAgentResponseCursor(missionId, leader.instance.id, leaderMessage);
     created.push(leaderMessage);
+    responders.push({ agentId: leader.agent.id, body: leaderBody });
   }
   for (const mention of mentions) {
     if (mention.type !== "agent_instance" || mention.id === leaderInstanceId) continue;
@@ -1658,6 +1674,12 @@ async function dispatchMissionChatReplies(missionId: string, source: typeof miss
     });
     await updateAgentResponseCursor(missionId, mention.id, agentMessage);
     created.push(agentMessage);
+    responders.push({ agentId: instanceRow.agent.id, body: agentBody });
+  }
+  // Self-improvement: review this exchange in the background and save durable agent
+  // lessons / owner-profile facts to layered memory (MEMORY.md / USER.md).
+  if (source.authorType === "user" && responders.length) {
+    waitUntil(missionOwnerUserId(missionId).then((ownerUserId) => reviewMemory(missionId, ownerUserId, source.body, responders)).catch((error) => console.error("MEMORY REVIEW ERROR:", error)));
   }
   // Proactive chatter: let relevant non-leader, non-mentioned agents self-decide to
   // chime in (cheap gate model). Run in the BACKGROUND — the gate + replies would
@@ -1746,6 +1768,47 @@ async function runProactiveChatter(
     created.push(message);
   }
   return created;
+}
+
+// Proactive memory review (Hermes-style self-improvement): after a chat exchange,
+// a cheap model extracts durable agent lessons + owner-profile facts and saves them
+// to the agent's MEMORY.md / the owner's USER.md. Runs in the background, capped,
+// budget-gated, killable via MISSIONRY_MEMORY_REVIEW=off.
+async function reviewMemory(missionId: string, ownerUserId: string | undefined, sourceBody: string, responders: Array<{ agentId: string; body: string }>) {
+  if ((vars.get("MISSIONRY_MEMORY_REVIEW") ?? "on") === "off") return;
+  if (forceMockAi() || await e2b.useMemoryMode()) return;
+  const mission = await getMission(missionId).catch(() => null);
+  if (mission?.stateJson.costGuardrailStatus === "daily_cap_hit") return;
+  const apiKey = await Promise.resolve(secret.get("OPENAI_API_KEY")).catch(() => undefined);
+  if (!apiKey) return;
+  const model = vars.get("MISSIONRY_GATE_MODEL") || "gpt-5-mini";
+  const openai = createOpenAI({ apiKey });
+  for (const responder of responders.slice(0, 2)) {
+    if (!responder.body || responder.body.trim() === "[NO]") continue;
+    try {
+      const currentMem = await loadAgentMemory(responder.agentId);
+      const res = await generateText({
+        model: openai(model),
+        prompt: [
+          "You maintain an AI agent's long-term memory after a chat exchange. Extract ONLY durable, reusable facts — never one-off task details.",
+          'Return JSON only: {"agentMemory": string[], "userProfile": string[]}.',
+          "- agentMemory: lessons / conventions / tool quirks worth remembering across missions (0-3 short bullets).",
+          "- userProfile: stable facts/preferences about the OWNER worth remembering (0-2 short bullets).",
+          "Be conservative; usually BOTH are empty.",
+          `Owner message: "${sourceBody.slice(0, 600)}"`,
+          `Agent reply: "${responder.body.slice(0, 600)}"`,
+          currentMem ? `Already known (do NOT repeat):\n${currentMem.slice(0, 800)}` : "",
+        ].filter(Boolean).join("\n"),
+      });
+      const parsed = JSON.parse(res.text.trim().match(/\{[\s\S]*\}/)?.[0] ?? "{}") as { agentMemory?: unknown; userProfile?: unknown };
+      const agentMem = Array.isArray(parsed.agentMemory) ? parsed.agentMemory.filter((x): x is string => typeof x === "string" && x.trim().length > 0).slice(0, 3) : [];
+      const userMem = Array.isArray(parsed.userProfile) ? parsed.userProfile.filter((x): x is string => typeof x === "string" && x.trim().length > 0).slice(0, 2) : [];
+      if (agentMem.length) await appendAgentMemory(responder.agentId, agentMem);
+      if (userMem.length && ownerUserId) await appendUserProfile(ownerUserId, userMem);
+    } catch {
+      // best-effort; never fail the chat on a memory review error
+    }
+  }
 }
 
 // Per-work-card discussion: only @mentioned agents respond (no leader auto-reply),

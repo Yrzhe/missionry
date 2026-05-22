@@ -30,6 +30,7 @@ EDGESPARK_DEV_AS_ADMIN = "false"
 # Proactive chatter (phase 2.2): cheap gate model id + on/off kill switch.
 MISSIONRY_GATE_MODEL = "gpt-5-mini"
 MISSIONRY_PROACTIVE_CHATTER = "on"
+MISSIONRY_MEMORY_REVIEW = "on"
 
 # Secrets entered through EdgeSpark dashboard / CLI:
 # E2B_API_KEY
