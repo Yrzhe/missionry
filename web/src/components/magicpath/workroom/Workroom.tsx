@@ -22,6 +22,7 @@ import type {
 import type { FormEvent } from 'react';
 import { Shell } from '../Shell';
 import { Markdown } from '../Markdown';
+import { ConfirmModal } from '../ConfirmModal';
 
 type NewWorkCardForm = {
   title: string;
@@ -75,6 +76,8 @@ export function Workroom() {
   const [showSilenced, setShowSilenced] = useState(false);
   const [chatError, setChatError] = useState<string | null>(null);
   const [sandboxAction, setSandboxAction] = useState<string | null>(null);
+  const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
+  const [deleteErr, setDeleteErr] = useState<string | null>(null);
   const [planAction, setPlanAction] = useState(false);
   const [workCardAction, setWorkCardAction] = useState<string | null>(null);
   const [directThreadAction, setDirectThreadAction] = useState<string | null>(null);
@@ -296,13 +299,19 @@ export function Workroom() {
     submitChat();
   }
 
-  async function deleteMission() {
-    if (!id || !workroom || !window.confirm(t('missions.delete.confirm', { title: workroom.mission.title }))) return;
-    setError(null);
+  function requestDeleteMission() {
+    if (!id || !workroom) return;
+    setDeleteErr(null);
+    setConfirmDeleteOpen(true);
+  }
+
+  async function confirmDeleteMission() {
+    if (!id || !workroom) return;
+    setDeleteErr(null);
     try {
       await deleteMissionMutation.mutateAsync();
     } catch (deleteError) {
-      setError(deleteError instanceof Error ? deleteError.message : t('missions.delete.error'));
+      setDeleteErr(deleteError instanceof Error ? deleteError.message : t('missions.delete.error'));
     }
   }
 
@@ -417,7 +426,7 @@ export function Workroom() {
               </div>
               <div className="mp-danger-zone">
                 <strong>{t('workroom.details.danger')}</strong>
-                <button className="mp-button danger" disabled={deleteMissionMutation.isPending} onClick={() => void deleteMission()}>{deleteMissionMutation.isPending ? t('common.saving') : t('common.delete')}</button>
+                <button className="mp-button danger" disabled={deleteMissionMutation.isPending} onClick={requestDeleteMission}>{deleteMissionMutation.isPending ? t('common.saving') : t('common.delete')}</button>
               </div>
             </div>
           </div>
@@ -505,6 +514,18 @@ export function Workroom() {
           </form>
         </div>
       ) : null}
+
+      <ConfirmModal
+        open={confirmDeleteOpen}
+        title={t('missions.delete.title')}
+        body={workroom ? t('missions.delete.confirm', { title: workroom.mission.title }) : ''}
+        confirmLabel={t('common.delete')}
+        danger
+        busy={deleteMissionMutation.isPending}
+        error={deleteErr}
+        onConfirm={() => void confirmDeleteMission()}
+        onCancel={() => { if (!deleteMissionMutation.isPending) { setConfirmDeleteOpen(false); setDeleteErr(null); } }}
+      />
     </Shell>
   );
 }

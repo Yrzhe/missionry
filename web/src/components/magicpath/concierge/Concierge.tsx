@@ -73,12 +73,7 @@ export function Concierge() {
     <Shell title={t('concierge.title')} meta={<span className="mp-muted">{t('concierge.subtitle')}</span>}>
       <div className="mp-concierge-layout">
         <section className="mp-card mp-concierge-chat">
-          <div className="mp-section-title">
-            <div>
-              <strong>{t('concierge.title')}</strong>
-              <p className="mp-muted">{t('concierge.intro')}</p>
-            </div>
-          </div>
+          <p className="mp-muted mp-concierge-hint">{t('concierge.intro')}</p>
           <div className="mp-concierge-scroll" ref={scrollRef}>
             {messages.length ? messages.map((m) => (
               <div key={m.id} className={`mp-chat-bubble ${m.authorType === 'user' ? 'user' : ''}`}>
@@ -97,26 +92,30 @@ export function Concierge() {
 
         <section className="mp-card mp-concierge-overview">
           <div className="mp-section-title"><strong>{t('concierge.overview')}</strong></div>
-          <div className="mp-label">{t('concierge.agents')}</div>
-          <div className="mp-concierge-list">
-            {(overview?.agents ?? []).map((a) => (
-              <div key={a.id} className="mp-concierge-row">
-                <strong>{a.name}</strong>
-                <span className="mp-muted">{a.role} · {t('concierge.inMissions', { count: a.missionCount })}</span>
-                {a.running.length ? <span className="mp-chip dark">{t('concierge.running', { count: a.running.length })}</span> : null}
-              </div>
-            ))}
-            {!overview?.agents.length ? <p className="mp-muted">—</p> : null}
+          <div className="mp-overview-block">
+            <div className="mp-label">{t('concierge.agents')}</div>
+            <div className="mp-overview-scroll">
+              {(overview?.agents ?? []).map((a) => (
+                <div key={a.id} className="mp-concierge-row">
+                  <strong>{a.name}</strong>
+                  <span className="mp-muted">{a.role} · {t('concierge.inMissions', { count: a.missionCount })}</span>
+                  {a.running.length ? <span className="mp-chip dark">{t('concierge.running', { count: a.running.length })}</span> : null}
+                </div>
+              ))}
+              {!overview?.agents.length ? <p className="mp-muted">—</p> : null}
+            </div>
           </div>
-          <div className="mp-label">{t('concierge.missions')}</div>
-          <div className="mp-concierge-list">
-            {(overview?.missions ?? []).map((m) => (
-              <Link key={m.id} to={`/missions/${m.id}`} className="mp-concierge-row mp-concierge-mission">
-                <strong>{m.title}</strong>
-                <span className="mp-muted">{m.status} · {Object.entries(m.cards).map(([s, n]) => `${s}:${n}`).join(' ') || t('concierge.noCards')}</span>
-              </Link>
-            ))}
-            {!overview?.missions.length ? <p className="mp-muted">—</p> : null}
+          <div className="mp-overview-block">
+            <div className="mp-label">{t('concierge.missions')}</div>
+            <div className="mp-overview-scroll">
+              {(overview?.missions ?? []).map((m) => (
+                <Link key={m.id} to={`/missions/${m.id}`} className="mp-concierge-row mp-concierge-mission">
+                  <strong>{m.title}</strong>
+                  <span className="mp-muted">{m.status} · {Object.entries(m.cards).map(([s, n]) => `${s}:${n}`).join(' ') || t('concierge.noCards')}</span>
+                </Link>
+              ))}
+              {!overview?.missions.length ? <p className="mp-muted">—</p> : null}
+            </div>
           </div>
         </section>
       </div>
