@@ -105,6 +105,7 @@
   "missions.search": "Search",
   "missions.searchPlaceholder": "Search missions",
   "missions.createError": "Unable to create Mission",
+  "missions.delete.title": "Delete Mission?",
   "missions.delete.confirm": "Delete Mission \"{{title}}\"? This cannot be undone.",
   "missions.delete.success": "Mission deleted.",
   "missions.delete.error": "Unable to delete Mission",

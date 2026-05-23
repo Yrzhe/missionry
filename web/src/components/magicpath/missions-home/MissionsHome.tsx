@@ -7,6 +7,7 @@ import { queryKeys } from '../../../lib/query';
 import type { AgentLibraryItem, MissionAgentRow, MissionSummary } from '../../../lib/types';
 import type { FormEvent } from 'react';
 import { Shell } from '../Shell';
+import { ConfirmModal } from '../ConfirmModal';
 
 type NewMissionForm = {
   title: string;
@@ -44,6 +45,8 @@ export function MissionsHome() {
   const [modalOpen, setModalOpen] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<MissionSummary | null>(null);
+  const [deleteErr, setDeleteErr] = useState<string | null>(null);
   const [form, setForm] = useState<NewMissionForm>({ title: '', objective: '', dailyBudgetCents: '2500', leaderMode: 'default', leaderAgentId: '' });
   const agentsQuery = useQuery({
     queryKey: queryKeys.agents,
@@ -135,14 +138,21 @@ export function MissionsHome() {
     }
   }
 
-  async function deleteMission(mission: MissionSummary) {
-    if (!window.confirm(t('missions.delete.confirm', { title: mission.title }))) return;
+  function requestDelete(mission: MissionSummary) {
     setMessage(null);
     setError(null);
+    setDeleteErr(null);
+    setPendingDelete(mission);
+  }
+
+  async function confirmDelete() {
+    if (!pendingDelete) return;
+    setDeleteErr(null);
     try {
-      await deleteMissionMutation.mutateAsync(mission.id);
+      await deleteMissionMutation.mutateAsync(pendingDelete.id);
+      setPendingDelete(null);
     } catch (deleteError) {
-      setError(deleteError instanceof Error ? deleteError.message : t('missions.delete.error'));
+      setDeleteErr(deleteError instanceof Error ? deleteError.message : t('missions.delete.error'));
     }
   }
 
@@ -195,9 +205,21 @@ export function MissionsHome() {
 
       <div className="mp-card mp-list">
         {rows.length ? rows.map((mission) => (
-          <MissionRow key={mission.id} mission={mission} agents={[]} isDeleting={deleteMissionMutation.variables === mission.id && deleteMissionMutation.isPending} onDelete={() => void deleteMission(mission)} onOpen={() => navigate(`/missions/${mission.id}`)} />
+          <MissionRow key={mission.id} mission={mission} agents={[]} isDeleting={deleteMissionMutation.variables === mission.id && deleteMissionMutation.isPending} onDelete={() => requestDelete(mission)} onOpen={() => navigate(`/missions/${mission.id}`)} />
         )) : <EmptyCta title={t('missions.empty.title')} body={t('missions.empty.body')} action={t('missions.empty.action')} secondaryAction={t('missions.empty.demoAction')} onAction={() => setModalOpen(true)} onSecondaryAction={() => void createDemoMission()} />}
       </div>
+
+      <ConfirmModal
+        open={!!pendingDelete}
+        title={t('missions.delete.title')}
+        body={pendingDelete ? t('missions.delete.confirm', { title: pendingDelete.title }) : ''}
+        confirmLabel={t('common.delete')}
+        danger
+        busy={deleteMissionMutation.isPending}
+        error={deleteErr}
+        onConfirm={() => void confirmDelete()}
+        onCancel={() => { if (!deleteMissionMutation.isPending) { setPendingDelete(null); setDeleteErr(null); } }}
+      />
 
       {modalOpen ? (
         <div className="mp-modal-backdrop" role="presentation">

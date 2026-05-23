@@ -105,6 +105,7 @@
   "missions.search": "搜索",
   "missions.searchPlaceholder": "搜索任务",
   "missions.createError": "无法创建任务",
+  "missions.delete.title": "删除任务？",
   "missions.delete.confirm": "删除任务「{{title}}」？此操作不可撤销。",
   "missions.delete.success": "任务已删除。",
   "missions.delete.error": "无法删除任务",

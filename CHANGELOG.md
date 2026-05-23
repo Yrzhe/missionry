@@ -7,6 +7,22 @@ uses date-based entries.
 ## [Unreleased]
 
 ### Fixed
+- **Delete Mission "no reaction" root cause.** Both delete handlers gated on the
+  native `window.confirm()`, which browsers/extensions can silently suppress
+  ("don't allow this page to create more dialogs") — making delete do nothing with
+  no request and no error. Replaced with an in-app `ConfirmModal` (no dependency on
+  native dialogs) and surfaced delete failures inside the dialog.
+  (`web/.../ConfirmModal.tsx`, `missions-home/MissionsHome.tsx`, `workroom/Workroom.tsx`)
+
+### Changed
+- **Concierge (管家) page polish.** Removed the duplicate「管家」heading inside the
+  chat (the page header already labels it) — now a slim one-line capability hint.
+  The page fills the viewport height: chat column scrolls internally with the
+  composer pinned, and the right「全局概览」is two fixed-height blocks (Agents /
+  Missions) that each scroll independently. Mobile stacks with per-card heights.
+  (`web/.../concierge/Concierge.tsx`, `web/src/index.css`)
+
+### Fixed
 - **Concurrency hardening (#3/#9/#10).** Three race/correctness fixes in the
   sandbox + budget path:
   - **#3 sandbox start race.** Concurrent `startOrResume` for the same sandbox no
