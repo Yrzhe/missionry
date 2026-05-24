@@ -618,6 +618,7 @@ strong { font-weight: 650; }
 }
 
 .mp-confirm-modal { width: min(420px, 100%); gap: 10px; }
+.mp-details-modal { width: min(880px, 100%); }
 .mp-confirm-actions {
   display: flex;
   justify-content: flex-end;
@@ -678,12 +679,23 @@ strong { font-weight: 650; }
   background: #b8701f;
 }
 
+/* Fixed-height page: summary + requests pinned, the 2-col layout fills the rest
+   so the page itself never scrolls — only the inner panels do. */
+.mp-workroom-page {
+  height: calc(100vh - 112px);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+}
+.mp-workroom-page > .mp-mission-summary { margin-bottom: 0; flex: none; }
+
 .mp-panel {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   overflow: hidden;
-  height: min(820px, calc(100vh - 150px));
-  min-height: 560px;
+  height: 100%;
+  min-height: 0;
 }
 
 .mp-mission-summary {
@@ -749,7 +761,8 @@ strong { font-weight: 650; }
   grid-template-columns: minmax(0, 1.15fr) minmax(320px, .85fr);
   gap: 14px;
   align-items: stretch;
-  min-height: min(820px, calc(100vh - 150px));
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
 .mp-workroom-layout > .mp-card {
@@ -776,8 +789,16 @@ strong { font-weight: 650; }
   padding: 12px;
 }
 
+.mp-tab-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+  height: 100%;
+}
 .mp-workcard-list {
-  max-height: min(660px, calc(100vh - 260px));
+  flex: 1 1 0;
+  min-height: 0;
   overflow-y: auto;
   padding-right: 4px;
 }
@@ -1443,11 +1464,9 @@ strong { font-weight: 650; }
 .mp-chat-panel {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto auto;
-  min-height: 560px;
-  /* Bounded height so the 1fr chat-scroll row is constrained and actually
-     scrolls instead of growing the panel to fit every message. */
-  height: min(820px, calc(100vh - 150px));
-  max-height: min(820px, calc(100vh - 150px));
+  /* Fills the fixed-height layout row; the 1fr chat-scroll row scrolls. */
+  height: 100%;
+  min-height: 0;
 }
 
 .mp-inline-check {
@@ -1789,8 +1808,13 @@ strong { font-weight: 650; }
   .mp-metrics.compact { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .mp-metrics, .mp-sandbox-grid, .mp-sandbox-control-grid, .mp-agent-grid, .mp-growth-candidate-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .mp-env-status-line { justify-content: flex-start; }
-  .mp-chat-panel, .mp-direct-chat { min-height: 520px; }
-  .mp-panel { min-height: 520px; }
+  /* Stacked on mobile: page scrolls normally, panels take natural heights. */
+  .mp-workroom-page { height: auto; min-height: 0; }
+  .mp-workroom-layout { flex: none; }
+  .mp-chat-panel, .mp-direct-chat { min-height: 520px; height: auto; }
+  .mp-panel { min-height: 520px; height: auto; }
+  .mp-tab-panel { height: auto; }
+  .mp-workcard-list { flex: none; max-height: 60vh; }
 }
 
 @media (max-width: 820px) {
