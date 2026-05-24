@@ -1568,6 +1568,7 @@ async function runAgentToolLoop(input: {
       globalRoster ? `Available global agents the Leader may recruit:\n${globalRoster}` : "",
       input.missionContext,
       "You are an execution agent. Use tools to inspect, run commands, read/write files, and report concrete progress. Finish with a concise summary of what you actually did.",
+      "When the user asks where a file / report / output is, FIRST call list_artifacts (saved files) — and list_workspace_files if needed — and answer with the EXACT path it returns. Never guess or invent a path. Save deliverables under outputs/ with clear, dated names (e.g. outputs/2026-05-24_daily_brief.md).",
     ].filter(Boolean).join("\n\n"),
     messages: input.messages,
     tools: missionryToolKit({

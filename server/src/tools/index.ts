@@ -245,6 +245,33 @@ export function missionryToolKit(ctx: ToolContext) {
           return { key, capabilityStatus: "real" as const };
         }),
     }),
+    list_artifacts: tool({
+      description: "List the REAL saved artifact file paths for this mission (from completed work cards). ALWAYS call this before telling the user where a file/report/output is — never guess or invent a path.",
+      inputSchema: z.object({}),
+      execute: () =>
+        withUsageAndSpend("list_artifacts", ctx, async () => {
+          const cards = await db.select().from(workCards).where(eq(workCards.missionId, ctx.missionId)) as Array<typeof workCards.$inferSelect>;
+          const byPath = new Map<string, { path: string; size?: number; card: string }>();
+          for (const card of cards) {
+            let files: Array<{ path?: string; size?: number }> = [];
+            try { files = (JSON.parse(card.costJson) as { runner?: { resultFiles?: Array<{ path?: string; size?: number }> } }).runner?.resultFiles ?? []; } catch { /* skip */ }
+            for (const f of files) if (typeof f.path === "string" && f.path.trim()) byPath.set(f.path, { path: f.path, size: f.size, card: card.title });
+          }
+          const items = Array.from(byPath.values());
+          return { count: items.length, artifacts: items, capabilityStatus: "real" as const };
+        }),
+    }),
+    list_workspace_files: tool({
+      description: "List the files currently in the live sandbox workspace (relative paths). Use to see what actually exists right now.",
+      inputSchema: z.object({ sandbox_target: z.enum(["mission", "private"]).default("mission") }),
+      execute: (input) =>
+        withUsageAndSpend("list_workspace_files", ctx, async () => {
+          const ref = await resolveSandbox(ctx, input.sandbox_target);
+          const result = await e2b.runCommand(ref, "find . -type f -not -path '*/.*' | sed 's|^\\./||' | head -200");
+          const files = result.stdout.split("\n").map((s) => s.trim()).filter(Boolean);
+          return { count: files.length, files, sandboxId: ref.sandboxId, capabilityStatus: "real" as const };
+        }),
+    }),
     escalate_to_private_sandbox: tool({
       description: "Create or resume this AgentInstance's Tier 2 private sandbox.",
       inputSchema: z.object({ reason: z.string() }),

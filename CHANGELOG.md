@@ -7,6 +7,13 @@ uses date-based entries.
 ## [Unreleased]
 
 ### Added
+- **Agents report real file paths (no more hallucinated locations).** New
+  `list_artifacts` (real saved paths from completed cards) and
+  `list_workspace_files` (live sandbox) tools. The chat agent now calls them before
+  telling you where a file/report is — and saves deliverables under `outputs/` with
+  clear, dated names — so "where's the daily brief?" returns the actual path
+  instead of an invented one. (`server/src/tools/index.ts`, `server/src/index.ts`,
+  `server/src/runtime/agentRunner.ts`)
 - **Recurring schedules (定时任务).** A new `schedules` table + a `/schedules` page
   let the team run on a cadence without manual triggering. Each schedule fires on
   the existing ~5-min tick: scope `agent` → a work card for that agent instance;

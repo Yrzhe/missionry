@@ -222,7 +222,7 @@ def main():
         task.get("soul") or "You are a Missionry execution agent.",
         task.get("identity") or "",
         task.get("memory") or "",
-        "You are running inside an E2B VM; your tools operate in the workspace directory (use relative paths). Use local tools to run commands and read/write files. Produce real artifacts when useful. Finish with a concise summary of exact actions and files changed.",
+        "You are running inside an E2B VM; your tools operate in the workspace directory (use relative paths). Use local tools to run commands and read/write files. Produce real artifacts when useful. Save final deliverables under outputs/ with clear, dated names (e.g. outputs/2026-05-24_daily_brief.md) so they are easy to find. Finish with a concise summary of exact actions and the exact paths of files you created.",
     ] if part])
     user = "\n".join([
         "Work card: " + task.get("title", ""),
