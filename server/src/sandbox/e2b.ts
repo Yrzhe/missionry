@@ -24,7 +24,10 @@ type E2BCreateResponse = {
 
 const E2B_API_BASE = "https://api.e2b.app";
 const DEFAULT_ENVD_PORT = 49983;
-export const WORKSPACE_ROOT = "/workspace";
+// Must live under the sandbox user's home — E2B sandboxes run envd as the
+// non-root "user", which cannot create top-level dirs like /workspace
+// (mkdir -p /workspace → "Permission denied", failing every runner launch).
+export const WORKSPACE_ROOT = "/home/user/workspace";
 const DEFAULT_E2B_CENTS_PER_MIN = 0.45;
 const memorySandboxes = new Map<string, MemorySandbox>();
 

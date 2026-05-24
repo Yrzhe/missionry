@@ -663,9 +663,10 @@ async function availableGlobalAgentRoster(missionId: string) {
 function normalizeWorkspacePath(value: string | undefined | null, fallback = "") {
   const raw = value?.trim() || fallback;
   if (raw.length > 256 || /[\u0000-\u001f\u007f]/.test(raw) || raw.includes("\\")) throw new Error("error.path.relative_invalid");
-  if (!raw || raw === "." || raw === "/workspace") return "";
-  const relative = raw.startsWith("/workspace/") ? raw.slice("/workspace/".length) : raw.replace(/^\/+/, "");
-  if (relative.startsWith("/") || relative === "workspace") throw new Error("error.path.relative_invalid");
+  if (!raw || raw === "." || raw === e2b.WORKSPACE_ROOT) return "";
+  const wsPrefix = `${e2b.WORKSPACE_ROOT}/`;
+  const relative = raw.startsWith(wsPrefix) ? raw.slice(wsPrefix.length) : raw.replace(/^\/+/, "");
+  if (relative.startsWith("/")) throw new Error("error.path.relative_invalid");
   return assertSafeRelativePath(relative);
 }
 
@@ -1087,7 +1088,8 @@ async function launchE2bWorkCardRunner(input: {
   // create-time envVars, so re-supplying them here ensures the runner process
   // always sees up-to-date mission variables regardless of sandbox age.
   const missionEnvVars = mission.stateJson.environment?.vars ?? {};
-  await e2b.runCommand(ref, `chmod +x /workspace/${runDir}/runner.py && MISSIONRY_RUN_DIR=/workspace/${runDir} nohup python3 /workspace/${runDir}/runner.py > /workspace/${runDir}/runner.log 2>&1 < /dev/null &`, { envs: missionEnvVars });
+  const runDirAbs = `${e2b.WORKSPACE_ROOT}/${runDir}`;
+  await e2b.runCommand(ref, `chmod +x ${runDirAbs}/runner.py && MISSIONRY_RUN_DIR=${runDirAbs} MISSIONRY_WORKSPACE_ROOT=${e2b.WORKSPACE_ROOT} nohup python3 ${runDirAbs}/runner.py > ${runDirAbs}/runner.log 2>&1 < /dev/null &`, { envs: missionEnvVars });
   return ref;
 }
 
@@ -2448,7 +2450,9 @@ async function adminAgentsOverview() {
     .where(eq(workCards.status, "running")) as Array<{ agentId: string; missionId: string; title: string }>;
   const memberships = await db
     .select({ agentId: agentInstances.agentId, missionId: agentInstances.missionId })
-    .from(agentInstances) as Array<{ agentId: string; missionId: string }>;
+    .from(agentInstances)
+    .innerJoin(missions, eq(missions.id, agentInstances.missionId))
+    .where(ne(missions.status, "deleted")) as Array<{ agentId: string; missionId: string }>;
   return agentRows.map((a) => ({
     id: a.id,
     name: a.displayName,

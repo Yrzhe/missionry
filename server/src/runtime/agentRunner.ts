@@ -7,7 +7,7 @@ import traceback
 import urllib.error
 import urllib.request
 
-ROOT = "/workspace"
+ROOT = os.environ.get("MISSIONRY_WORKSPACE_ROOT") or "/home/user/workspace"
 # Per-work-card run dir (injected by the server) so concurrent runners in the
 # same shared sandbox don't overwrite each other's task/status/log.
 MISSIONRY_DIR = os.environ.get("MISSIONRY_RUN_DIR") or os.path.join(ROOT, ".missionry")
@@ -21,7 +21,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "run_command",
-            "description": "Run a shell command in /workspace.",
+            "description": "Run a shell command in the workspace (your current working directory). Use relative paths.",
             "parameters": {
                 "type": "object",
                 "properties": {"command": {"type": "string"}},
@@ -33,7 +33,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "write_file",
-            "description": "Write a UTF-8 text file under /workspace.",
+            "description": "Write a UTF-8 text file under the workspace (relative path).",
             "parameters": {
                 "type": "object",
                 "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
@@ -45,7 +45,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "read_file",
-            "description": "Read a UTF-8 text file under /workspace.",
+            "description": "Read a UTF-8 text file under the workspace (relative path).",
             "parameters": {
                 "type": "object",
                 "properties": {"path": {"type": "string"}},
@@ -57,7 +57,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "list_files",
-            "description": "List files under /workspace.",
+            "description": "List files under the workspace (relative path).",
             "parameters": {
                 "type": "object",
                 "properties": {"path": {"type": "string"}},
@@ -222,7 +222,7 @@ def main():
         task.get("soul") or "You are a Missionry execution agent.",
         task.get("identity") or "",
         task.get("memory") or "",
-        "You are running inside the E2B VM at /workspace. Use local tools to run commands and read/write files. Produce real artifacts when useful. Finish with a concise summary of exact actions and files changed.",
+        "You are running inside an E2B VM; your tools operate in the workspace directory (use relative paths). Use local tools to run commands and read/write files. Produce real artifacts when useful. Finish with a concise summary of exact actions and files changed.",
     ] if part])
     user = "\n".join([
         "Work card: " + task.get("title", ""),
