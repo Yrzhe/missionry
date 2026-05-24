@@ -50,6 +50,13 @@
       "when": 1779460303467,
       "tag": "0006_noisy_susan_delgado",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1779619937383,
+      "tag": "0007_yellow_the_stranger",
+      "breakpoints": true
     }
   ]
 }

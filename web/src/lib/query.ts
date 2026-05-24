@@ -25,6 +25,7 @@ export const queryKeys = {
   skill: (skillId: string) => ['skills', skillId] as const,
   conciergeChat: ['concierge', 'chat'] as const,
   conciergeOverview: ['concierge', 'overview'] as const,
+  schedules: ['schedules'] as const,
   workCardMessages: (missionId: string, cardId: string) => ['missions', missionId, 'work-cards', cardId, 'messages'] as const,
   missionArtifacts: (missionId: string) => ['missions', missionId, 'artifacts'] as const,
   missionArtifactFile: (missionId: string, path: string) => ['missions', missionId, 'artifact', path] as const,

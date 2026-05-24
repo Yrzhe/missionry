@@ -390,3 +390,26 @@ export type MissionArtifact = {
   cardTitle: string;
   completedAt?: string;
 };
+
+export type Schedule = {
+  id: string;
+  scope: 'agent' | 'mission' | 'workspace';
+  missionId?: string;
+  agentInstanceId?: string;
+  title: string;
+  prompt: string;
+  intervalMinutes: number;
+  nextRunAt: string;
+  lastRunAt?: string;
+  enabled: boolean;
+  createdAt: string;
+};
+
+export type CreateScheduleInput = {
+  scope: 'agent' | 'mission' | 'workspace';
+  missionId?: string;
+  agentInstanceId?: string;
+  title: string;
+  prompt: string;
+  intervalMinutes: number;
+};
