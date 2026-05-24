@@ -772,9 +772,97 @@ function FileBrowser({ missionId, expanded = false }: { missionId: string; expan
   );
 }
 
+type ArtifactNode = { name: string; path: string; type: 'dir' | 'file'; size?: number; children: ArtifactNode[] };
+
+function buildArtifactTree(items: MissionArtifact[]): ArtifactNode[] {
+  const root: ArtifactNode = { name: '', path: '', type: 'dir', children: [] };
+  for (const item of items) {
+    const segs = item.path.split('/').filter(Boolean);
+    let node = root;
+    segs.forEach((seg, i) => {
+      const isFile = i === segs.length - 1;
+      const path = segs.slice(0, i + 1).join('/');
+      let child = node.children.find((c) => c.name === seg && (c.type === 'file') === isFile);
+      if (!child) {
+        child = { name: seg, path, type: isFile ? 'file' : 'dir', size: isFile ? item.size : undefined, children: [] };
+        node.children.push(child);
+      }
+      node = child;
+    });
+  }
+  const sortRec = (n: ArtifactNode) => {
+    n.children.sort((a, b) => (a.type !== b.type ? (a.type === 'dir' ? -1 : 1) : a.name.localeCompare(b.name)));
+    n.children.forEach(sortRec);
+  };
+  sortRec(root);
+  return root.children;
+}
+
+// Minimal CSV parser (handles quoted fields + escaped quotes).
+function parseCsv(text: string): string[][] {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let field = '';
+  let inQuotes = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inQuotes) {
+      if (c === '"') { if (text[i + 1] === '"') { field += '"'; i++; } else inQuotes = false; }
+      else field += c;
+    } else if (c === '"') inQuotes = true;
+    else if (c === ',') { row.push(field); field = ''; }
+    else if (c === '\n') { row.push(field); rows.push(row); row = []; field = ''; }
+    else if (c !== '\r') field += c;
+  }
+  if (field.length || row.length) { row.push(field); rows.push(row); }
+  return rows.filter((r) => r.length > 1 || (r[0] ?? '').trim() !== '');
+}
+
+function ArtifactContent({ path, content }: { path: string; content: string }) {
+  if (path.endsWith('.md')) return <Markdown value={content} />;
+  if (path.endsWith('.csv')) {
+    const rows = parseCsv(content);
+    if (rows.length) {
+      const [head, ...body] = rows;
+      return (
+        <div className="mp-csv-wrap">
+          <table className="mp-csv">
+            <thead><tr>{head.map((h, i) => <th key={i}>{h}</th>)}</tr></thead>
+            <tbody>{body.map((r, ri) => <tr key={ri}>{head.map((_, ci) => <td key={ci}>{r[ci] ?? ''}</td>)}</tr>)}</tbody>
+          </table>
+        </div>
+      );
+    }
+  }
+  return <pre>{content}</pre>;
+}
+
+function ArtifactTreeRows({ nodes, depth, expanded, onToggle, onOpen, selectedPath }: { nodes: ArtifactNode[]; depth: number; expanded: Set<string>; onToggle: (p: string) => void; onOpen: (p: string) => void; selectedPath: string | null }) {
+  return (
+    <>
+      {nodes.map((node) => node.type === 'dir' ? (
+        <div key={node.path}>
+          <button className="mp-tree-row mp-tree-dir" style={{ paddingLeft: 8 + depth * 16 }} onClick={() => onToggle(node.path)}>
+            <span className="mp-tree-caret">{expanded.has(node.path) ? '▾' : '▸'}</span>
+            <span>📁</span><strong className="mp-tree-name">{node.name}</strong>
+          </button>
+          {expanded.has(node.path) ? <ArtifactTreeRows nodes={node.children} depth={depth + 1} expanded={expanded} onToggle={onToggle} onOpen={onOpen} selectedPath={selectedPath} /> : null}
+        </div>
+      ) : (
+        <button key={node.path} className={`mp-tree-row mp-tree-file ${selectedPath === node.path ? 'active' : ''}`} style={{ paddingLeft: 8 + depth * 16 }} onClick={() => onOpen(node.path)}>
+          <span className="mp-tree-caret" />
+          <span>📄</span><span className="mp-tree-name">{node.name}</span>
+          <span className="mp-muted mp-tree-size">{node.size ? `${Math.round(node.size / 1024)} KB` : ''}</span>
+        </button>
+      ))}
+    </>
+  );
+}
+
 function ArtifactsBrowser({ missionId }: { missionId: string }) {
   const { t } = useTranslation();
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const artifactsQuery = useQuery({
     queryKey: queryKeys.missionArtifacts(missionId),
     queryFn: () => api.missionArtifacts(missionId),
@@ -787,61 +875,50 @@ function ArtifactsBrowser({ missionId }: { missionId: string }) {
     retry: 1,
   });
   const items = artifactsQuery.data?.items ?? [];
+  const tree = useMemo(() => buildArtifactTree(items), [items]);
   const selected = contentQuery.data;
-  // Group artifacts into a folder hierarchy by their directory path.
-  const groups = useMemo(() => {
-    const byDir = new Map<string, MissionArtifact[]>();
-    for (const item of items) {
-      const segments = item.path.split('/').filter(Boolean);
-      const dir = segments.slice(0, -1).join('/');
-      if (!byDir.has(dir)) byDir.set(dir, []);
-      byDir.get(dir)!.push(item);
+  // Folders expanded by default (artifact sets are small; saves a click).
+  useEffect(() => {
+    if (!items.length) return;
+    const dirs = new Set<string>();
+    for (const it of items) {
+      const segs = it.path.split('/').filter(Boolean);
+      for (let i = 1; i < segs.length; i++) dirs.add(segs.slice(0, i).join('/'));
     }
-    return Array.from(byDir.entries())
-      .sort((a, b) => a[0].localeCompare(b[0]))
-      .map(([dir, files]) => ({ dir, files: files.sort((a, b) => a.path.localeCompare(b.path)) }));
-  }, [items]);
+    setExpanded(dirs);
+  }, [items.length]);
+  function toggle(path: string) {
+    setExpanded((prev) => { const next = new Set(prev); if (next.has(path)) next.delete(path); else next.add(path); return next; });
+  }
   return (
-    <div className="mp-file-browser expanded">
-      <div className="mp-section-title">
-        <div>
-          <strong>{t('workroom.artifacts.title')}</strong>
-          <p className="mp-muted">{t('workroom.artifacts.subtitle')}</p>
-        </div>
-      </div>
-      <div className="mp-file-grid">
-        <div className="mp-file-list">
-          {artifactsQuery.isLoading ? <div className="mp-muted">{t('common.loading')}</div> : null}
-          {items.length ? groups.map((group) => (
-            <div className="mp-artifact-group" key={group.dir || '__root__'}>
-              {group.dir ? <div className="mp-artifact-folder">📁 {group.dir}/</div> : null}
-              {group.files.map((item) => {
-                const name = item.path.split('/').filter(Boolean).at(-1) ?? item.path;
-                return (
-                  <button className={`mp-file-row ${selectedPath === item.path ? 'active' : ''} ${group.dir ? 'nested' : ''}`} key={item.path} onClick={() => setSelectedPath(item.path)}>
-                    <span>{t('workroom.files.kind.file')}</span>
-                    <strong>{name}</strong>
-                    <span className="mp-muted">{item.size ? `${Math.round(item.size / 1024)} KB` : ''}</span>
-                  </button>
-                );
-              })}
+    <div className="mp-artifacts-browser">
+      {selectedPath === null ? (
+        <>
+          <div className="mp-section-title">
+            <div>
+              <strong>{t('workroom.artifacts.title')}</strong>
+              <p className="mp-muted">{t('workroom.artifacts.subtitle')}</p>
             </div>
-          )) : !artifactsQuery.isLoading ? <div className="mp-empty"><p>{t('workroom.artifacts.empty')}</p></div> : null}
+          </div>
+          <div className="mp-tree">
+            {artifactsQuery.isLoading ? <div className="mp-muted">{t('common.loading')}</div> : null}
+            {items.length ? <ArtifactTreeRows nodes={tree} depth={0} expanded={expanded} onToggle={toggle} onOpen={setSelectedPath} selectedPath={selectedPath} />
+              : !artifactsQuery.isLoading ? <div className="mp-empty"><p>{t('workroom.artifacts.empty')}</p></div> : null}
+          </div>
+        </>
+      ) : (
+        <div className="mp-file-viewer">
+          <div className="mp-viewer-head">
+            <div className="mp-label mp-wrap">{selectedPath}</div>
+            <button className="mp-button" onClick={() => setSelectedPath(null)}>{t('common.close')}</button>
+          </div>
+          <div className="mp-viewer-body">
+            {selected?.found ? <ArtifactContent path={selected.path} content={selected.content} />
+              : selected && !selected.found ? <p className="mp-muted">{t('workroom.artifacts.empty')}</p>
+              : <p className="mp-muted">{t('common.loading')}</p>}
+          </div>
         </div>
-        <div className="mp-file-preview">
-          {selectedPath !== null ? (
-            <div className="mp-preview-head">
-              <div className="mp-label">{selectedPath}</div>
-              <button className="mp-preview-close" title={t('common.close')} onClick={() => setSelectedPath(null)}>×</button>
-            </div>
-          ) : null}
-          {selected?.found ? (
-            selected.path.endsWith('.md') ? <Markdown value={selected.content} /> : <pre>{selected.content}</pre>
-          ) : selected && !selected.found ? <p className="mp-muted">{t('workroom.artifacts.empty')}</p>
-            : contentQuery.isLoading ? <p className="mp-muted">{t('common.loading')}</p>
-            : <p className="mp-muted">{t('workroom.artifacts.select')}</p>}
-        </div>
-      </div>
+      )}
     </div>
   );
 }
