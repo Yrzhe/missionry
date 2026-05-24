@@ -28,7 +28,7 @@ img, svg { max-width: 100%; }
 
 .mp-shell {
   display: grid;
-  grid-template-columns: 248px minmax(0, 1fr);
+  grid-template-columns: 208px minmax(0, 1fr);
   min-height: 100vh;
   background: var(--paper);
 }
@@ -178,8 +178,8 @@ img, svg { max-width: 100%; }
 
 .mp-content {
   width: 100%;
-  padding: 28px 40px;
-  max-width: 1360px;
+  padding: 24px 32px;
+  max-width: 1680px;
   margin: 0 auto;
 }
 
@@ -758,7 +758,7 @@ strong { font-weight: 650; }
 
 .mp-workroom-layout {
   display: grid;
-  grid-template-columns: minmax(0, 1.15fr) minmax(320px, .85fr);
+  grid-template-columns: minmax(0, 1.5fr) minmax(300px, .72fr);
   gap: 14px;
   align-items: stretch;
   flex: 1 1 auto;
@@ -1268,11 +1268,69 @@ strong { font-weight: 650; }
 .mp-artifacts-stack {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 12px;
   min-height: 0;
-  overflow: auto;
-  padding-right: 4px;
+  height: 100%;
+  overflow: hidden;
 }
+.mp-artifacts-stack > .mp-artifacts-live { flex: none; }
+
+/* Finder-style artifact tree + full-panel file viewer. */
+.mp-artifacts-browser {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+  flex: 1 1 auto;
+}
+.mp-tree {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  overflow-y: auto;
+  min-height: 0;
+  flex: 1 1 auto;
+}
+.mp-tree-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  text-align: left;
+  padding: 6px 8px;
+  border: 0;
+  background: transparent;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--ink);
+}
+.mp-tree-row:hover { background: var(--panel); }
+.mp-tree-file.active { background: #efe7d6; }
+.mp-tree-caret { width: 12px; flex: none; color: var(--muted); font-size: 10px; }
+.mp-tree-name { overflow-wrap: anywhere; }
+.mp-tree-size { margin-left: auto; font-size: 11px; white-space: nowrap; }
+.mp-file-viewer {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+  flex: 1 1 auto;
+}
+.mp-viewer-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 8px;
+}
+.mp-viewer-body { overflow: auto; min-height: 0; flex: 1 1 auto; }
+.mp-viewer-body pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12.5px; margin: 0; }
+.mp-csv-wrap { overflow-x: auto; }
+.mp-csv { border-collapse: collapse; font-size: 12.5px; width: 100%; }
+.mp-csv th, .mp-csv td { border: 1px solid var(--line); padding: 5px 8px; text-align: left; vertical-align: top; }
+.mp-csv th { background: var(--panel); font-weight: 600; position: sticky; top: 0; }
 .mp-artifacts-live > summary {
   cursor: pointer;
   font-weight: 600;

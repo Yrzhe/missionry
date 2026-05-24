@@ -49,6 +49,15 @@ uses date-based entries.
   (`web/.../ConfirmModal.tsx`, `missions-home/MissionsHome.tsx`, `workroom/Workroom.tsx`)
 
 ### Changed
+- **Artifacts (产物) browser redesigned (Finder-style).** Files now render as a
+  one-row-per-item list with **expandable folders** (nested tree, folders open by
+  default). Clicking a file opens a **full-panel viewer** that takes over the
+  artifacts area (scrollable) with a close button — instead of the old cramped
+  right-hand split. **CSV files now render as a table**; `.md` as Markdown; others
+  as wrapped text. (`web/.../workroom/Workroom.tsx`, `web/src/index.css`)
+- **Roomier layout.** Narrower left sidebar (248→208px), wider content
+  (max 1360→1680px, tighter padding), and the plan/activity/artifacts column gets
+  more width vs. chat. (`web/src/index.css`)
 - **Mission (Workroom) page is now fixed-height.** The whole page no longer
   scrolls; the summary stays pinned and the two-column area (plan/activity/
   artifacts + team chat) fills the viewport with each panel scrolling internally
