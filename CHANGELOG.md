@@ -55,9 +55,10 @@ uses date-based entries.
   artifacts area (scrollable) with a close button — instead of the old cramped
   right-hand split. **CSV files now render as a table**; `.md` as Markdown; others
   as wrapped text. (`web/.../workroom/Workroom.tsx`, `web/src/index.css`)
-- **Roomier layout.** Narrower left sidebar (248→208px), wider content
-  (max 1360→1680px, tighter padding), and the plan/activity/artifacts column gets
-  more width vs. chat. (`web/src/index.css`)
+- **Roomier layout.** Narrower left sidebar (248→180px), wider content
+  (max 1360→1680px, tighter padding). The chat composer text/placeholder are
+  smaller and the input is wider (slimmer send button + a bit more chat column).
+  (`web/src/index.css`)
 - **Mission (Workroom) page is now fixed-height.** The whole page no longer
   scrolls; the summary stays pinned and the two-column area (plan/activity/
   artifacts + team chat) fills the viewport with each panel scrolling internally

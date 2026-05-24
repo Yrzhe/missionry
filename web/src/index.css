@@ -28,7 +28,7 @@ img, svg { max-width: 100%; }
 
 .mp-shell {
   display: grid;
-  grid-template-columns: 208px minmax(0, 1fr);
+  grid-template-columns: 180px minmax(0, 1fr);
   min-height: 100vh;
   background: var(--paper);
 }
@@ -758,7 +758,7 @@ strong { font-weight: 650; }
 
 .mp-workroom-layout {
   display: grid;
-  grid-template-columns: minmax(0, 1.5fr) minmax(300px, .72fr);
+  grid-template-columns: minmax(0, 1.4fr) minmax(340px, .82fr);
   gap: 14px;
   align-items: stretch;
   flex: 1 1 auto;
@@ -1603,7 +1603,7 @@ strong { font-weight: 650; }
   border-top: 1px solid var(--line);
   padding-top: 10px;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(76px, auto);
+  grid-template-columns: minmax(0, 1fr) minmax(60px, auto);
   gap: 8px;
   align-items: end;
 }
@@ -1621,7 +1621,10 @@ strong { font-weight: 650; }
   resize: vertical;
   background: white;
   min-width: 0;
+  font-size: 13px;
 }
+/* Smaller placeholder so the long hint doesn't crowd the input. */
+.mp-chat-composer textarea::placeholder { font-size: 12px; }
 
 .mp-mention-menu {
   position: absolute;
