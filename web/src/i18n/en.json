@@ -145,6 +145,7 @@
   "workroom.metric.autoPause": "auto-pauses when idle",
   "workroom.guardrail": "Cost guardrail",
   "workroom.details.show": "Details",
+  "workroom.details.title": "Mission settings",
   "workroom.details.hide": "Hide settings",
   "workroom.details.objective": "Objective",
   "workroom.details.danger": "Danger zone",

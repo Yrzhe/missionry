@@ -349,6 +349,7 @@ export function Workroom() {
       meta={<span className="mp-muted">{t('workroom.meta')}</span>}
       actions={<button className="mp-button" onClick={() => setModalOpen(true)}>{t('workroom.newCard')}</button>}
     >
+      <div className="mp-workroom-page">
       <section className="mp-card mp-mission-summary">
         <div className="mp-mission-summary-main">
           <div>
@@ -365,7 +366,12 @@ export function Workroom() {
       </section>
 
       {detailsOpen ? (
-        <section className="mp-card mp-mission-details">
+        <div className="mp-modal-backdrop" role="presentation" onClick={() => setDetailsOpen(false)}>
+        <div className="mp-modal mp-details-modal" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
+          <div className="mp-section-title">
+            <strong>{t('workroom.details.title')}</strong>
+            <button type="button" className="mp-button" onClick={() => setDetailsOpen(false)}>{t('common.close')}</button>
+          </div>
           <div className="mp-detail-grid">
             <div>
               <div className="mp-label">{t('workroom.details.objective')}</div>
@@ -430,7 +436,8 @@ export function Workroom() {
               </div>
             </div>
           </div>
-        </section>
+        </div>
+        </div>
       ) : null}
 
       <AgentRequestsPanel
@@ -493,6 +500,7 @@ export function Workroom() {
           </form>
           {chatError ? <div className="mp-denied">{chatError}</div> : null}
         </section>
+      </div>
       </div>
 
       {modalOpen ? (

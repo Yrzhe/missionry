@@ -28,6 +28,13 @@ uses date-based entries.
   (`web/.../ConfirmModal.tsx`, `missions-home/MissionsHome.tsx`, `workroom/Workroom.tsx`)
 
 ### Changed
+- **Mission (Workroom) page is now fixed-height.** The whole page no longer
+  scrolls; the summary stays pinned and the two-column area (plan/activity/
+  artifacts + team chat) fills the viewport with each panel scrolling internally
+  (work-card list and chat scroll, not the page). The「展开设置」details panel
+  (objective, budget guardrail, environment, agent sandboxes, danger zone) is now
+  a **modal** instead of an inline expander that grew the page. Mobile stacks with
+  natural heights. (`web/.../workroom/Workroom.tsx`, `web/src/index.css`)
 - **Concierge (管家) page polish.** Removed the duplicate「管家」heading inside the
   chat (the page header already labels it) — now a slim one-line capability hint.
   The page fills the viewport height: chat column scrolls internally with the

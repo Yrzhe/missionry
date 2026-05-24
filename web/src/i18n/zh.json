@@ -145,6 +145,7 @@
   "workroom.metric.autoPause": "空闲时自动暂停",
   "workroom.guardrail": "成本护栏",
   "workroom.details.show": "展开设置",
+  "workroom.details.title": "任务设置",
   "workroom.details.hide": "收起设置",
   "workroom.details.objective": "目标",
   "workroom.details.danger": "危险操作",
