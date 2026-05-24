@@ -1335,16 +1335,18 @@ function parseProposedCards(text: string): ProposedCard[] {
   })).filter((card: ProposedCard) => card.title);
 }
 
-function resolveProposedAssignee(card: ProposedCard, rows: MissionAgentInstanceRow[], fallbackInstanceId: string) {
+// Returns the matched instance id, or null when the suggestion names nobody in
+// the mission (caller decides: spread across members, else the leader).
+function resolveProposedAssignee(card: ProposedCard, rows: MissionAgentInstanceRow[]): string | null {
   const wanted = card.suggestedAssignee?.toLowerCase();
-  if (!wanted) return fallbackInstanceId;
+  if (!wanted) return null;
   const match = rows.find((row) =>
     row.instance.id.toLowerCase() === wanted ||
     row.agent.id.toLowerCase() === wanted ||
     row.agent.displayName.toLowerCase() === wanted ||
     (row.instance.displayAlias ?? "").toLowerCase() === wanted
   );
-  return match?.instance.id ?? fallbackInstanceId;
+  return match?.instance.id ?? null;
 }
 
 async function decomposeMission(missionId: string) {
@@ -1398,12 +1400,26 @@ async function decomposeMission(missionId: string) {
     proposed = deterministicProposedCards(mission.objective);
   }
   const rows = await loadMissionAgentRows(missionId);
+  // Normal delegation: a card goes to the member the plan names; if the plan
+  // names nobody we have in the mission, spread across members round-robin so the
+  // work doesn't all pile on the leader. Only when there are NO members does the
+  // leader take it himself.
+  const memberInstanceIds = rows.filter((row) => row.instance.id !== leader.instance.id).map((row) => row.instance.id);
+  let roundRobin = 0;
+  const pickAssignee = (card: ProposedCard) => {
+    const matched = resolveProposedAssignee(card, rows);
+    if (matched) return matched;
+    if (memberInstanceIds.length === 0) return leader.instance.id;
+    const picked = memberInstanceIds[roundRobin % memberInstanceIds.length];
+    roundRobin += 1;
+    return picked;
+  };
   const cards = [];
   for (const card of proposed) {
     cards.push(await createQueuedWorkCard(missionId, {
       title: card.title,
       description: card.description,
-      assigneeInstanceId: resolveProposedAssignee(card, rows, leader.instance.id),
+      assigneeInstanceId: pickAssignee(card),
       sandboxAffinity: card.sandboxAffinity ?? { tier: "mission", reason: "proposed execution" },
       status: "queued",
       activate: false,
@@ -2664,12 +2680,22 @@ async function runAdminConcierge(userId: string, history: Array<{ authorType: st
       },
     }),
     create_mission: tool({
-      description: "Create a mission and assign a leader agent (it then auto-plans). leaderAgentId is optional; omit to use the default leader.",
-      inputSchema: z.object({ title: z.string(), objective: z.string(), leaderAgentId: z.string().optional() }),
+      description: "Create a mission with a leader AND its executor team, then it auto-plans and the leader delegates each card to the best-fit member. ALWAYS pass memberAgentIds = the specialist agents that should do the work (e.g. the ones you just created), so the leader has a team to delegate to instead of doing everything itself; omit only for a genuinely solo mission. leaderAgentId is optional (defaults to a generic leader).",
+      inputSchema: z.object({ title: z.string(), objective: z.string(), leaderAgentId: z.string().optional(), memberAgentIds: z.array(z.string()).optional() }),
       execute: async (input) => {
         const created = await createMission({ title: input.title, objective: input.objective, ownerType: "user", leaderAgentId: input.leaderAgentId, requestUserId: userId });
+        // Attach the executor team BEFORE decompose so the leader can delegate the
+        // cards across them; otherwise the roster is just the leader and every card
+        // falls back to the leader (resolveProposedAssignee can't match members).
+        const members: string[] = [];
+        for (const rawId of input.memberAgentIds ?? []) {
+          const agentId = assertSafeId(rawId, "agent_id");
+          if (agentId === created.leaderAgentId) continue;
+          try { await attachInstance(created.missionId, agentId, "member"); members.push(agentId); }
+          catch (error) { console.error("ADMIN ADD MEMBER ERROR:", agentId, error); }
+        }
         waitUntil(decomposeMission(created.missionId).catch((error) => console.error("ADMIN DECOMPOSE ERROR:", error)));
-        return { missionId: created.missionId, leaderAgentId: created.leaderAgentId };
+        return { missionId: created.missionId, leaderAgentId: created.leaderAgentId, members };
       },
     }),
   };

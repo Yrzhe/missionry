@@ -7,6 +7,16 @@ uses date-based entries.
 ## [Unreleased]
 
 ### Fixed
+- **Decompose piled every card on the leader instead of delegating.** When a
+  mission was created with a leader but no members yet in the roster (e.g. the
+  concierge created the specialist agents globally, then `create_mission` attached
+  only the leader before decompose), every card's suggested assignee failed to
+  match and silently fell back to the leader — so one agent got all the work and
+  the rest sat idle. Two fixes: (1) the concierge `create_mission` now takes
+  `memberAgentIds` and attaches the executor team **before** decompose; (2)
+  decompose now spreads unmatched cards across members round-robin and only falls
+  back to the leader when there are genuinely no members (leader does it himself).
+  (`server/src/index.ts`)
 - **All work cards failed at startup (`mkdir: /workspace: Permission denied`).**
   `WORKSPACE_ROOT` was `/workspace`, a root-owned top-level dir the sandbox's
   non-root `user` cannot create — so every runner launch died immediately (the
