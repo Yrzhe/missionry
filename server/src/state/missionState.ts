@@ -42,6 +42,8 @@ export type MissionStateJson = {
   };
   issues: { total: number; completed: number; open: number; reopened: number; addedAfterDone: number };
   costGuardrailStatus: "ok" | "near_daily_cap" | "daily_cap_hit" | "global_cap_hit";
+  /** Per-mission team-collaboration rules (AGENTS.md-style), layered on the owner's global rules. */
+  rules?: string;
 };
 
 export type MissionRow = {

@@ -222,7 +222,9 @@ def main():
         task.get("soul") or "You are a Missionry execution agent.",
         task.get("identity") or "",
         task.get("memory") or "",
+        task.get("rules") or "",
         "You are running inside an E2B VM; your tools operate in the workspace directory (use relative paths). Use local tools to run commands and read/write files. Produce real artifacts when useful. Save final deliverables under outputs/ with clear, dated names (e.g. outputs/2026-05-24_daily_brief.md) so they are easy to find. Finish with a concise summary of exact actions and the exact paths of files you created.",
+        "Self-review before finishing: judge your own output honestly against the task and the team rules above. If it is NOT good enough yet or needs another pass (more research, a rewrite, or review by others per the rules), end your summary with a final line exactly: FOLLOWUP: <one concrete sentence on what still needs doing>. Omit that line only when the work is genuinely complete.",
     ] if part])
     user = "\n".join([
         "Work card: " + task.get("title", ""),
@@ -253,7 +255,12 @@ def main():
             messages.append({"role": "tool", "tool_call_id": call["id"], "content": json.dumps(output)})
     else:
         summary = "Stopped after maximum tool steps."
-    result = {"cardId": task.get("cardId"), "missionId": task.get("missionId"), "instanceId": task.get("instanceId"), "agentId": task.get("agentId"), "status": "done", "summary": summary, "files": workspace_files()}
+    follow_up = ""
+    for line in (summary or "").splitlines():
+        s = line.strip()
+        if s.upper().startswith("FOLLOWUP:"):
+            follow_up = s[len("FOLLOWUP:"):].strip()
+    result = {"cardId": task.get("cardId"), "missionId": task.get("missionId"), "instanceId": task.get("instanceId"), "agentId": task.get("agentId"), "status": "done", "summary": summary, "files": workspace_files(), "followUp": follow_up}
     write_json(RESULT_PATH, result)
     status("done", MAX_STEPS, "posted result")
     post_callback(task, result)

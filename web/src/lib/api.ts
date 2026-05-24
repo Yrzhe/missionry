@@ -354,6 +354,10 @@ export const api = {
   updateAgentMemory: (agentId: string, content: string) => request<{ memory: string }>(`/agents/${agentId}/memory`, { method: 'PUT', body: JSON.stringify({ content }) }),
   memoryProfile: () => request<{ profile: string }>(`/me/memory-profile`),
   updateMemoryProfile: (content: string) => request<{ profile: string }>(`/me/memory-profile`, { method: 'PUT', body: JSON.stringify({ content }) }),
+  myRules: () => request<{ rules: string }>(`/me/rules`),
+  updateMyRules: (content: string) => request<{ rules: string }>(`/me/rules`, { method: 'PUT', body: JSON.stringify({ content }) }),
+  missionRules: (missionId: string) => request<{ rules: string }>(`/missions/${missionId}/rules`),
+  updateMissionRules: (missionId: string, content: string) => request<{ rules: string }>(`/missions/${missionId}/rules`, { method: 'PUT', body: JSON.stringify({ content }) }),
   workCardMessages: async (missionId: string, cardId: string) => {
     const response = await request<{ items: RawMissionChatMessage[] }>(`/missions/${missionId}/work-cards/${cardId}/messages`);
     return { items: response.items.map(normalizeMissionChatMessage) };

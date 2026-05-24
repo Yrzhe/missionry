@@ -7,6 +7,17 @@ uses date-based entries.
 ## [Unreleased]
 
 ### Added
+- **Team collaboration rules (AGENTS.md-style) + self-feedback follow-up cards.**
+  Two rule layers an agent must follow: **global** rules (`users/{id}/RULES.md`,
+  edited in Settings → Account) that apply to every mission, and **per-mission**
+  rules (`mission.stateJson.rules`, edited in the mission's details modal). Both
+  are injected into the chat agent and the in-sandbox runner. Plus **self-review**:
+  the runner judges its own output against the task + rules and, if it's not good
+  enough, ends with `FOLLOWUP: …` → the server auto-creates a queued follow-up card
+  for the same agent. So you can write a rule like "outputs must be reviewed by
+  other agents until no major issues" and the loop keeps going on its own.
+  (`server/src/agents/files.ts`, `server/src/index.ts`,
+  `server/src/runtime/agentRunner.ts`, `web/.../RulesEditor.tsx`)
 - **Live artifact snapshots.** Files no longer have to wait for a work card to
   complete to show up in 产物. The ~5-min tick now snapshots each running
   sandbox's workspace to R2 **incrementally** (only files whose size changed since

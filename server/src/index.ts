@@ -6,7 +6,7 @@ import { generateText, streamText, stepCountIs, tool } from "ai";
 import { z } from "zod";
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
-import { ensureAgentFiles, ensureAgentInstanceFiles, loadAgentBootFiles, loadSkill, buildMemoryContext, appendAgentMemory, appendUserProfile, loadAgentMemory, loadUserProfile, setAgentMemory, setUserProfile, setAgentSoulIdentity, writeAgentSkill, equipSkills, writeLibrarySkill, loadLibrarySkill, unequipSkill } from "./agents/files";
+import { ensureAgentFiles, ensureAgentInstanceFiles, loadAgentBootFiles, loadSkill, buildMemoryContext, appendAgentMemory, appendUserProfile, loadAgentMemory, loadUserProfile, setAgentMemory, setUserProfile, loadUserRules, setUserRules, setAgentSoulIdentity, writeAgentSkill, equipSkills, writeLibrarySkill, loadLibrarySkill, unequipSkill } from "./agents/files";
 import { esSystemAuthUser } from "./__generated__/sys_schema";
 import {
   adminChatMessages,
@@ -1145,6 +1145,7 @@ async function launchE2bWorkCardRunner(input: {
     identity: boot?.identity ?? "",
     objective: mission.objective,
     memory: await buildMemoryContext(input.agent.id, mission.ownerUserId ?? undefined).catch(() => ""),
+    rules: await buildRulesContext(input.card.missionId).catch(() => ""),
     openaiApiKey: apiKey,
     callbackUrl: runnerCallbackUrl(),
     heartbeatUrl: runnerHeartbeatUrl(),
@@ -1543,6 +1544,19 @@ async function persistMissionChatMessage(input: {
   return message;
 }
 
+// The owner's global rules + this mission's rules, as an AGENTS.md-style block
+// injected into every agent's context (chat + runner) so they follow them.
+async function buildRulesContext(missionId: string): Promise<string> {
+  const mission = await getMission(missionId).catch(() => null);
+  if (!mission) return "";
+  const globalRules = (await loadUserRules(mission.ownerUserId ?? "system").catch(() => "")).trim();
+  const missionRules = (mission.stateJson.rules ?? "").trim();
+  const parts: string[] = [];
+  if (globalRules) parts.push(`## Global team rules (apply to every mission)\n${globalRules}`);
+  if (missionRules) parts.push(`## This mission's rules\n${missionRules}`);
+  return parts.length ? `# Team collaboration rules — you MUST follow these:\n\n${parts.join("\n\n")}` : "";
+}
+
 async function resolveMissionLeader(mission: Awaited<ReturnType<typeof getMission>>) {
   const [explicitLeader] = await db.select().from(missionLeader).where(eq(missionLeader.missionId, mission.id)).limit(1);
   const leaderInstanceId = explicitLeader?.leaderInstanceId ?? (mission.ownerType === "agent" ? mission.ownerInstanceId : null);
@@ -1620,12 +1634,14 @@ async function runAgentToolLoop(input: {
   const leader = await resolveMissionLeader(await getMissionWithRuntimeSandboxes(input.missionId)).catch(() => null);
   const isLeader = leader?.instance.id === input.instanceId;
   const globalRoster = isLeader ? (await availableGlobalAgentRoster(input.missionId).catch(() => [])).join("\n") : "";
+  const rulesBlock = await buildRulesContext(input.missionId).catch(() => "");
   const result = streamText({
     model: openai(modelName),
     stopWhen: stepCountIs(8),
     system: [
       boot?.soul ?? input.systemFallback,
       boot?.identity ?? "",
+      rulesBlock,
       boot ? `Equipped skills: ${JSON.stringify(boot.skillsIndex)}` : "",
       agentRoster ? `Mission agent instances available for assignment:\n${agentRoster}` : "",
       isLeader
@@ -2113,6 +2129,7 @@ app.post("/api/webhooks/work-card-callback", async (c) => {
     status?: "done" | "failed";
     summary?: string;
     files?: Array<{ path?: string; size?: number }>;
+    followUp?: string;
     trace?: string;
   };
   const cardId = body.cardId ? assertSafeId(body.cardId, "work_card_id") : "";
@@ -2178,6 +2195,23 @@ app.post("/api/webhooks/work-card-callback", async (c) => {
   // Copy produced files to R2 from the sandbox that actually ran the card (private
   // vs shared), not always the shared one.
   if (files.length > 0 && billRef) waitUntil(persistMissionArtifacts(billRef, card.missionId, files));
+  // Self-feedback: the agent judged its own work needs another pass → queue a
+  // follow-up card so the loop continues (review / rework per the team rules).
+  const followUp = String(body.followUp ?? "").trim().slice(0, 2000);
+  if (nextStatus === "done" && followUp && card.assigneeInstanceId) {
+    waitUntil((async () => {
+      try {
+        await createQueuedWorkCard(card.missionId, {
+          title: `跟进：${card.title}`.slice(0, 120),
+          description: `${followUp}\n\n(自评后续 · 源任务卡 ${card.id})`,
+          assigneeInstanceId: card.assigneeInstanceId!,
+          sandboxAffinity,
+          status: "queued",
+          activate: true,
+        });
+      } catch (error) { console.error("FOLLOWUP CARD ERROR:", card.id, error); }
+    })());
+  }
   waitUntil(Promise.resolve(dequeueNextForAgent(agent.id)));
   return c.json({ status: "completed", cardId, workCardStatus: nextStatus });
 });
@@ -2527,6 +2561,36 @@ app.put("/api/public/me/memory-profile", async (c) => {
   const userId = currentUserProfile(c).userId;
   await setUserProfile(userId, String(body.content ?? ""));
   return c.json({ status: "completed", profile: await loadUserProfile(userId) });
+});
+
+// Global team-collaboration rules (an AGENTS.md-style rulebook for all agents).
+app.get("/api/public/me/rules", async (c) => {
+  return c.json({ rules: await loadUserRules(currentUserProfile(c).userId) });
+});
+app.put("/api/public/me/rules", async (c) => {
+  const body = (await c.req.json().catch(() => ({}))) as { content?: string };
+  const userId = currentUserProfile(c).userId;
+  await setUserRules(userId, String(body.content ?? ""));
+  return c.json({ status: "completed", rules: await loadUserRules(userId) });
+});
+
+// Per-mission team-collaboration rules.
+app.get("/api/public/missions/:id/rules", async (c) => {
+  const denied = await assertMissionAccess(c);
+  if (denied) return denied;
+  const mission = await getMission(assertSafeId(c.req.param("id"), "mission_id"));
+  return c.json({ rules: mission.stateJson.rules ?? "" });
+});
+app.put("/api/public/missions/:id/rules", async (c) => {
+  const denied = await assertMissionAccess(c);
+  if (denied) return denied;
+  const missionId = assertSafeId(c.req.param("id"), "mission_id");
+  const body = (await c.req.json().catch(() => ({}))) as { content?: string };
+  const updated = await updateMission(missionId, (mission) => {
+    mission.stateJson.rules = String(body.content ?? "").slice(0, 6000);
+    return mission;
+  });
+  return c.json({ status: "completed", rules: updated.stateJson.rules ?? "" });
 });
 
 // ── Admin / Concierge agent (control-plane only) ──────────────────────────────
