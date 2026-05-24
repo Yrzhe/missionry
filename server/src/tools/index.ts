@@ -533,7 +533,7 @@ export function missionryToolKit(ctx: ToolContext) {
           const repoPath = `repos/${directory}`;
           const cloneUrl = await repoUrlForClone(input.repoUrl);
           const result = await e2b.runCommand(ref, `mkdir -p repos && if [ -d ${shellQuote(repoPath + "/.git")} ]; then git -C ${shellQuote(repoPath)} fetch --all --prune; else git clone --depth 1 ${shellQuote(cloneUrl)} ${shellQuote(repoPath)}; fi`);
-          return { repoPath: `/workspace/${repoPath}`, stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode, sandboxId: ref.sandboxId, capabilityStatus: "real" as const };
+          return { repoPath: `${e2b.WORKSPACE_ROOT}/${repoPath}`, stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode, sandboxId: ref.sandboxId, capabilityStatus: "real" as const };
         }),
     }),
     git_commit: tool({

@@ -7,6 +7,19 @@ uses date-based entries.
 ## [Unreleased]
 
 ### Fixed
+- **All work cards failed at startup (`mkdir: /workspace: Permission denied`).**
+  `WORKSPACE_ROOT` was `/workspace`, a root-owned top-level dir the sandbox's
+  non-root `user` cannot create — so every runner launch died immediately (the
+  `source: not found` lines were just harmless dash login-shell noise). Moved the
+  workspace to `/home/user/workspace` (always writable by `user`) and routed every
+  reference through the constant: runner launch, `git_clone`, artifact path
+  normalization, and the in-sandbox runner (`ROOT` now reads
+  `MISSIONRY_WORKSPACE_ROOT`, passed at launch). (`server/src/sandbox/e2b.ts`,
+  `server/src/index.ts`, `server/src/tools/index.ts`, `server/src/runtime/agentRunner.ts`)
+- **Concierge overview counted deleted missions.** An agent showed "in N missions"
+  including missions already deleted (the "demo agent · 在 5 个 mission" with zero
+  live missions). `adminAgentsOverview` now joins missions and excludes
+  `status = deleted`. (`server/src/index.ts`)
 - **Delete Mission "no reaction" root cause.** Both delete handlers gated on the
   native `window.confirm()`, which browsers/extensions can silently suppress
   ("don't allow this page to create more dialogs") — making delete do nothing with
