@@ -38,7 +38,41 @@ img, svg { max-width: 100%; }
   border-right: 1px solid var(--line);
   padding: 18px 14px;
   min-width: 0;
+  display: flex;
+  flex-direction: column;
 }
+
+/* Collapse toggle pinned to the bottom of the sidebar. */
+.mp-sidebar-toggle {
+  margin-top: auto;
+  align-self: flex-end;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--line);
+  background: var(--card);
+  color: var(--muted);
+  border-radius: 7px;
+  padding: 6px 10px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.mp-sidebar-toggle:hover { border-color: var(--line-strong); color: var(--ink); }
+.mp-sidebar-toggle-icon { font-weight: 700; }
+
+/* ── Collapsed (icon-only rail) ─────────────────────────────────────────────── */
+.mp-shell.collapsed { grid-template-columns: 60px minmax(0, 1fr); }
+.mp-shell.collapsed .mp-sidebar { padding: 18px 8px; }
+.mp-shell.collapsed .mp-brand { justify-content: center; padding: 6px 0 14px; }
+.mp-shell.collapsed .mp-brand > div:last-child { display: none; }
+.mp-shell.collapsed .mp-nav-item { justify-content: center; padding-left: 0; padding-right: 0; }
+.mp-shell.collapsed .mp-nav-label,
+.mp-shell.collapsed .mp-nav-count { display: none; }
+.mp-shell.collapsed .mp-nav-group > summary span:last-child { display: none; }
+.mp-shell.collapsed .mp-nav-group > summary { justify-content: center; }
+.mp-shell.collapsed .mp-nav-subitems { display: none; }
+.mp-shell.collapsed .mp-sidebar-toggle { align-self: center; padding: 6px 8px; }
+.mp-shell.collapsed .mp-sidebar-toggle-label { display: none; }
 
 .mp-brand {
   display: flex;

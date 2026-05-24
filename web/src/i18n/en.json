@@ -502,6 +502,8 @@
   "concierge.noCards": "no cards",
   "nav.skills": "Skills",
   "nav.schedules": "Schedules",
+  "nav.collapse": "Collapse sidebar",
+  "nav.expand": "Expand sidebar",
   "schedules.title": "Schedules",
   "schedules.subtitle": "Let the team run on a cadence",
   "schedules.heading": "Schedules",
