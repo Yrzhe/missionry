@@ -23,6 +23,7 @@ import {
   missionLeader,
   missionSpend,
   missions,
+  sandboxRuntime,
   usersProfile,
   whitelistEntries,
   workCards,
@@ -43,6 +44,7 @@ import {
   recordAudit,
   reserveMissionSandboxSlot,
   reservePrivateSandboxSlot,
+  sandboxRefFromRuntime,
   updateMission,
   type MissionStateJson,
   type SandboxRef,
@@ -839,6 +841,75 @@ async function persistMissionArtifacts(
       console.error("ARTIFACT PERSIST ERROR:", file.path, error);
     }
   }
+}
+
+// ── Live artifact snapshots ───────────────────────────────────────────────────
+// Card completion persists files, but files made during chat / between cards would
+// otherwise live only in the sandbox (and vanish on prune). The tick snapshots
+// each running sandbox's workspace to R2 incrementally (only changed files, by
+// size) and records a manifest so they show up in 产物.
+type ArtifactManifestEntry = { path: string; size?: number; snapshotAt?: string };
+const artifactManifestKey = (missionId: string) => `missions/${missionId}/artifacts/__manifest__.json`;
+
+async function loadArtifactManifest(missionId: string): Promise<ArtifactManifestEntry[]> {
+  const obj = await storage.from(buckets.missionryWorkspaces).get(artifactManifestKey(missionId));
+  if (!obj) return [];
+  try { const parsed = JSON.parse(await storageObjectText(obj)) as { files?: ArtifactManifestEntry[] }; return Array.isArray(parsed.files) ? parsed.files : []; }
+  catch { return []; }
+}
+async function saveArtifactManifest(missionId: string, files: ArtifactManifestEntry[]) {
+  await storage.from(buckets.missionryWorkspaces).put(artifactManifestKey(missionId), textBytes(JSON.stringify({ files })));
+}
+
+async function snapshotSandboxArtifacts(ref: SandboxRef | null | undefined, missionId: string, budget: number): Promise<number> {
+  if (!ref || ref.state !== "running" || budget <= 0) return 0;
+  let listing = "";
+  try {
+    const out = await e2b.runCommand(ref, "find . -type f -not -path '*/.*' -not -path './.missionry/*' -printf '%s\\t%p\\n' 2>/dev/null | head -300");
+    listing = out.stdout;
+  } catch { return 0; }
+  const current: Array<{ path: string; size: number }> = [];
+  for (const line of listing.split("\n")) {
+    const tab = line.indexOf("\t");
+    if (tab < 0) continue;
+    const size = Number(line.slice(0, tab));
+    let p = line.slice(tab + 1).trim();
+    if (p.startsWith("./")) p = p.slice(2);
+    if (p && p !== "__manifest__.json") current.push({ path: p, size: Number.isFinite(size) ? size : 0 });
+  }
+  const known = new Map((await loadArtifactManifest(missionId)).map((e) => [e.path, e.size ?? -1]));
+  const bucket = storage.from(buckets.missionryWorkspaces);
+  let saved = 0;
+  for (const f of current) {
+    if (saved >= budget) break;
+    if (known.get(f.path) === f.size) continue; // unchanged since last snapshot
+    if (f.size > ARTIFACT_MAX_BYTES) continue;
+    try {
+      const { content } = await e2b.readWorkspaceFile(ref, f.path, ARTIFACT_MAX_BYTES);
+      if (content) { await bucket.put(artifactR2Key(missionId, f.path), textBytes(content)); known.set(f.path, f.size); saved += 1; }
+    } catch (error) { console.error("ARTIFACT SNAPSHOT FILE ERROR:", f.path, error); }
+  }
+  if (saved > 0) {
+    const ts = now();
+    // Manifest = current files we have actually stored (size present in `known`).
+    const merged = current.filter((f) => known.has(f.path)).map((f) => ({ path: f.path, size: known.get(f.path)!, snapshotAt: ts }));
+    await saveArtifactManifest(missionId, merged);
+  }
+  return saved;
+}
+
+export async function snapshotRunningSandboxes() {
+  const rows = await db.select().from(sandboxRuntime).where(eq(sandboxRuntime.state, "running")).limit(10) as Array<typeof sandboxRuntime.$inferSelect>;
+  let saved = 0;
+  let budget = 80; // bound subrequests/R2 writes per tick across all sandboxes
+  for (const row of rows) {
+    if (budget <= 0) break;
+    try {
+      const n = await snapshotSandboxArtifacts(sandboxRefFromRuntime(row), row.missionId, budget);
+      saved += n; budget -= n;
+    } catch (error) { console.error("ARTIFACT SNAPSHOT SANDBOX ERROR:", row.sandboxId, error); }
+  }
+  return { sandboxes: rows.length, saved };
 }
 
 function normalizeMentionHandle(value: string) {
@@ -3491,6 +3562,11 @@ app.get("/api/public/missions/:id/artifacts", async (c) => {
       byPath.set(file.path, { path: file.path, size: file.size, cardId: card.id, cardTitle: card.title, completedAt: cost.runner?.completedAt });
     }
   }
+  // Merge live snapshots (files captured between/outside card completions).
+  for (const f of await loadArtifactManifest(missionId)) {
+    if (!f.path || f.path === "__manifest__.json" || byPath.has(f.path)) continue;
+    byPath.set(f.path, { path: f.path, size: f.size, cardId: "snapshot", cardTitle: "Live snapshot", completedAt: f.snapshotAt });
+  }
   const items = Array.from(byPath.values()).sort((a, b) => (b.completedAt ?? "").localeCompare(a.completedAt ?? ""));
   return c.json({ items });
 });
@@ -3908,8 +3984,10 @@ app.post("/api/public/internal/tick", async (c) => {
   const stuck = await reapStuckWorkCards();
   const scheduled = await runDueSchedules();
   const dequeued = await tryDequeue();
+  // Snapshot running sandboxes BEFORE pausing idle ones, so live files reach 产物.
+  const snapshots = await snapshotRunningSandboxes();
   const idle = await reapIdleSandboxes();
-  return c.json({ status: "ticked", stuck, scheduled, dequeued, idle });
+  return c.json({ status: "ticked", stuck, scheduled, dequeued, snapshots, idle });
 });
 
 app.post("/api/public/audit-events/:auditEventId/rollback", async (c) => {
