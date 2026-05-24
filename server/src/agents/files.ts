@@ -302,6 +302,22 @@ export async function setUserProfile(userId: string, content: string) {
   await storage.from(buckets.missionryWorkspaces).put(userProfileKey(userId), textBytes(trimmed));
 }
 
+// RULES.md = the owner's GLOBAL team-collaboration rules (an AGENTS.md-style
+// rulebook) every agent must follow, across all missions. Per-mission rules live
+// in mission.stateJson.rules and are layered on top.
+const USER_RULES_CAP = 6000;
+function userRulesKey(userId: string) {
+  const safe = String(userId || "system").replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 80) || "system";
+  return `users/${safe}/RULES.md`;
+}
+export async function loadUserRules(userId: string): Promise<string> {
+  return (await getText(userRulesKey(userId)))?.trim() ?? "";
+}
+export async function setUserRules(userId: string, content: string) {
+  const trimmed = (content ?? "").slice(0, USER_RULES_CAP);
+  await storage.from(buckets.missionryWorkspaces).put(userRulesKey(userId), textBytes(trimmed));
+}
+
 // Build the injectable memory block for an agent's system context.
 export async function buildMemoryContext(agentId: string, userId?: string): Promise<string> {
   const [mem, user] = await Promise.all([

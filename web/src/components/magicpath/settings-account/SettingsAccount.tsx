@@ -2,10 +2,11 @@ import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useQueryClient } from '@tanstack/react-query';
 import { useShallow } from 'zustand/react/shallow';
-import { changePassword, updateMe } from '../../../lib/api';
+import { changePassword, updateMe, api } from '../../../lib/api';
 import { queryKeys } from '../../../lib/query';
 import { useAppStore } from '../../../lib/store';
 import { Shell } from '../Shell';
+import { RulesEditor } from '../RulesEditor';
 import type { FormEvent } from 'react';
 
 export function SettingsAccount() {
@@ -90,6 +91,13 @@ export function SettingsAccount() {
         <label>{t('account.confirmNewPassword')}<input value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} type="password" minLength={8} autoComplete="new-password" /></label>
         <button className="mp-button dark" disabled={!canSubmit}>{isSubmitting ? t('common.saving') : t('account.submit')}</button>
       </form>
+      <RulesEditor
+        title={t('rules.globalTitle')}
+        hint={t('rules.globalHint')}
+        queryKey={['me', 'rules']}
+        load={api.myRules}
+        save={api.updateMyRules}
+      />
       {message ? <div className="mp-success">{message}</div> : null}
       {error ? <div className="mp-denied">{error}</div> : null}
     </Shell>

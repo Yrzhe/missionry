@@ -664,6 +664,21 @@ strong { font-weight: 650; }
 
 .mp-confirm-modal { width: min(420px, 100%); gap: 10px; }
 .mp-details-modal { width: min(880px, 100%); }
+
+.mp-rules-editor { display: grid; gap: 10px; }
+.mp-rules-textarea {
+  width: 100%;
+  min-height: 160px;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  padding: 10px 12px;
+  resize: vertical;
+  background: white;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.mp-rules-actions { display: flex; align-items: center; justify-content: flex-end; gap: 10px; }
 .mp-confirm-actions {
   display: flex;
   justify-content: flex-end;

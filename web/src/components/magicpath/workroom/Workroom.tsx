@@ -23,6 +23,7 @@ import type { FormEvent } from 'react';
 import { Shell } from '../Shell';
 import { Markdown } from '../Markdown';
 import { ConfirmModal } from '../ConfirmModal';
+import { RulesEditor } from '../RulesEditor';
 
 type NewWorkCardForm = {
   title: string;
@@ -408,6 +409,13 @@ export function Workroom() {
                 </div>
               </div>
               <MissionEnvironmentPanel missionId={workroom.mission.id} />
+              <RulesEditor
+                title={t('rules.missionTitle')}
+                hint={t('rules.missionHint')}
+                queryKey={['missions', workroom.mission.id, 'rules']}
+                load={() => api.missionRules(workroom.mission.id)}
+                save={(content) => api.updateMissionRules(workroom.mission.id, content)}
+              />
             </div>
             <div className="mp-agent-sandbox-compact">
               <div className="mp-section-title">
