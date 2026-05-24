@@ -115,6 +115,17 @@ img, svg { max-width: 100%; }
   min-width: 0;
 }
 
+.mp-nav-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  flex: none;
+  color: var(--muted);
+}
+.mp-nav-item.active .mp-nav-mark { color: var(--paper); }
+.mp-nav-svg { display: block; }
+
 .mp-nav-item span:nth-child(2),
 .mp-nav-group summary span:nth-child(2) {
   min-width: 0;
@@ -1308,6 +1319,14 @@ strong { font-weight: 650; }
   overflow: hidden;
 }
 .mp-artifacts-stack > .mp-artifacts-live { flex: none; }
+/* When the live sandbox files section is expanded, scroll the whole stack and let
+   the persisted tree take a bounded height — otherwise the tall live browser
+   overflows the clipped flex column (overlapping titles, no scroll). */
+.mp-artifacts-stack:has(.mp-artifacts-live[open]) { overflow-y: auto; }
+.mp-artifacts-stack:has(.mp-artifacts-live[open]) .mp-artifacts-browser { flex: 0 0 auto; }
+.mp-artifacts-stack:has(.mp-artifacts-live[open]) .mp-tree { flex: none; max-height: 38vh; }
+.mp-artifacts-live[open] { display: flex; flex-direction: column; gap: 6px; }
+.mp-artifacts-live[open] .mp-file-browser.expanded .mp-file-grid { min-height: 0; }
 
 /* Finder-style artifact tree + full-panel file viewer. */
 .mp-artifacts-browser {

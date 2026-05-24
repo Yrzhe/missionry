@@ -49,6 +49,9 @@ uses date-based entries.
   (`web/.../ConfirmModal.tsx`, `missions-home/MissionsHome.tsx`, `workroom/Workroom.tsx`)
 
 ### Added
+- **Proper sidebar icons.** Replaced the placeholder character marks (✦ ● ◐ …)
+  with inline line icons (no new dependency); they center cleanly in the collapsed
+  rail. (`web/.../NavIcon.tsx`, `web/.../Shell.tsx`)
 - **Collapsible sidebar.** A toggle at the bottom of the sidebar collapses it to an
   icon-only rail (brand → just the logo, nav → just the marks, with hover
   tooltips); the toggle flips between « (collapse) and » (expand). State persists
@@ -61,6 +64,9 @@ uses date-based entries.
   artifacts area (scrollable) with a close button — instead of the old cramped
   right-hand split. **CSV files now render as a table**; `.md` as Markdown; others
   as wrapped text. (`web/.../workroom/Workroom.tsx`, `web/src/index.css`)
+- **Live sandbox files section scroll fix.** Expanding 「实时沙箱文件」 below the
+  saved artifacts no longer overlaps the title or clips — the whole artifacts area
+  scrolls when it's open (`:has()`), with the saved tree bounded. (`web/src/index.css`)
 - **Roomier layout.** Narrower left sidebar (248→180px), wider content
   (max 1360→1680px, tighter padding). The chat composer text/placeholder are
   smaller and the input is wider (slimmer send button + a bit more chat column).
