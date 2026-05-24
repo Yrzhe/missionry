@@ -502,6 +502,8 @@
   "concierge.noCards": "暂无卡片",
   "nav.skills": "技能库",
   "nav.schedules": "定时任务",
+  "nav.collapse": "收起侧边栏",
+  "nav.expand": "展开侧边栏",
   "schedules.title": "定时任务",
   "schedules.subtitle": "让团队自己定时跑",
   "schedules.heading": "定时任务",

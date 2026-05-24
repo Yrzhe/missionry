@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { NavLink, useLocation } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useQuery } from '@tanstack/react-query';
@@ -27,15 +28,23 @@ export function Shell({ title, meta, actions, children }: ShellProps) {
   const location = useLocation();
   const settingsOpen = location.pathname.startsWith('/settings');
   const displayName = session?.name?.trim() || session?.email;
+  const [collapsed, setCollapsed] = useState(() => localStorage.getItem('missionry.sidebar') === 'collapsed');
 
   const toggleLanguage = () => {
     const next = i18n.language === 'zh' ? 'en' : 'zh';
     localStorage.setItem('missionry.locale', next);
     void i18n.changeLanguage(next);
   };
+  const toggleSidebar = () => {
+    setCollapsed((current) => {
+      const next = !current;
+      localStorage.setItem('missionry.sidebar', next ? 'collapsed' : 'expanded');
+      return next;
+    });
+  };
 
   return (
-    <div className="mp-shell">
+    <div className={`mp-shell ${collapsed ? 'collapsed' : ''}`}>
       <aside className="mp-sidebar">
         <div className="mp-brand">
           <div className="mp-logo"><MissionryMark /></div>
@@ -62,6 +71,16 @@ export function Shell({ title, meta, actions, children }: ShellProps) {
           </details>
           {session?.role === 'admin' ? <NavItem to="/admin" label={t('nav.admin')} mark="◆" count={adminMissionsQuery.data?.items.length || undefined} /> : null}
         </nav>
+        <button
+          type="button"
+          className="mp-sidebar-toggle"
+          onClick={toggleSidebar}
+          title={collapsed ? t('nav.expand') : t('nav.collapse')}
+          aria-label={collapsed ? t('nav.expand') : t('nav.collapse')}
+        >
+          <span className="mp-sidebar-toggle-icon">{collapsed ? '»' : '«'}</span>
+          <span className="mp-sidebar-toggle-label">{t('nav.collapse')}</span>
+        </button>
       </aside>
       <main className="mp-main">
         <header className="mp-topbar">
@@ -81,9 +100,9 @@ export function Shell({ title, meta, actions, children }: ShellProps) {
 
 function NavItem({ to, label, mark, count }: { to: string; label: string; mark: string; count?: number }) {
   return (
-    <NavLink to={to} className={({ isActive }) => `mp-nav-item ${isActive ? 'active' : ''}`}>
-      <span>{mark}</span>
-      <span>{label}</span>
+    <NavLink to={to} title={label} className={({ isActive }) => `mp-nav-item ${isActive ? 'active' : ''}`}>
+      <span className="mp-nav-mark">{mark}</span>
+      <span className="mp-nav-label">{label}</span>
       {count !== undefined ? <span className="mp-nav-count">{count}</span> : null}
     </NavLink>
   );

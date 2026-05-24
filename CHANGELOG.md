@@ -48,6 +48,12 @@ uses date-based entries.
   native dialogs) and surfaced delete failures inside the dialog.
   (`web/.../ConfirmModal.tsx`, `missions-home/MissionsHome.tsx`, `workroom/Workroom.tsx`)
 
+### Added
+- **Collapsible sidebar.** A toggle at the bottom of the sidebar collapses it to an
+  icon-only rail (brand → just the logo, nav → just the marks, with hover
+  tooltips); the toggle flips between « (collapse) and » (expand). State persists
+  in `localStorage`. (`web/.../Shell.tsx`, `web/src/index.css`)
+
 ### Changed
 - **Artifacts (产物) browser redesigned (Finder-style).** Files now render as a
   one-row-per-item list with **expandable folders** (nested tree, folders open by
