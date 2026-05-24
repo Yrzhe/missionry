@@ -7,6 +7,13 @@ uses date-based entries.
 ## [Unreleased]
 
 ### Added
+- **Live artifact snapshots.** Files no longer have to wait for a work card to
+  complete to show up in 产物. The ~5-min tick now snapshots each running
+  sandbox's workspace to R2 **incrementally** (only files whose size changed since
+  the last snapshot, capped per tick to bound R2 writes / subrequests), recorded
+  in a per-mission manifest that the artifacts list merges in. So files created
+  during chat or between cards — and the latest state before a sandbox is paused —
+  are saved durably. (`server/src/index.ts`)
 - **Agents report real file paths (no more hallucinated locations).** New
   `list_artifacts` (real saved paths from completed cards) and
   `list_workspace_files` (live sandbox) tools. The chat agent now calls them before
