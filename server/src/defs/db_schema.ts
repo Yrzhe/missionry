@@ -100,6 +100,25 @@ export const adminChatMessages = sqliteTable("admin_chat_messages", {
   createdAt: text("created_at").notNull(),
 });
 
+// Recurring scheduled tasks. The external tick (~5 min) fires any schedule whose
+// nextRunAt has passed: "agent" → a work card for that agent instance; "mission"
+// → a card for the leader to delegate; "workspace" → a concierge pass.
+export const schedules = sqliteTable("schedules", {
+  id: text("id").primaryKey(),
+  scope: text("scope").notNull(), // "agent" | "mission" | "workspace"
+  missionId: text("mission_id"),
+  agentInstanceId: text("agent_instance_id"),
+  title: text("title").notNull(),
+  prompt: text("prompt").notNull(),
+  intervalMinutes: integer("interval_minutes").notNull(),
+  nextRunAt: text("next_run_at").notNull(),
+  lastRunAt: text("last_run_at"),
+  enabled: integer("enabled").notNull().default(1),
+  createdBy: text("created_by"),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+});
+
 export const agentResponseCursors = sqliteTable(
   "agent_response_cursors",
   {

@@ -6,6 +6,17 @@ uses date-based entries.
 
 ## [Unreleased]
 
+### Added
+- **Recurring schedules (定时任务).** A new `schedules` table + a `/schedules` page
+  let the team run on a cadence without manual triggering. Each schedule fires on
+  the existing ~5-min tick: scope `agent` → a work card for that agent instance;
+  `mission` → a card for the leader to delegate; `workspace` → a concierge sweep
+  (e.g. "scan all missions and report"), written back into the concierge chat.
+  Intervals: every 30 min / hourly / 6h / daily (min 5 min). Manage via the page
+  (create / enable-pause / delete) or by telling the concierge (new
+  `create_schedule` / `list_schedules` tools). Migration `0007`. (`db_schema.ts`,
+  `server/src/index.ts`, `web/.../schedules/Schedules.tsx`)
+
 ### Fixed
 - **Decompose piled every card on the leader instead of delegating.** When a
   mission was created with a leader but no members yet in the roster (e.g. the

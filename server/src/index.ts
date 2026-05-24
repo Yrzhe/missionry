@@ -10,6 +10,7 @@ import { ensureAgentFiles, ensureAgentInstanceFiles, loadAgentBootFiles, loadSki
 import { esSystemAuthUser } from "./__generated__/sys_schema";
 import {
   adminChatMessages,
+  schedules,
   agentInstances,
   agents,
   agentResponseCursors,
@@ -2698,6 +2699,32 @@ async function runAdminConcierge(userId: string, history: Array<{ authorType: st
         return { missionId: created.missionId, leaderAgentId: created.leaderAgentId, members };
       },
     }),
+    list_schedules: tool({
+      description: "List recurring scheduled tasks (what runs automatically, and when next).",
+      inputSchema: z.object({}),
+      execute: async () => {
+        const rows = await db.select().from(schedules).orderBy(desc(schedules.createdAt)).limit(50) as Array<typeof schedules.$inferSelect>;
+        return { schedules: rows.map((r) => ({ id: r.id, scope: r.scope, missionId: r.missionId, title: r.title, intervalMinutes: r.intervalMinutes, enabled: r.enabled === 1, nextRunAt: r.nextRunAt })) };
+      },
+    }),
+    create_schedule: tool({
+      description: "Create a recurring task that runs every intervalMinutes (e.g. 30, 60, 1440=daily). scope 'mission' (give missionId) lets the mission leader delegate the work each run — best for a daily content pipeline. scope 'workspace' runs a concierge pass on yourself (e.g. scan all missions and report) — give no mission. scope 'agent' (give missionId + agentInstanceId) runs as one specific agent. prompt = exactly what to do each run.",
+      inputSchema: z.object({ scope: z.enum(["mission", "workspace", "agent"]), missionId: z.string().optional(), agentInstanceId: z.string().optional(), title: z.string(), prompt: z.string(), intervalMinutes: z.number().int().min(5) }),
+      execute: async (input) => {
+        if ((input.scope === "mission" || input.scope === "agent") && !input.missionId) return { created: false, reason: "missionId required for mission/agent scope" };
+        if (input.scope === "agent" && !input.agentInstanceId) return { created: false, reason: "agentInstanceId required for agent scope" };
+        const row = await createScheduleRow({
+          scope: input.scope,
+          missionId: input.missionId ? assertSafeId(input.missionId, "mission_id") : undefined,
+          agentInstanceId: input.agentInstanceId ? assertSafeId(input.agentInstanceId, "instance_id") : undefined,
+          title: input.title,
+          prompt: input.prompt,
+          intervalMinutes: input.intervalMinutes,
+          createdBy: userId,
+        });
+        return { created: true, scheduleId: row.id, nextRunAt: row.nextRunAt };
+      },
+    }),
   };
   try {
     const result = await spendGuardedGenerateText({ userId }, "gpt-5.5", { model: openai("gpt-5.5"), system: ADMIN_SYSTEM, messages, tools, stopWhen: stepCountIs(6) });
@@ -2710,6 +2737,102 @@ async function runAdminConcierge(userId: string, history: Array<{ authorType: st
 app.get("/api/public/concierge/overview", async (c) => {
   currentUserProfile(c);
   return c.json({ agents: await adminAgentsOverview(), missions: await adminMissionsOverview() });
+});
+
+// ── Schedules (recurring tasks) ───────────────────────────────────────────────
+function scheduleJson(row: typeof schedules.$inferSelect) {
+  return {
+    id: row.id,
+    scope: row.scope,
+    missionId: row.missionId ?? undefined,
+    agentInstanceId: row.agentInstanceId ?? undefined,
+    title: row.title,
+    prompt: row.prompt,
+    intervalMinutes: row.intervalMinutes,
+    nextRunAt: row.nextRunAt,
+    lastRunAt: row.lastRunAt ?? undefined,
+    enabled: row.enabled === 1,
+    createdAt: row.createdAt,
+  };
+}
+
+async function createScheduleRow(input: { scope: string; missionId?: string; agentInstanceId?: string; title: string; prompt: string; intervalMinutes: number; createdBy: string }) {
+  const intervalMinutes = Math.max(5, Math.round(input.intervalMinutes));
+  const id = `sch_${crypto.randomUUID().slice(0, 10)}`;
+  const ts = now();
+  const nextRunAt = new Date(Date.now() + intervalMinutes * 60_000).toISOString();
+  await db.insert(schedules).values({
+    id,
+    scope: input.scope,
+    missionId: input.missionId ?? null,
+    agentInstanceId: input.agentInstanceId ?? null,
+    title: input.title,
+    prompt: input.prompt,
+    intervalMinutes,
+    nextRunAt,
+    lastRunAt: null,
+    enabled: 1,
+    createdBy: input.createdBy,
+    createdAt: ts,
+    updatedAt: ts,
+  });
+  const [row] = await db.select().from(schedules).where(eq(schedules.id, id)).limit(1) as Array<typeof schedules.$inferSelect>;
+  return row;
+}
+
+app.get("/api/public/schedules", async (c) => {
+  currentUserProfile(c);
+  const missionId = c.req.query("missionId");
+  const rows = (missionId
+    ? await db.select().from(schedules).where(eq(schedules.missionId, assertSafeId(missionId, "mission_id"))).orderBy(desc(schedules.createdAt))
+    : await db.select().from(schedules).orderBy(desc(schedules.createdAt))) as Array<typeof schedules.$inferSelect>;
+  return c.json({ items: rows.map(scheduleJson) });
+});
+
+app.post("/api/public/schedules", async (c) => {
+  const profile = currentUserProfile(c);
+  const body = (await c.req.json().catch(() => ({}))) as { scope?: string; missionId?: string; agentInstanceId?: string; title?: string; prompt?: string; intervalMinutes?: number };
+  const scope = body.scope === "agent" || body.scope === "mission" || body.scope === "workspace" ? body.scope : null;
+  if (!scope) return jsonError(c, "error.schedule.invalid_scope", 400);
+  if (!body.title?.trim() || !body.prompt?.trim()) return jsonError(c, "error.schedule.missing_fields", 400);
+  if (!body.intervalMinutes || body.intervalMinutes < 5) return jsonError(c, "error.schedule.invalid_interval", 400);
+  if ((scope === "agent" || scope === "mission") && !body.missionId) return jsonError(c, "error.schedule.missing_mission", 400);
+  if (scope === "agent" && !body.agentInstanceId) return jsonError(c, "error.schedule.missing_agent", 400);
+  if (body.missionId) {
+    const denied = await assertMissionAccess(c, body.missionId);
+    if (denied) return denied;
+  }
+  const row = await createScheduleRow({
+    scope,
+    missionId: body.missionId ? assertSafeId(body.missionId, "mission_id") : undefined,
+    agentInstanceId: body.agentInstanceId ? assertSafeId(body.agentInstanceId, "instance_id") : undefined,
+    title: body.title.trim(),
+    prompt: body.prompt.trim(),
+    intervalMinutes: body.intervalMinutes,
+    createdBy: profile.userId,
+  });
+  return c.json(scheduleJson(row));
+});
+
+app.patch("/api/public/schedules/:id", async (c) => {
+  currentUserProfile(c);
+  const id = assertSafeId(c.req.param("id"), "schedule_id");
+  const body = (await c.req.json().catch(() => ({}))) as { enabled?: boolean; intervalMinutes?: number; title?: string; prompt?: string };
+  const patch: Record<string, unknown> = { updatedAt: now() };
+  if (typeof body.enabled === "boolean") patch.enabled = body.enabled ? 1 : 0;
+  if (body.intervalMinutes && body.intervalMinutes >= 5) patch.intervalMinutes = Math.round(body.intervalMinutes);
+  if (body.title?.trim()) patch.title = body.title.trim();
+  if (body.prompt?.trim()) patch.prompt = body.prompt.trim();
+  const updated = await db.update(schedules).set(patch).where(eq(schedules.id, id)).returning() as Array<typeof schedules.$inferSelect>;
+  if (!updated.length) return jsonError(c, "error.schedule.not_found", 404);
+  return c.json(scheduleJson(updated[0]));
+});
+
+app.delete("/api/public/schedules/:id", async (c) => {
+  currentUserProfile(c);
+  const id = assertSafeId(c.req.param("id"), "schedule_id");
+  await db.delete(schedules).where(eq(schedules.id, id));
+  return c.json({ status: "deleted", id });
 });
 
 // ── Team skill library (user-facing CRUD for the /skills page) ─────────────────
@@ -3720,14 +3843,72 @@ app.post("/api/public/internal/reap", async (c) => {
 // cron, a standalone CF Worker, etc.) POSTs here to (1) recover stalled chains by
 // failing stuck cards, (2) start any queued cards nobody triggered, and (3) pause
 // idle sandboxes. Token-gated with the same INTERNAL_REAP_TOKEN secret.
+// Fire one due schedule: create a work card (agent/mission scope) or run a
+// concierge pass (workspace scope). Best-effort; the caller advances nextRunAt.
+async function fireSchedule(s: typeof schedules.$inferSelect) {
+  if (s.scope === "agent" && s.missionId && s.agentInstanceId) {
+    await createQueuedWorkCard(s.missionId, {
+      title: s.title,
+      description: s.prompt,
+      assigneeInstanceId: s.agentInstanceId,
+      sandboxAffinity: { tier: "mission", reason: "scheduled task" },
+      status: "queued",
+      activate: true,
+    });
+    return;
+  }
+  if (s.scope === "mission" && s.missionId) {
+    const leader = await resolveMissionLeader(await getMissionWithRuntimeSandboxes(s.missionId)).catch(() => null);
+    if (!leader) return;
+    await createQueuedWorkCard(s.missionId, {
+      title: s.title,
+      description: s.prompt,
+      assigneeInstanceId: leader.instance.id,
+      sandboxAffinity: { tier: "mission", reason: "scheduled mission run" },
+      status: "queued",
+      activate: true,
+    });
+    return;
+  }
+  if (s.scope === "workspace") {
+    const userId = s.createdBy ?? "system";
+    const reply = await runAdminConcierge(userId, [], s.prompt);
+    const ts = now();
+    await db.insert(adminChatMessages).values([
+      { id: `msg_${crypto.randomUUID().slice(0, 10)}`, userId, authorType: "user", body: `⏰ ${s.title}: ${s.prompt}`, createdAt: ts },
+      { id: `msg_${crypto.randomUUID().slice(0, 10)}`, userId, authorType: "assistant", body: reply, createdAt: now() },
+    ]);
+  }
+}
+
+// Run all due+enabled schedules, then advance each to its next slot. Called from
+// the external tick (EdgeSpark has no cron).
+export async function runDueSchedules() {
+  const nowIso = now();
+  const due = await db
+    .select()
+    .from(schedules)
+    .where(and(eq(schedules.enabled, 1), lte(schedules.nextRunAt, nowIso)))
+    .limit(20) as Array<typeof schedules.$inferSelect>;
+  let fired = 0;
+  for (const s of due) {
+    try { await fireSchedule(s); fired += 1; }
+    catch (error) { console.error("SCHEDULE FIRE ERROR:", s.id, error); }
+    const next = new Date(Date.now() + Math.max(5, s.intervalMinutes) * 60_000).toISOString();
+    await db.update(schedules).set({ lastRunAt: nowIso, nextRunAt: next, updatedAt: now() }).where(eq(schedules.id, s.id));
+  }
+  return { fired, due: due.length };
+}
+
 app.post("/api/public/internal/tick", async (c) => {
   const expected = await secret.get("INTERNAL_REAP_TOKEN");
   if (!expected) return jsonError(c, "error.reap.token_not_configured", 503);
   if (c.req.header("x-internal-token") !== expected) return jsonError(c, "error.internal.unauthorized", 401);
   const stuck = await reapStuckWorkCards();
+  const scheduled = await runDueSchedules();
   const dequeued = await tryDequeue();
   const idle = await reapIdleSandboxes();
-  return c.json({ status: "ticked", stuck, dequeued, idle });
+  return c.json({ status: "ticked", stuck, scheduled, dequeued, idle });
 });
 
 app.post("/api/public/audit-events/:auditEventId/rollback", async (c) => {
