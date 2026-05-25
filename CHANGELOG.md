@@ -6,6 +6,23 @@ uses date-based entries.
 
 ## [Unreleased]
 
+### Fixed
+- **@mentioning the leader produced no real response.** When asked to re-run a
+  finished pipeline, the leader's `assign_work_card` calls failed
+  (`error.work_card.assign_failed`) because the tool refused to touch `done`/
+  `failed` cards — so it burned its 8 step budget on failed assigns + doing the
+  work itself and returned an empty `[NO]` (persisted silent → looked like no
+  reply). Fixes: `assign_work_card` can now (re)assign any card in the mission
+  (re-runs a finished pipeline); the chat step budget is raised 8→16; and the
+  in-sandbox runner's step budget 12→24 so research/writing cards stop hitting
+  "Stopped after maximum tool steps". (`server/src/tools/index.ts`,
+  `server/src/index.ts`, `server/src/runtime/agentRunner.ts`)
+
+### Changed
+- **Clearer 产物 vs 实时沙箱文件 copy.** Explains that saved artifacts auto-sync
+  from the running sandbox every few minutes (+ on completion), and the live
+  section is just an instant peek (and where oversized files appear). (`web/src/i18n`)
+
 ### Added
 - **Team collaboration rules (AGENTS.md-style) + self-feedback follow-up cards.**
   Two rule layers an agent must follow: **global** rules (`users/{id}/RULES.md`,

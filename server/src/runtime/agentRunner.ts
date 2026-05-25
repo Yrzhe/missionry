@@ -14,7 +14,7 @@ MISSIONRY_DIR = os.environ.get("MISSIONRY_RUN_DIR") or os.path.join(ROOT, ".miss
 TASK_PATH = os.path.join(MISSIONRY_DIR, "task.json")
 STATUS_PATH = os.path.join(MISSIONRY_DIR, "status.json")
 RESULT_PATH = os.path.join(MISSIONRY_DIR, "result.json")
-MAX_STEPS = 12
+MAX_STEPS = 24
 
 TOOLS = [
     {
