@@ -468,6 +468,8 @@
   "admin.empty.missions.body": "All Missions appear here once users create work.",
   "workroom.chat.you": "You",
   "workroom.chat.replying": "AI is replying…",
+  "workroom.chat.queued": "Queued",
+  "workroom.chat.queue": "Queue",
   "common.close": "Close",
   "workroom.cardFilter.all": "All",
   "workroom.cardFilter.queued": "Queued",

@@ -468,6 +468,8 @@
   "admin.empty.missions.body": "用户创建任务后，全部任务会显示在这里。",
   "workroom.chat.you": "你",
   "workroom.chat.replying": "AI 回复中…",
+  "workroom.chat.queued": "排队中",
+  "workroom.chat.queue": "排队",
   "common.close": "关闭",
   "workroom.cardFilter.all": "全部",
   "workroom.cardFilter.queued": "排队中",
