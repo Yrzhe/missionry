@@ -74,6 +74,7 @@ export function Workroom() {
   const [error, setError] = useState<string | null>(null);
   const [form, setForm] = useState<NewWorkCardForm>({ title: '', description: '', assigneeInstanceId: '', tier: 'tier0' });
   const [chatBody, setChatBody] = useState('');
+  const [queuedMessages, setQueuedMessages] = useState<string[]>([]);
   const [showSilenced, setShowSilenced] = useState(false);
   const [chatError, setChatError] = useState<string | null>(null);
   const [sandboxAction, setSandboxAction] = useState<string | null>(null);
@@ -176,6 +177,15 @@ export function Workroom() {
         }));
       }
       setChatError(sendError instanceof Error ? sendError.message : t('workroom.chat.sendError'));
+    },
+    // When the in-flight reply finishes, auto-send the next queued message (FIFO).
+    onSettled: () => {
+      setQueuedMessages((queue) => {
+        if (queue.length === 0) return queue;
+        const [next, ...rest] = queue;
+        queueMicrotask(() => sendChatMutation.mutate(next));
+        return rest;
+      });
     },
   });
 
@@ -290,9 +300,16 @@ export function Workroom() {
 
   function submitChat() {
     const body = chatBody.trim();
-    if (!id || !body || sendChatMutation.isPending) return;
+    if (!id || !body) return;
     setChatError(null);
-    sendChatMutation.mutate(body);
+    setChatBody('');
+    // While a reply is being generated, stack messages; they auto-send in order
+    // when the agent is free again (see sendChatMutation.onSettled).
+    if (sendChatMutation.isPending) {
+      setQueuedMessages((queue) => [...queue, body]);
+    } else {
+      sendChatMutation.mutate(body);
+    }
   }
 
   async function sendChat(event: FormEvent<HTMLFormElement>) {
@@ -489,11 +506,18 @@ export function Workroom() {
           <div className="mp-chat-scroll" ref={chatScrollRef}>
             {visibleMessages.length ? visibleMessages.map((message) => <ChatMessage key={message.id} message={message} workroom={workroom} leaderInstanceId={leaderInstanceId} />) : <div className="mp-empty mp-empty-cta"><p>{t('workroom.chat.empty')}</p></div>}
             {sendChatMutation.isPending ? <div className="mp-chat-replying"><span className="mp-typing-dot" /><span className="mp-typing-dot" /><span className="mp-typing-dot" />{t('workroom.chat.replying')}</div> : null}
+            {queuedMessages.map((q, i) => (
+              <div key={`queued_${i}`} className="mp-chat-bubble user mp-chat-queued">
+                <div className="mp-chat-author"><strong>{t('workroom.chat.you')}</strong><span className="mp-chip">{t('workroom.chat.queued')}</span></div>
+                <p className="mp-wrap">{q}</p>
+              </div>
+            ))}
           </div>
           <form className="mp-chat-composer" onSubmit={sendChat}>
             <div className="mp-mention-wrap">
               <textarea
                 value={chatBody}
+                autoComplete="off"
                 onChange={(event) => setChatBody(event.target.value)}
                 onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); submitChat(); } }}
                 placeholder={t('workroom.chat.placeholder')}
@@ -504,7 +528,7 @@ export function Workroom() {
                 </div>
               ) : null}
             </div>
-            <button className="mp-button dark" disabled={sendChatMutation.isPending || !chatBody.trim()}>{sendChatMutation.isPending ? t('common.saving') : t('common.send')}</button>
+            <button className="mp-button dark" disabled={!chatBody.trim()}>{sendChatMutation.isPending ? t('workroom.chat.queue') : t('common.send')}</button>
           </form>
           {chatError ? <div className="mp-denied">{chatError}</div> : null}
         </section>

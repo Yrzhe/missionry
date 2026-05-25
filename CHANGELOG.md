@@ -6,7 +6,16 @@ uses date-based entries.
 
 ## [Unreleased]
 
+### Added
+- **Chat message queue.** While an agent is replying you can keep typing and
+  sending — messages stack as "排队中" and auto-send in order once the agent is
+  free (the composer no longer locks). (`web/.../workroom/Workroom.tsx`)
+
 ### Fixed
+- **Composer didn't clear reliably after send.** It cleared only in the
+  mutation's `onMutate` (after an `await`), leaving a window where the last
+  message lingered in the box. Now cleared synchronously on submit (+
+  `autoComplete="off"`). (`web/.../workroom/Workroom.tsx`)
 - **@mentioning the leader produced no real response.** When asked to re-run a
   finished pipeline, the leader's `assign_work_card` calls failed
   (`error.work_card.assign_failed`) because the tool refused to touch `done`/
