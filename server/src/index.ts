@@ -1637,7 +1637,9 @@ async function runAgentToolLoop(input: {
   const rulesBlock = await buildRulesContext(input.missionId).catch(() => "");
   const result = streamText({
     model: openai(modelName),
-    stopWhen: stepCountIs(8),
+    // Enough room for the leader to delegate several cards AND finish with a real
+    // summary; at 8 it ran out mid-delegation and returned an empty "[NO]".
+    stopWhen: stepCountIs(16),
     system: [
       boot?.soul ?? input.systemFallback,
       boot?.identity ?? "",

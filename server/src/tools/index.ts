@@ -1,7 +1,7 @@
 import { storage, db, secret } from "edgespark";
 import { tool } from "ai";
 import { createOpenAI } from "@ai-sdk/openai";
-import { eq, and, sql } from "drizzle-orm";
+import { eq, and } from "drizzle-orm";
 import { generateText } from "ai";
 import { z } from "zod";
 import { ensureAgentInstanceFiles, loadAgentBootFiles, loadSkill } from "../agents/files";
@@ -341,7 +341,9 @@ export function missionryToolKit(ctx: ToolContext) {
                   sandboxAffinityJson: JSON.stringify(sandboxAffinity),
                   updatedAt: timestamp,
                 })
-                .where(and(eq(workCards.id, workCardId), eq(workCards.missionId, ctx.missionId), sql`${workCards.status} in ('proposed', 'approved', 'queued', 'pending')`))
+                // Any card in the mission can be (re)assigned — including done/failed
+                // ones, so the leader can re-run a finished pipeline on request.
+                .where(and(eq(workCards.id, workCardId), eq(workCards.missionId, ctx.missionId)))
                 .returning(),
               db.insert(auditEvents).values({
                 id: auditId,
